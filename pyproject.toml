@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "detonate"
+version = "0.0.1"
+description = "Detonate untrusted MCP servers in a sandbox and report what they actually do."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "m4vic", email = "sanskarmaheshwari062@gmail.com" }]
+keywords = ["mcp", "security", "sandbox", "ai-security", "scanner", "supply-chain"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3",
+]
+
+# M0 has ZERO runtime dependencies on purpose: the environment check shells out
+# to the docker CLI. Real deps (the `mcp` SDK, docker-py) are added by the exact
+# milestone that first needs them, so early adopters install nothing unused.
+dependencies = []
+
+[project.scripts]
+detonate = "detonate.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/m4vic/detonate"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/detonate"]
