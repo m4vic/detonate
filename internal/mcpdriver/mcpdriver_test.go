@@ -13,6 +13,7 @@ import (
 
 func TestMain(m *testing.M) {
 	mcptest.RunServerIfRequested()
+	mcptest.RunHostileIfRequested()
 	os.Exit(m.Run())
 }
 
