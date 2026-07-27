@@ -18,10 +18,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 
-# M0 has ZERO runtime dependencies on purpose: the environment check shells out
-# to the docker CLI. Real deps (the `mcp` SDK, docker-py) are added by the exact
-# milestone that first needs them, so early adopters install nothing unused.
-dependencies = []
+# Deps are added by the exact milestone that first needs them, so nobody
+# installs something unused. M0 needed none (the Docker check shells out to the
+# CLI). M1 needs two: the official MCP SDK to speak the protocol to a server,
+# and PyYAML to read a SKILL.md's frontmatter. docker-py arrives with M2, when
+# we actually orchestrate containers instead of just checking for them.
+dependencies = [
+    "mcp>=1.2",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]
 detonate = "detonate.cli:main"
@@ -31,3 +39,7 @@ Homepage = "https://github.com/m4vic/detonate"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/detonate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

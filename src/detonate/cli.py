@@ -15,11 +15,15 @@ the output deserves it — but not before there's real output to dress up.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 
 from . import __version__
 from .environment import check_docker
+from .mcp_driver import enumerate_mcp_tools
+from .skill_loader import load_skill
 from .target import Target, mcp_target, skill_target
+from .tool_info import ToolInfo
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,13 +69,26 @@ def resolve_target(args: argparse.Namespace) -> Target:
     return skill_target(args.skill)
 
 
+def _print_tools(tools: list[ToolInfo]) -> None:
+    print(f"[detonate] discovered {len(tools)} tool(s):")
+    for t in tools:
+        print(f"    {t}")
+
+
+async def _enumerate(target: Target) -> list[ToolInfo]:
+    if target.kind == "mcp":
+        return await enumerate_mcp_tools(target.reference)
+    return load_skill(target.reference)  # kind == "skill"
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """Handle `detonate scan`. Returns a process exit code."""
     target = resolve_target(args)
 
-    # Pre-flight: both v1 target kinds EXECUTE, so both require a sandbox.
-    # detonate must never run untrusted code without one — if Docker isn't ready,
-    # we stop here with a clear, actionable message.
+    # Pre-flight: the FINISHED pipeline requires a sandbox before executing
+    # anything untrusted — detonate must never run untrusted code without one.
+    # Docker is checked here so that requirement is enforced from day one, even
+    # though M1 (below) doesn't route through a sandbox yet.
     status = check_docker()
     if not status.ready:
         print(f"[detonate] cannot scan: {status.detail}", file=sys.stderr)
@@ -84,9 +101,25 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     print(f"[detonate] docker: {status.detail}")
     print(f"[detonate] target: {target.label}")
-    # M2-M5 will replace this line with the real sandbox pipeline.
-    print("[detonate] sandbox pipeline not yet implemented (M2+). "
-          "Environment is ready.")
+
+    # M1: enumerate what the target offers. For kind="mcp" this LAUNCHES the
+    # target's process to talk the protocol — that happens WITHOUT the sandbox
+    # yet (M2 is what puts it in a disposable container). Say so loudly: M1 is
+    # only safe to point at servers/skills you already trust, not arbitrary
+    # untrusted input off the internet.
+    if target.kind == "mcp":
+        print("[detonate] WARNING: sandbox not yet implemented (M2). This will "
+              "run the target's command directly on your machine to enumerate "
+              "its tools. Only use --mcp against a server you already trust.")
+    try:
+        tools = asyncio.run(_enumerate(target))
+    except Exception as exc:
+        print(f"[detonate] enumeration failed: {exc}", file=sys.stderr)
+        return 1
+
+    _print_tools(tools)
+    print("[detonate] detonation (sandbox + adversarial probes) not yet "
+          "implemented (M2+). Enumeration complete.")
     return 0
 
 
