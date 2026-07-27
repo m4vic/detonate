@@ -1,4 +1,15 @@
-# Python
+# Go build output
+detonate
+detonate.exe
+*.exe
+*.test
+coverage.out
+
+# Go workspace files (machine-local, never shared)
+go.work
+go.work.sum
+
+# Python — for the archived M0/M1 implementation under archive/
 __pycache__/
 *.py[cod]
 *.egg-info/
