@@ -1,0 +1,257 @@
+package sandbox
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// dockerBinary is resolved from PATH. Shelling out to the CLI rather than
+// importing the Docker SDK keeps detonate a single small binary with no
+// transitive dependency on Docker's own (large) Go module tree. The CLI is
+// also the stable interface: it changes far less than the API client.
+const dockerBinary = "docker"
+
+// Container is a running sandboxed process.
+//
+// It owns a docker subprocess whose stdin/stdout are the container's, so an
+// MCP session can speak JSON-RPC straight through the sandbox boundary. That
+// is the whole trick of M2: the protocol does not know it crossed a container.
+type Container struct {
+	Name   string
+	Policy Policy
+
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr *strings.Builder
+
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// containerArgs turns a Policy into docker CLI flags.
+//
+// Separated from Start so the flags can be asserted in tests without a running
+// daemon. A silently-dropped security flag is exactly the bug that would make
+// detonate unsafe while still appearing to work, so it is worth testing
+// directly rather than inferring from behaviour.
+func containerArgs(name string, p Policy, mounts []Mount, command []string) []string {
+	args := []string{
+		"run",
+		"--rm",           // delete the container when it exits; scans leave no litter
+		"--interactive",  // keep stdin open: this is the MCP pipe
+		"--name", name,
+		"--user", p.User,
+		"--memory", strconv.FormatInt(p.MemoryBytes, 10),
+		"--pids-limit", strconv.FormatInt(p.PidLimit, 10),
+		"--cpu-shares", strconv.FormatInt(p.CPUShares, 10),
+	}
+
+	if !p.NetworkEnabled {
+		args = append(args, "--network", "none")
+	}
+	if p.ReadOnlyRootfs {
+		args = append(args, "--read-only")
+	}
+	for _, c := range dropAllCapabilities {
+		args = append(args, "--cap-drop", c)
+	}
+	for _, o := range securityOptions {
+		args = append(args, "--security-opt", o)
+	}
+	for dest, opts := range tmpfsMounts {
+		args = append(args, "--tmpfs", dest+":"+opts)
+	}
+	for _, m := range mounts {
+		args = append(args, "--volume", m.arg())
+	}
+
+	args = append(args, p.Image)
+	return append(args, command...)
+}
+
+// Mount is a host path exposed inside the sandbox.
+type Mount struct {
+	HostPath      string
+	ContainerPath string
+
+	// ReadOnly should be true for anything we are scanning. A target that can
+	// rewrite its own source during a scan can make the evidence disagree with
+	// the artifact, which defeats the point of having evidence.
+	ReadOnly bool
+}
+
+func (m Mount) arg() string {
+	s := m.HostPath + ":" + m.ContainerPath
+	if m.ReadOnly {
+		s += ":ro"
+	}
+	return s
+}
+
+// Start launches command inside a sandboxed container and returns it running,
+// with stdio wired for the caller to speak a protocol over.
+//
+// The container is NOT waited on here. Callers talk to it, then must call
+// Close, which is what guarantees teardown.
+func Start(ctx context.Context, name string, p Policy, mounts []Mount, command []string) (*Container, error) {
+	ctx, cancel := context.WithTimeout(ctx, p.Timeout)
+
+	cmd := exec.CommandContext(ctx, dockerBinary, containerArgs(name, p, mounts, command)...)
+	// WaitDelay turns context cancellation into a real kill rather than a
+	// polite request. Without it, a container holding its pipes open keeps the
+	// docker client alive past the deadline we promised.
+	cmd.WaitDelay = teardownGrace
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox stdout: %w", err)
+	}
+
+	// Capture stderr rather than discarding it: when a sandbox fails to start,
+	// docker's own message on stderr is almost always the actual reason, and
+	// guessing at it wastes the user's time.
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("starting sandbox: %w", err)
+	}
+
+	c := &Container{
+		Name: name, Policy: p,
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: &stderr,
+		cancel: cancel, done: make(chan struct{}),
+	}
+	go func() {
+		_ = cmd.Wait()
+		close(c.done)
+	}()
+	return c, nil
+}
+
+// Stdin and Stdout are the container's pipes, so a protocol client can be
+// pointed straight at the sandboxed process.
+func (c *Container) Stdin() io.WriteCloser { return c.stdin }
+func (c *Container) Stdout() io.ReadCloser { return c.stdout }
+
+// Stderr returns whatever the container wrote to stderr so far. Useful both
+// for diagnosing a failed start and, later, as evidence.
+func (c *Container) Stderr() string { return c.stderr.String() }
+
+// teardownGrace bounds how long a container gets to die politely before it is
+// killed. Same reasoning as the MCP driver: a scan that returns while its
+// subject still runs has not finished scanning.
+const teardownGrace = 5 * time.Second
+
+// Close tears the sandbox down and does not return until the CONTAINER is
+// gone — not merely until our client process died.
+//
+// That distinction is the whole subtlety of this function, and getting it
+// wrong is invisible in testing that only checks our own process. `docker run`
+// is a client. The container is a child of the DAEMON, so killing the client
+// orphans a still-running container: our code returns, reports success, and
+// untrusted code keeps executing. detonate's own integration test caught
+// exactly that.
+//
+// So teardown is daemon-side. Closing stdin gives a well-behaved server the
+// chance to exit on its own; after that we tell the daemon to stop it, and
+// `rm -f` is the backstop.
+func (c *Container) Close() error {
+	_ = c.stdin.Close()
+
+	select {
+	case <-c.done:
+		// The client exited, but --rm removal is asynchronous on the daemon
+		// side, so still confirm the container is actually gone.
+		return c.ensureGone()
+	case <-time.After(politeGrace):
+	}
+
+	// It ignored the closed pipe. Stop it at the daemon, which is the only
+	// place that can actually end it.
+	if err := c.stop(); err != nil {
+		// Fall through to the kill path rather than returning: a stop that
+		// failed is the case where forced removal matters most.
+		_ = err
+	}
+
+	select {
+	case <-c.done:
+	case <-time.After(teardownGrace):
+	}
+
+	c.cancel() // release our client process and its pipes
+	return c.ensureGone()
+}
+
+// politeGrace is how long a server gets to exit on its own after its stdin
+// closes, before we stop being polite. Short: a cooperative server exits
+// immediately, and an uncooperative one is not going to change its mind.
+const politeGrace = 2 * time.Second
+
+// stop asks the daemon to stop the container, with a short SIGKILL deadline.
+//
+// A fresh context every time, deliberately: by this point the scan's own
+// context is usually cancelled, and inheriting it would make cleanup fail
+// precisely when cleanup is most necessary.
+func (c *Container) stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), teardownGrace)
+	defer cancel()
+
+	// -t 1: one second to handle SIGTERM, then SIGKILL. We are not negotiating
+	// with untrusted code.
+	return exec.CommandContext(ctx, dockerBinary, "stop", "-t", "1", c.Name).Run()
+}
+
+// ensureGone confirms the container no longer exists, forcing removal if it
+// does. This is the function that makes Close's promise true.
+func (c *Container) ensureGone() error {
+	deadline := time.Now().Add(teardownGrace)
+	for {
+		if !c.exists() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), teardownGrace)
+	defer cancel()
+	if err := exec.CommandContext(ctx, dockerBinary, "rm", "-f", c.Name).Run(); err != nil {
+		return fmt.Errorf("sandbox %s survived teardown: %w", c.Name, err)
+	}
+	if c.exists() {
+		return fmt.Errorf("sandbox %s still present after forced removal", c.Name)
+	}
+	return nil
+}
+
+// exists reports whether the daemon still knows about this container.
+func (c *Container) exists() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), teardownGrace)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, dockerBinary,
+		"ps", "-a", "--filter", "name="+c.Name, "--format", "{{.Names}}").Output()
+	if err != nil {
+		// If we cannot ask the daemon, assume the worst rather than reporting
+		// a clean teardown we did not verify.
+		return true
+	}
+	return strings.Contains(string(out), c.Name)
+}
