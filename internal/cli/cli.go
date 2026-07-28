@@ -98,6 +98,12 @@ Exit codes:
 // calls os.Exit itself, so tests can call it directly.
 func (a *App) Run(ctx context.Context, args []string) int {
 	if len(args) == 0 {
+		// A person at a terminal gets the wizard; anything else gets usage.
+		// The terminal check is what stops a CI job that ran `detonate` with
+		// no arguments from blocking forever on a question nobody can answer.
+		if stdinIsTerminal() {
+			return a.runInteractive(ctx)
+		}
 		a.printUsage()
 		return exitOK
 	}
@@ -193,28 +199,39 @@ func (a *App) report(tr *trace.Trace) int {
 		}
 	}
 
+	const rule = "  ----------------------------------------------------------------"
+
 	if len(findings) == 0 {
-		fmt.Fprintln(a.Stdout, "detonate: no suspicious behaviour observed during enumeration")
-		fmt.Fprintln(a.Stdout, "detonate: NOTE: absence of findings is not proof of safety. "+
-			"Enumeration only observes startup; adversarial probing lands in M5.")
+		fmt.Fprintf(a.Stdout, "\n%s\n", rule)
+		fmt.Fprintln(a.Stdout, "  VERDICT: clean")
+		fmt.Fprintln(a.Stdout, "  No suspicious behaviour observed while enumerating this target.")
+		fmt.Fprintf(a.Stdout, "%s\n", rule)
+		// Say the limit out loud. A scanner that lets "we found nothing" be
+		// read as "this is safe" is worse than no scanner, because it converts
+		// ignorance into false confidence.
+		fmt.Fprintln(a.Stdout, "  Note: this is not proof of safety. Only startup behaviour was")
+		fmt.Fprintln(a.Stdout, "  observed, and a target that hides its errors leaves no trace.")
 		return exitOK
 	}
 
-	fmt.Fprintf(a.Stdout, "\ndetonate: %d BEHAVIOURAL FINDING(S):\n", len(findings))
-	for _, e := range findings {
-		fmt.Fprintf(a.Stdout, "  [%s] %s\n", strings.ToUpper(string(e.Severity)), e.Summary)
-		if ev, ok := e.Detail["evidence"].(string); ok && ev != "" {
-			fmt.Fprintf(a.Stdout, "      evidence: %s\n", ev)
-		}
-		fmt.Fprintf(a.Stdout, "      observed at +%dms during %s (source: %s)\n",
-			e.Elapsed.Milliseconds(), orDash(e.During), e.Source)
+	verdict := "suspicious"
+	if tr.HasSeverity(trace.SeverityCritical) {
+		verdict = "dangerous"
 	}
 
-	if tr.HasSeverity(trace.SeverityCritical) {
-		fmt.Fprintln(a.Stdout, "\ndetonate: VERDICT: dangerous")
-		return exitFindings
+	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
+	fmt.Fprintf(a.Stdout, "  VERDICT: %s  (%d finding(s))\n", verdict, len(findings))
+	fmt.Fprintf(a.Stdout, "%s\n", rule)
+
+	for i, e := range findings {
+		fmt.Fprintf(a.Stdout, "\n  %d. [%s] %s\n", i+1, strings.ToUpper(string(e.Severity)), e.Summary)
+		if ev, ok := e.Detail["evidence"].(string); ok && ev != "" {
+			fmt.Fprintf(a.Stdout, "     evidence : %s\n", ev)
+		}
+		fmt.Fprintf(a.Stdout, "     observed : +%dms during %s\n", e.Elapsed.Milliseconds(), orDash(e.During))
+		fmt.Fprintf(a.Stdout, "     source   : %s\n", e.Source)
 	}
-	fmt.Fprintln(a.Stdout, "\ndetonate: VERDICT: suspicious")
+	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
 	return exitFindings
 }
 
