@@ -104,8 +104,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		if stdinIsTerminal() {
 			return a.runInteractive(ctx)
 		}
-		a.printUsage()
-		return exitOK
+		return a.printUsageAndExit()
 	}
 
 	switch args[0] {
@@ -126,6 +125,14 @@ func (a *App) Run(ctx context.Context, args []string) int {
 
 func (a *App) printUsage() {
 	fmt.Fprintf(a.Stdout, usage, Version)
+}
+
+// printUsageAndExit is the no-arguments path taken when nobody is at a
+// terminal to answer the wizard. Separated from Run so a test can exercise it
+// without depending on whether the test runner happens to own a TTY.
+func (a *App) printUsageAndExit() int {
+	a.printUsage()
+	return exitOK
 }
 
 func (a *App) scan(ctx context.Context, args []string) int {

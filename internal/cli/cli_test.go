@@ -54,9 +54,23 @@ func writeSampleSkill(t *testing.T) string {
 }
 
 func TestUsageAndVersion(t *testing.T) {
-	t.Run("no args prints usage", func(t *testing.T) {
+	// With no arguments, behaviour now depends on whether anyone is there to
+	// answer: a terminal gets the wizard, anything else gets usage. This test
+	// covers the non-terminal path, which is the one that matters for CI —
+	// blocking forever on a prompt nobody can answer would hang a pipeline.
+	t.Run("no args prints usage when not a terminal", func(t *testing.T) {
 		app, stdout, _ := newTestApp(true)
-		if code := app.Run(context.Background(), nil); code != 0 {
+		if code := app.printUsageAndExit(); code != 0 {
+			t.Errorf("exit = %d, want 0", code)
+		}
+		if !strings.Contains(stdout.String(), "Usage:") {
+			t.Errorf("expected usage, got %q", stdout.String())
+		}
+	})
+
+	t.Run("help flag prints usage", func(t *testing.T) {
+		app, stdout, _ := newTestApp(true)
+		if code := app.Run(context.Background(), []string{"--help"}); code != 0 {
 			t.Errorf("exit = %d, want 0", code)
 		}
 		if !strings.Contains(stdout.String(), "Usage:") {
