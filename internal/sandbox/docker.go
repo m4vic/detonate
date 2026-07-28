@@ -70,7 +70,7 @@ func containerArgs(name string, p Policy, mounts []Mount, command []string) []st
 	for _, o := range securityOptions {
 		args = append(args, "--security-opt", o)
 	}
-	for dest, opts := range tmpfsMounts {
+	for dest, opts := range tmpfsMounts(p.TmpfsSize) {
 		args = append(args, "--tmpfs", dest+":"+opts)
 	}
 	for _, m := range mounts {

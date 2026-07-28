@@ -39,6 +39,35 @@ This is the exact gap in the market: the one execution-based competitor (Snyk
 Agent Scan) executes servers but ships a `--dangerously-run-mcp-servers` flag and
 tells the user to sandbox it themselves. detonate sandboxes by default.
 
+### What the sandbox is, and is not
+
+A Docker container is **not a virtual machine**. It is an ordinary process on
+the host kernel, fenced off by namespaces (its own view of the filesystem,
+network, and process table) and cgroups (memory, CPU and PID ceilings). There
+is no second kernel.
+
+That has a consequence worth stating plainly rather than glossing over: **a
+kernel exploit escapes the container.** Container isolation is strong against
+ordinary misbehaviour and weak against an attacker with a kernel bug.
+
+This is exactly why the policy drops every capability, sets
+`no-new-privileges`, and refuses to run as root. Each removes a rung on the
+ladder from "code inside a container" to "root on the host". Defence in depth
+is necessary precisely because the boundary is not absolute.
+
+Two honest notes:
+
+- On Windows and macOS, Docker Desktop runs containers inside a Linux VM
+  (WSL2 or its equivalent), so those users get a real hypervisor boundary
+  underneath. Linux users running Docker natively have **less** isolation.
+- The upgrade path for genuinely hostile input is a runtime with a real kernel
+  boundary — gVisor, Kata, or Firecracker. Deferred, but this is the reason it
+  is on the list at all.
+
+detonate does not claim its sandbox is unescapable. It claims untrusted code is
+never run outside one, that the defaults are strict, and that what the code did
+is reported with evidence.
+
 ---
 
 ## The pipeline

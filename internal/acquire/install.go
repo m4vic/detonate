@@ -157,6 +157,13 @@ func runInstall(ctx context.Context, targetDir, volume string, m Manifest, base 
 	}
 	p.PidLimit = 512
 
+	// pip and npm unpack and build in /tmp. At the detonation phase's 64 MiB
+	// a real server dies with "No space left on device" before it is ever
+	// scanned — which is a scan that failed for a reason having nothing to do
+	// with the target. noexec still applies, so this stays writable but not
+	// runnable.
+	p.TmpfsSize = "2g"
+
 	name, err := sandbox.NewName()
 	if err != nil {
 		return "", "", err

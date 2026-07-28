@@ -58,6 +58,16 @@ type Policy struct {
 	// doesn't.
 	Timeout time.Duration
 
+	// TmpfsSize is how much scratch space the target gets at /tmp.
+	//
+	// Configurable because the two phases need wildly different amounts. The
+	// detonation phase wants this small: a target has no legitimate reason to
+	// write hundreds of megabytes while its tools are being listed. The
+	// install phase needs far more, because pip and npm unpack and build in
+	// /tmp — at the detonation default a real server fails with "No space left
+	// on device" before it is ever scanned.
+	TmpfsSize string
+
 	// Env are environment variables for the target process.
 	//
 	// This is runtime configuration, not security posture — it exists so the
@@ -85,6 +95,7 @@ func DefaultPolicy() Policy {
 		CPUShares:      512, // half of Docker's 1024 default
 		User:           "1000:1000",
 		Timeout:        60 * time.Second,
+		TmpfsSize:      "64m",
 	}
 }
 
@@ -109,9 +120,16 @@ var dropAllCapabilities = []string{"ALL"}
 // target cannot escalate even if it ships a setuid binary.
 var securityOptions = []string{"no-new-privileges"}
 
-// tmpfsMounts give the target somewhere writable without letting anything
+// tmpfsMounts gives the target somewhere writable without letting anything
 // persist. Backed by memory, capped, and discarded when the container dies.
-// noexec matters: a server that drops a payload into /tmp cannot then run it.
-var tmpfsMounts = map[string]string{
-	"/tmp": "rw,noexec,nosuid,size=64m",
+//
+// noexec is the security-relevant part: a server that drops a payload into
+// /tmp cannot then run it. It stays set in every phase, including install.
+func tmpfsMounts(size string) map[string]string {
+	if size == "" {
+		size = "64m"
+	}
+	return map[string]string{
+		"/tmp": "rw,noexec,nosuid,size=" + size,
+	}
 }
