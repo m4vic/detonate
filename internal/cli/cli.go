@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/mcpdriver"
 	"github.com/m4vic/detonate/internal/sandbox"
@@ -79,10 +80,14 @@ Usage:
 Flags:
   --dir <path>   Host directory holding the server, mounted read-only
                  at /target inside the sandbox.
+  --install      Install the target's dependencies first, in a separate
+                 container that has network access but never runs the
+                 target. Needed for any server that imports a package.
 
 Examples:
   detonate scan --skill ./skills/pdf-extractor
   detonate scan --mcp "python /target/server.py" --dir ./my-server
+  detonate scan --mcp "python /target/server.py" --dir ./my-server --install
 
 Exit codes:
   0  clean    2  bad usage or environment
@@ -123,6 +128,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	mcpCmd := fs.String("mcp", "", "An MCP server launched over stdio (e.g. 'python /target/server.py').")
 	skillPath := fs.String("skill", "", "An agent skill directory (a SKILL.md plus its bundled scripts).")
 	mountDir := fs.String("dir", "", "Host directory holding the MCP server, mounted read-only at /target in the sandbox.")
+	install := fs.Bool("install", false, "Install the target's dependencies first, in a separate network-enabled container.")
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -157,7 +163,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		fmt.Fprintf(a.Stdout, "detonate: reaped %d orphaned container(s) from a previous run\n", n)
 	}
 
-	tools, tr, err := a.enumerate(ctx, tgt, *mountDir)
+	tools, tr, err := a.enumerate(ctx, tgt, *mountDir, *install)
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "detonate: enumeration failed: %v\n", err)
 		return exitFailure
@@ -232,34 +238,76 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 	}
 }
 
-func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string) ([]toolinfo.ToolInfo, *trace.Trace, error) {
+func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string, install bool) ([]toolinfo.ToolInfo, *trace.Trace, error) {
 	if tgt.Kind == target.KindMCP {
-		// Always sandboxed. There is no host-execution path reachable from the
-		// CLI: the unsandboxed EnumerateTools still exists for our own tests,
-		// but shipping a flag that reaches it would recreate exactly the
-		// --dangerously-run-mcp-servers hole that justifies this tool.
-		fmt.Fprintln(a.Stdout, "detonate: launching target inside a sandbox "+
-			"(network off, read-only root, no capabilities, non-root)")
+		policy := sandbox.DefaultPolicy()
 
 		var mounts []sandbox.Mount
+		var absDir string
 		if mountDir != "" {
 			abs, err := filepath.Abs(mountDir)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving --dir: %w", err)
 			}
+			absDir = abs
 			// Read-only, always. A target that can rewrite its own source
 			// mid-scan makes the evidence disagree with the artifact, which
 			// defeats the point of collecting evidence at all.
 			mounts = append(mounts, sandbox.Mount{
 				HostPath: abs, ContainerPath: "/target", ReadOnly: true,
 			})
-			fmt.Fprintf(a.Stdout, "detonate: mounting %s read-only at /target\n", abs)
 		}
 
-		res, err := mcpdriver.EnumerateSandboxedWithTrace(
-			ctx, tgt.Reference, sandbox.DefaultPolicy(), mounts)
+		// Phase 1. Runs the PACKAGE MANAGER with a network, never the target.
+		// The target's own code only ever executes in phase 2, network off.
+		var installed *acquire.Result
+		if install {
+			if absDir == "" {
+				return nil, nil, errors.New("--install needs --dir: there is no target directory to read a manifest from")
+			}
+			m := acquire.Detect(absDir)
+			if m.Ecosystem == acquire.EcosystemNone {
+				fmt.Fprintln(a.Stdout, "detonate: no dependency manifest found; skipping install")
+			} else {
+				fmt.Fprintf(a.Stdout, "detonate: [1/2] installing %s deps from %s "+
+					"(separate container, network ON, target NOT executed)\n", m.Ecosystem, m.File)
+			}
+
+			res, err := acquire.Install(ctx, absDir, policy)
+			if err != nil {
+				return nil, nil, err
+			}
+			installed = res
+			defer func() { _ = installed.Cleanup(context.Background()) }()
+
+			mounts = append(mounts, installed.Mounts()...)
+			policy.Env = installed.Env
+		}
+
+		// Always sandboxed. There is no host-execution path reachable from the
+		// CLI: the unsandboxed EnumerateTools still exists for our own tests,
+		// but shipping a flag that reaches it would recreate exactly the
+		// --dangerously-run-mcp-servers hole that justifies this tool.
+		phase := ""
+		if install {
+			phase = "[2/2] "
+		}
+		fmt.Fprintf(a.Stdout, "detonate: %slaunching target inside a sandbox "+
+			"(network off, read-only root, no capabilities, non-root)\n", phase)
+		if absDir != "" {
+			fmt.Fprintf(a.Stdout, "detonate: mounting %s read-only at /target\n", absDir)
+		}
+
+		res, err := mcpdriver.EnumerateSandboxedWithTrace(ctx, tgt.Reference, policy, mounts)
 		if err != nil {
 			return nil, nil, err
+		}
+
+		// Fold install-time behaviour into the same trace. A postinstall hook
+		// that phoned home is a finding about this target, and splitting it
+		// into a separate report would let it be overlooked.
+		if installed != nil && res.Trace != nil {
+			res.Trace.Events = append(installed.Events, res.Trace.Events...)
 		}
 		return res.Tools, res.Trace, nil
 	}

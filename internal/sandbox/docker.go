@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -76,8 +77,25 @@ func containerArgs(name string, p Policy, mounts []Mount, command []string) []st
 		args = append(args, "--volume", m.arg())
 	}
 
+	// Sorted so the argument list is deterministic. Map iteration order is
+	// random in Go, and a scanner whose invocation differs run to run is one
+	// whose failures cannot be reproduced from a log.
+	for _, k := range sortedKeys(p.Env) {
+		args = append(args, "--env", k+"="+p.Env[k])
+	}
+
 	args = append(args, p.Image)
 	return append(args, command...)
+}
+
+// sortedKeys returns a map's keys in a stable order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Mount is a host path exposed inside the sandbox.

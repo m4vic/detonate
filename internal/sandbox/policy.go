@@ -57,6 +57,15 @@ type Policy struct {
 	// unbounded, including code that looks cooperative right up until it
 	// doesn't.
 	Timeout time.Duration
+
+	// Env are environment variables for the target process.
+	//
+	// This is runtime configuration, not security posture — it exists so the
+	// detonation phase can point an interpreter at dependencies installed in a
+	// separate, earlier container (PYTHONPATH, NODE_PATH). Never put secrets
+	// here: the target reads its own environment, so anything placed in it is
+	// handed directly to untrusted code.
+	Env map[string]string
 }
 
 // DefaultPolicy is the posture every scan gets unless deliberately relaxed.
