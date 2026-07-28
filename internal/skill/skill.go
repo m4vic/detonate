@@ -25,6 +25,12 @@ import (
 // with most static-site frontmatter formats.
 const frontmatterDelim = "---"
 
+// utf8BOM is the byte-order mark Windows editors and PowerShell prepend.
+// Written as an escape, not the literal character: Go rejects a raw BOM in
+// source, and an escape also survives being copied, re-encoded, or viewed in
+// an editor that hides invisible runes.
+const utf8BOM = "\ufeff"
+
 // scriptExtensions is what we treat as an invokable bundled script. It is a
 // short explicit allowlist rather than "every file in the directory" so a
 // stray README or image doesn't get reported as a tool.
@@ -54,6 +60,16 @@ type frontmatter struct {
 // is a finding to report, not a reason to abort the scan, and it is exactly
 // the kind of input a scanner must survive.
 func parseFrontmatter(text string) (frontmatter, string) {
+	// Strip a UTF-8 BOM before anything else.
+	//
+	// Windows editors and PowerShell's `-Encoding utf8` prepend one, so the
+	// first line becomes BOM+"---" and never matches the delimiter. The whole
+	// file then parses as body: the skill is reported with its raw YAML as a
+	// description and, worse, allowed-tools comes back empty, so a permission
+	// check would see a skill that declares no tools and report nothing.
+	// Caught on a real file written on Windows.
+	text = strings.TrimPrefix(text, utf8BOM)
+
 	lines := strings.Split(text, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != frontmatterDelim {
 		return frontmatter{}, text

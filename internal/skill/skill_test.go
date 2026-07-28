@@ -3,6 +3,7 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,35 @@ func TestLoadSurvivesBadFrontmatter(t *testing.T) {
 				t.Fatalf("got %d tools, want 1", len(tools))
 			}
 		})
+	}
+}
+
+// A UTF-8 BOM must not defeat frontmatter parsing.
+//
+// Windows editors and PowerShell's -Encoding utf8 prepend one, so the first
+// line becomes "<BOM>---" and never matches the delimiter. The whole file
+// then parses as body: the skill gets its raw YAML as a description and,
+// worse, allowed-tools comes back empty — so a permission check would see a
+// skill that declares no tools and report nothing. Found on a real file.
+func TestLoadHandlesUTF8BOM(t *testing.T) {
+	dir := writeSkill(t, map[string]string{
+		"SKILL.md": "\ufeff" + goodSkill,
+	})
+
+	tools, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if tools[0].Name != "pdf-extractor" {
+		t.Errorf("Name = %q, want pdf-extractor (BOM broke frontmatter parsing)", tools[0].Name)
+	}
+	if !strings.HasPrefix(tools[0].Description, "Extracts text") {
+		t.Errorf("Description = %q; raw YAML leaked into it", tools[0].Description)
+	}
+	allowed, ok := tools[0].Metadata["allowed_tools"].([]string)
+	if !ok || len(allowed) != 2 {
+		t.Errorf("allowed_tools = %#v; a permission check would see nothing",
+			tools[0].Metadata["allowed_tools"])
 	}
 }
 
