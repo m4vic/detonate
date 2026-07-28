@@ -29,10 +29,14 @@ type Container struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
-	stderr *strings.Builder
+	stderr *safeBuffer
 
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// waitErr is written once by the reaper goroutine before it closes done,
+	// so any read after <-done sees it safely without a lock.
+	waitErr error
 }
 
 // containerArgs turns a Policy into docker CLI flags.
@@ -142,8 +146,12 @@ func Start(ctx context.Context, name string, p Policy, mounts []Mount, command [
 	// Capture stderr rather than discarding it: when a sandbox fails to start,
 	// docker's own message on stderr is almost always the actual reason, and
 	// guessing at it wastes the user's time.
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
+	//
+	// safeBuffer, not strings.Builder: os/exec writes this from its own
+	// goroutine while callers read it mid-run, and stderr is where a blocked
+	// network call leaves its evidence. See safebuf.go.
+	stderr := &safeBuffer{}
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -163,14 +171,48 @@ func Start(ctx context.Context, name string, p Policy, mounts []Mount, command [
 
 	c := &Container{
 		Name: name, Policy: p,
-		cmd: cmd, stdin: stdin, stdout: stdout, stderr: &stderr,
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
 		cancel: cancel, done: make(chan struct{}),
 	}
 	go func() {
-		_ = cmd.Wait()
+		// Keep the exit error. Discarding it threw away the ONLY explanation
+		// when `docker run` itself fails — a bad mount, an image that vanished,
+		// a daemon that refused. The symptom was a scan reporting "no
+		// behaviour observed" for a container that never ran, which is the
+		// most dangerous wrong answer this tool can give.
+		c.waitErr = cmd.Wait()
 		close(c.done)
 	}()
 	return c, nil
+}
+
+// ExitError reports why the container's client exited, blocking until it has.
+// nil means a clean exit.
+func (c *Container) ExitError() error {
+	<-c.done
+	return c.waitErr
+}
+
+// Failed reports whether the container failed to run at all, and why.
+//
+// This is the distinction that matters to a caller: "the target ran and did
+// nothing suspicious" and "the target never ran" look identical from the
+// outside and mean opposite things. Only one of them is a clean bill of
+// health.
+func (c *Container) Failed() (bool, string) {
+	select {
+	case <-c.done:
+	default:
+		return false, "" // still running
+	}
+	if c.waitErr == nil {
+		return false, ""
+	}
+	detail := c.waitErr.Error()
+	if s := strings.TrimSpace(c.stderr.String()); s != "" {
+		detail += ": " + s
+	}
+	return true, detail
 }
 
 // Stdin and Stdout are the container's pipes, so a protocol client can be
