@@ -25,6 +25,8 @@ import (
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/mcpdriver"
+	"github.com/m4vic/detonate/internal/monitor"
+	"github.com/m4vic/detonate/internal/probe"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/skill"
 	"github.com/m4vic/detonate/internal/target"
@@ -143,6 +145,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	skillPath := fs.String("skill", "", "An agent skill directory (a SKILL.md plus its bundled scripts).")
 	mountDir := fs.String("dir", "", "Host directory holding the MCP server, mounted read-only at /target in the sandbox.")
 	install := fs.Bool("install", false, "Install the target's dependencies first, in a separate network-enabled container.")
+	doProbe := fs.Bool("probe", false, "Call each discovered tool with adversarial arguments and watch what it does.")
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -177,7 +180,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		fmt.Fprintf(a.Stdout, "detonate: reaped %d orphaned container(s) from a previous run\n", n)
 	}
 
-	tools, tr, err := a.enumerate(ctx, tgt, *mountDir, *install)
+	tools, tr, err := a.enumerate(ctx, tgt, *mountDir, *install, *doProbe)
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "detonate: enumeration failed: %v\n", err)
 		return exitFailure
@@ -293,7 +296,7 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 	}
 }
 
-func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string, install bool) ([]toolinfo.ToolInfo, *trace.Trace, error) {
+func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string, install, doProbe bool) ([]toolinfo.ToolInfo, *trace.Trace, error) {
 	if tgt.Kind == target.KindMCP {
 		policy := sandbox.DefaultPolicy()
 
@@ -353,18 +356,52 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 			fmt.Fprintf(a.Stdout, "detonate: mounting %s read-only at /target\n", absDir)
 		}
 
-		res, err := mcpdriver.EnumerateSandboxedWithTrace(ctx, tgt.Reference, policy, mounts)
+		if !doProbe {
+			res, err := mcpdriver.EnumerateSandboxedWithTrace(ctx, tgt.Reference, policy, mounts)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Fold install-time behaviour into the same trace. A postinstall
+			// hook that phoned home is a finding about this target, and
+			// splitting it into a separate report would let it be overlooked.
+			if installed != nil && res.Trace != nil {
+				res.Trace.Events = append(installed.Events, res.Trace.Events...)
+			}
+			return res.Tools, res.Trace, nil
+		}
+
+		// Probing keeps the session open: a tool only reveals what it does
+		// when it is called, so the container has to outlive tools/list.
+		sess, err := mcpdriver.OpenSession(ctx, tgt.Reference, policy, mounts)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer sess.Close()
+
+		tools, err := sess.Tools(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		// Fold install-time behaviour into the same trace. A postinstall hook
-		// that phoned home is a finding about this target, and splitting it
-		// into a separate report would let it be overlooked.
-		if installed != nil && res.Trace != nil {
-			res.Trace.Events = append(installed.Events, res.Trace.Events...)
+		tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
+		if installed != nil {
+			for _, ev := range installed.Events {
+				tr.Add(ev)
+			}
 		}
-		return res.Tools, res.Trace, nil
+
+		fmt.Fprintf(a.Stdout, "detonate: probing %d tool(s) with %d adversarial payload(s)...\n",
+			len(tools), len(probe.Payloads()))
+
+		for _, ev := range probe.Run(ctx, sess, tools, 0) {
+			tr.Add(ev)
+		}
+		// Read stderr once more: behaviour triggered by the last probe may
+		// only surface after the call returned.
+		for _, ev := range monitor.Analyze(sess.Stderr(), "probe") {
+			tr.Add(ev)
+		}
+		return tools, tr, nil
 	}
 
 	// A skill is mostly a large prompt: its SKILL.md body is text an agent
