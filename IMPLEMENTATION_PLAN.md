@@ -1,167 +1,188 @@
-# detonate — Implementation Plan (sandbox-first)
+# detonate — Implementation Plan
 
 **What it is:** an open-source CLI that *detonates* untrusted AI-connected tools
-inside a sandbox and reports what they **actually do** — not what their manifest
-claims. "Detonation chamber" is the malware-analysis term for exactly this: run
-the suspicious thing in isolation and watch its behavior.
+inside a sandbox and reports what they **actually do**, not what their manifest
+claims. "Detonation chamber" is the malware-analysis term for exactly this.
 
-**v1 input types (both execute → both use the one sandbox pipeline):**
-- **MCP servers** — launched over stdio, tools enumerated and probed live.
-- **Agent skills** (SKILL.md + bundled scripts) — scripts run in the sandbox,
-  behavior watched.
-
-Deliberately deferred: raw prompts (text-only — a different, non-sandbox path,
-not worth splitting the pipeline for in v1) and GitHub repos/packages (the hard
-case — no clean entry point, may need a build step or credentials). Both are
-phase 2. Keeping v1 to executable inputs means **one pipeline, not two.**
-
-**The verified gap this fills (three searches confirmed it):** every shipping
-competitor either reads the manifest statically (mcp-scan, MCPSafe, Cisco) or
-executes **without** a sandbox and makes the user isolate it themselves (Snyk
-Agent Scan ships `--dangerously-run-mcp-servers`). **detonate sandboxes by default
-and probes adversarially.** That is the entire reason this tool should exist —
-so it is built FIRST, not bolted on. A static-only v0.1 was explicitly rejected:
-it would just be a sixth entrant in a crowded space.
-
-**License:** Apache-2.0 (patent grant; category standard). Confirm before commit.
+**Status:** M0-M2 shipped. Go, single static binary, Docker for the sandbox.
 
 ---
 
-## Language: best tool per component (not dogmatic)
+## The gap this fills
 
-Sandbox-first pushes the MVP toward Python for concrete reasons, and reserves Rust
-for where it genuinely wins:
+Every shipping competitor either reads the manifest statically (mcp-scan,
+MCPSafe, Cisco) or executes **without** a sandbox and tells the user to isolate
+it themselves (Snyk Agent Scan ships `--dangerously-run-mcp-servers`).
 
-| Component | Language | Why |
-|---|---|---|
-| MCP protocol driver | **Python** | Official `mcp` SDK is Python — hand-rolling JSON-RPC in Rust is wasted effort |
-| Sandbox orchestration | **Python** | `docker-py` is mature; orchestration is I/O-bound (waiting on containers), Rust speed buys nothing |
-| Adversarial probes | **Python** | Payload logic + drives the MCP driver |
-| Coarse behavioral monitor (MVP) | **Python** | Reads container events/violations; fast enough for MVP |
-| Static pre-checks | **Python** | Trivial pattern-matching; Python fine at MVP scale |
-| Verdict / correlation | **Python** | Logic; Rust only if trace volume explodes |
-| **Fine-grained eBPF monitor** (phase 2) | **Rust** (`aya`) | Genuine native/kernel territory — the real Rust hot-path |
-| **Distributable CLI/TUI shell** (phase 2) | **Rust** (`clap`+`ratatui`) | Single-binary, fast, polished; wraps the working Python engine |
-
-MVP engine is Python. Rust slots in for eBPF and the shipped binary once the
-engine works — not before.
+**detonate sandboxes by default and probes adversarially.** That is the only
+reason it should exist, so it is built first rather than bolted on. A
+static-only tier was explicitly considered and rejected: it would make detonate
+a sixth entrant in a crowded space, competing on the one axis where it has no
+advantage.
 
 ---
 
-## Hard dependency (state in README day one)
+## What makes a tool dynamic
 
-**Docker must be installed and running.** There is no safe way to detonate
-untrusted code without OS-level isolation, so `pip install detonate` alone is not
-enough — the user needs Docker. Fine for a dev-tool audience; must be stated
-plainly so it is never a surprise.
+Worth stating, because "we execute it" is not sufficient — Snyk executes
+servers and is still fundamentally a description-reader.
+
+1. **We provide the stimulus.** Adversarial inputs we choose, not just reading
+   what is declared.
+2. **We observe below the target's control.** Syscalls, egress, files, process
+   spawns. A server can lie in a response. It cannot lie about opening a socket.
+3. **Evidence is a trace, not an opinion.** "At t=1.2s, after `read_file`, the
+   process opened TCP to 34.x.x.x:443 and wrote 4KB."
+4. **We catch what static provably cannot:** conditional behavior, runtime-decoded
+   payloads, second-stage fetch, rug pulls, declared-vs-actual capability.
+
+Point 4 is the test of whether the tool is really dynamic.
 
 ---
 
 ## Architecture
 
 ```
-detonate scan --mcp <server-command-or-url>
+detonate scan --mcp <cmd> | --skill <path> | --git <url> | --package <spec>
       │
-      ▼  (Python)
+      ▼
 ┌──────────────────────┐
-│  Static pre-check    │  cheap tier: grep manifest/tool descriptions for
-│  (fast, no exec)     │  poisoning/injection patterns before detonating
+│  Acquire             │  local path, git clone, or package install
+│                      │  package install runs in its OWN container, network ON
+└──────────┬───────────┘  ← install-time behavior is itself a finding
+           ▼
+┌──────────────────────┐
+│  Sandbox      (M2 ✔) │  disposable container: network off, read-only rootfs,
+│                      │  caps dropped, non-root, memory/PID limits
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│  Sandbox             │  disposable Docker container: network OFF by default,
-│  (docker-py)         │  restricted fs, resource-limited
-└──────────┬───────────┘
-           ▼
-┌──────────────────────┐
-│  MCP driver          │  connect (stdio) INSIDE the sandbox, enumerate tools
-│  (official mcp SDK)  │
+│  Driver       (M1 ✔) │  MCP stdio session / skill loader, INSIDE the sandbox
+│                      │  → normalizes to ToolInfo
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
 │  Probe + Monitor     │  invoke each tool with adversarial args WHILE watching
-│  (this is the        │  egress attempts / fs writes / process spawns
-│   "detonation")      │  ← the thing no competitor does by default
+│  (the detonation)    │  egress / fs / process. ← what no competitor does
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│  Verdict + evidence  │  correlate static + dynamic → safe/suspicious/dangerous
-│                      │  with concrete evidence (which probe, what it did, trace)
+│  Verdict + evidence  │  safe / suspicious / dangerous + the trace behind it
 └──────────┬───────────┘
            ▼
-     JSON / SARIF / Markdown output
+     JSON / SARIF / Markdown
 ```
 
-**Verdict model:** `safe` / `suspicious` / `dangerous`, each with attached
-**evidence** — never a bare score. This is the fix for alert-fatigue: a verdict a
-human acts on in one read, receipts underneath.
+**Verdict model:** `safe` / `suspicious` / `dangerous`, always with evidence,
+never a bare score. Deterministic rules over observed facts — an LLM may phrase
+the report but must never decide the verdict, or detonate stops being
+reproducible and becomes useless in CI.
 
 ---
 
-## Milestones (sandbox-first; each demoable; smoke-test before next)
+## Input methods
 
-**M0 — Scaffold** · CLI skeleton, `pyproject.toml`, Apache-2.0 LICENSE, README
-(with the Docker requirement), `detonate --help`. Docker-availability check on
-startup with a clear error if missing.
+| Input | Example | How it reaches the sandbox | Milestone |
+|---|---|---|---|
+| Local path | `--skill ./my-skill` | mount read-only | ✔ M2 |
+| Git URL | `--git github.com/x/y` | clone on host, mount read-only | M6 |
+| Package | `--package "npx some-server"` | two-phase install (below) | M7 |
+| Live server | `--url http://...` | no install; manifest only | later |
 
-**M1 — MCP driver (no sandbox yet)** · Using the official `mcp` Python SDK:
-connect to a stdio MCP server, enumerate its tools, print them. Proves protocol
-handling against a real known-good server.
+### The install problem
 
-**M2 — Sandbox (the differentiator foundation)** · Run the MCP server *inside* a
-disposable Docker container: network off by default, restricted fs, resource
-limits. Enumerate tools from inside. This is "sandboxed by default" made real.
+`npx some-server` needs network to install, but install scripts
+(`postinstall`, `setup.py`) are the primary npm/PyPI supply-chain surface.
+Installing on the host is unacceptable; installing with network off is
+impossible. So: **two containers, two phases.**
 
-**M3 — Behavioral monitor (coarse)** · During a run, capture egress attempts, fs
-writes outside declared scope, process spawns. Coarse but real — the evidence
-static scanning cannot produce.
+```
+Phase 1 — ACQUIRE    network ON, no host mounts, disposable
+                     observe: what was downloaded, what ran at install time
+Phase 2 — DETONATE   network OFF, phase-1 result mounted read-only
+                     observe: what it does when invoked
+```
 
-**M4 — Adversarial probes (detonation)** · Invoke each enumerated tool with a
-curated set of adversarial inputs (injection strings, path-traversal args,
-SSRF-style URLs) UNDER M2 sandbox + M3 monitoring. Not "read the manifest" —
-"poke it and watch what it tries to do." Safe *because* it's sandboxed.
-
-**M5 — Verdict + evidence** · Correlate static + dynamic findings into a verdict
-with evidence. Plain terminal output first.
-
-**M6 — Static pre-check** · Cheap tier before detonation: grep tool
-descriptions/manifests for known poisoning/injection patterns (mirrors the
-rules-first tier in the ASRT judge).
-
-**M7 — Output formats** · JSON + **SARIF** (GitHub Advanced Security / VSCode /
-CI-gatable — kept from the earlier plan, genuinely smart) + Markdown.
-
-**M8 — Package + CI** · pip-installable, GitHub Actions (pytest on every PR),
-first open-source release.
+Phase 1 is not a necessary evil. Install-time behavior is where second-stage
+payloads live and nobody currently watches it.
 
 ---
 
-## Phase 2 (written down so it's not re-derived)
+## Testing methodology
 
-- **eBPF fine-grained monitor** (Rust `aya`) — replaces coarse M3 capture.
-- **Rust CLI/TUI shell** (`clap` + `ratatui`) — single-binary distribution,
-  polished dashboard; wraps the working Python engine over stdin/stdout JSON.
-- **`diff` + `watch` subcommands** — compare two scans / re-scan on update. This
-  is where detonate touches the regression thesis: same core, run repeatedly +
-  diffed ("did this dependency get worse"). Kept from the earlier plan.
-- **Skills input** (SKILL.md + bundled scripts), **repo input** (static-first;
-  dynamic only with a clear runnable entry point).
-- **Comparison view** ("is there a safer tool in the same category" — the reviewer
-  angle nobody else does).
-- **Hosted web version** — queue + isolation infra + its own liability model.
+MCP servers and skills have different attack surfaces and need different
+methodologies. Both share one engine: normalize → probe → observe → verdict.
+
+### MCP servers (execution surface)
+
+| Class | Method |
+|---|---|
+| Tool poisoning | injection in description, schema, **and returned output** |
+| Rug pull | hash manifest, diff against stored baseline across runs |
+| Adversarial invocation | path traversal, injected args, oversized input |
+| Egress | network on, observe where it connects |
+| Install-time | phase 1 above |
+
+Probe taxonomy is built against **MCPTox** (arxiv 2508.14925): 312 scenarios,
+14 vulnerability classes. Using a published benchmark makes coverage
+*measurable* rather than a matter of our own invention.
+
+### Skills (mostly injection surface)
+
+A skill is largely a big prompt plus scripts, so weight shifts to text:
+
+| Class | Method |
+|---|---|
+| Instruction injection | SKILL.md **body**, not just frontmatter |
+| Permission mismatch | declares `allowed-tools: [Read]`, script spawns a shell |
+| Bundled script behavior | run sandboxed, monitor |
+| Progressive disclosure | files loaded at runtime beyond the declared set |
 
 ---
 
-## Kept from the pasted plan (credit where due)
+## Milestones
 
-SARIF output, `diff`/`watch` subcommands, schema-first structs
-(ToolDesc/ProbeResult/ScanResult), CI from day one, the clean Rust-shell ⇄
-Python-engine stdin/stdout JSON boundary (adopted for phase-2 shell).
+- [x] **M0** — Scaffold: CLI, target kinds, Docker pre-flight
+- [x] **M1** — Drivers: MCP stdio enumeration + skill loader → `ToolInfo`
+- [x] **M2** — Sandbox: disposable container, verified confinement
+- [ ] **M3** — Sandboxed execution wired into the scan path *(in progress)*
+- [ ] **M4** — Behavioral monitor: egress, fs, process spawns
+- [ ] **M5** — Adversarial probes, structured on MCPTox's 14 classes
+- [ ] **M6** — Verdict + evidence; git URL input
+- [ ] **M7** — Two-phase package acquisition
+- [ ] **M8** — Rug-pull detection (baseline store)
+- [ ] **M9** — JSON / SARIF / Markdown output
+- [ ] **M10** — Release: cross-compiled binaries, CI, install docs
 
-## Relationship to the ecosystem
+### M3 detail (current)
 
-Standalone open-source tool and trust-building front door — same role PromptShield
-plays, different surface (agent supply chain). NOT ASRT, NOT SafetyDiff, but shares
-the "run it and observe, don't guess" DNA and (in phase-2 watch mode) the
-regression thesis. Does not block or depend on anchor_v1 — separate track,
-separate repo at publish time.
+1. Run the MCP server inside the container, stdio crossing the boundary
+2. Mount skills read-only, enumerate inside
+3. Remove the "sandbox not yet implemented" warning and flip its guard test
+4. Orphan reaper on startup for `detonate-*` containers from crashed runs
+
+---
+
+## Deferred, written down so it is not re-derived
+
+- **eBPF fine-grained monitor.** Go's `cilium/ebpf` (what Cilium and Falco
+  ship), not Rust. Only once coarse monitoring proves insufficient.
+- **Daemonless sandbox.** Linux namespaces + seccomp directly, removing the
+  Docker dependency. This is the real fix for the installation problem, which is
+  the single biggest adoption risk.
+- **`diff` / `watch` subcommands.** Where detonate touches the regression
+  thesis: same scan, run repeatedly, diffed.
+- **Comparison view** — "is there a safer tool in the same category".
+- **Hosted version** — needs a queue, isolation infra, and its own liability
+  model.
+
+---
+
+## Non-goals
+
+- Not a static manifest reader; that space is crowded.
+- Not a runtime proxy; it tests before and around use, not in the request path.
+- Not part of ASRT or SafetyDiff. Separate tool, separate repo. If they ever
+  meet, it is over a process boundary and JSON on stdout, never FFI.
+- **No LLM in the verdict path.** Report phrasing only, opt-in, and the tool is
+  fully functional without it.

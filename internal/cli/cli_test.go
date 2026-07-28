@@ -136,30 +136,36 @@ func TestScanSkill(t *testing.T) {
 	}
 }
 
-func TestScanMCPAgainstRealServer(t *testing.T) {
-	app, stdout, stderr := newTestApp(true)
+// Note on why there is no end-to-end MCP scan test in this package.
+//
+// Before M3 this test pointed the CLI at mcptest.Command(), the re-exec'd test
+// binary. That worked while targets ran on the host. It cannot work now: the
+// sandbox is a Linux container and the test binary is a host executable, so
+// the container has nothing to run.
+//
+// Deleting it rather than adding a --no-sandbox escape hatch is deliberate.
+// The moment a flag exists to run a target on the host "just for testing", it
+// exists for users too, and that is precisely the hole this tool was built to
+// close. The sandboxed path is covered end to end in mcpdriver, using a server
+// written in a language the container actually has.
 
-	code := app.Run(context.Background(), []string{"scan", "--mcp", mcptest.Command()})
-	if code != exitOK {
-		t.Fatalf("exit = %d, want 0. stderr: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	for _, want := range []string{"read_file", "echo"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in output, got %q", want, out)
-		}
-	}
-}
-
-// M1 runs the MCP target on the host. That warning must not quietly disappear
-// when M2 lands: if someone wires up the sandbox and forgets to remove this,
-// the test fails and tells them to. If they remove it without a sandbox, it
-// also fails.
-func TestScanMCPWarnsItIsUnsandboxed(t *testing.T) {
+// The safety invariant, now that M3 has wired the sandbox in: no CLI path may
+// execute an MCP target on the host.
+//
+// This test used to assert the opposite — that an "unsandboxed" warning was
+// present — because M1 really did run targets on the host. Inverting it as the
+// sandbox landed is the point: the assertion tracks the guarantee, so the day
+// someone adds a convenience flag that skips the container, this fails.
+func TestScanMCPNeverRunsOnHost(t *testing.T) {
 	app, stdout, _ := newTestApp(true)
 	app.Run(context.Background(), []string{"scan", "--mcp", mcptest.Command()})
-	if !strings.Contains(stdout.String(), "sandbox not yet implemented") {
-		t.Error("the unsandboxed warning is missing from MCP scan output")
+
+	out := stdout.String()
+	if strings.Contains(out, "sandbox not yet implemented") {
+		t.Error("MCP scan still reports running unsandboxed")
+	}
+	if !strings.Contains(out, "inside a sandbox") {
+		t.Errorf("MCP scan must state it sandboxed the target; got %q", out)
 	}
 }
 

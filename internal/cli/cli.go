@@ -21,6 +21,7 @@ import (
 
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/mcpdriver"
+	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/skill"
 	"github.com/m4vic/detonate/internal/target"
 	"github.com/m4vic/detonate/internal/toolinfo"
@@ -130,14 +131,12 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	fmt.Fprintf(a.Stdout, "detonate: docker: %s\n", status.Detail)
 	fmt.Fprintf(a.Stdout, "detonate: target: %s\n", tgt.Label())
 
-	// M1 enumerates what the target offers. For an MCP target that LAUNCHES
-	// the server to speak the protocol, and that happens without the sandbox
-	// until M2. Say so loudly rather than letting a user assume the Docker
-	// check above means the server ran inside a container.
-	if tgt.Kind == target.KindMCP {
-		fmt.Fprintln(a.Stdout, "detonate: WARNING: sandbox not yet implemented (M2). This will "+
-			"run the target's command directly on your machine to enumerate its tools. "+
-			"Only use --mcp against a server you already trust.")
+	// Clear anything a previous run leaked. A scan that died hard (SIGKILL,
+	// power loss, a panic of ours) leaves a container with no client attached,
+	// and the whole promise of this tool is that untrusted code does not
+	// outlive the scan.
+	if n := sandbox.ReapOrphans(ctx); n > 0 {
+		fmt.Fprintf(a.Stdout, "detonate: reaped %d orphaned container(s) from a previous run\n", n)
 	}
 
 	tools, err := a.enumerate(ctx, tgt)
@@ -167,8 +166,18 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 
 func (a *App) enumerate(ctx context.Context, tgt target.Target) ([]toolinfo.ToolInfo, error) {
 	if tgt.Kind == target.KindMCP {
-		return mcpdriver.EnumerateTools(ctx, tgt.Reference, 0)
+		// Always sandboxed. There is no host-execution path reachable from the
+		// CLI: the unsandboxed EnumerateTools still exists for our own tests,
+		// but shipping a flag that reaches it would recreate exactly the
+		// --dangerously-run-mcp-servers hole that justifies this tool.
+		fmt.Fprintln(a.Stdout, "detonate: launching target inside a sandbox "+
+			"(network off, read-only root, no capabilities, non-root)")
+		return mcpdriver.EnumerateSandboxed(ctx, tgt.Reference, sandbox.DefaultPolicy(), nil)
 	}
+
+	// A skill's SKILL.md is inert data, so reading it needs no container. Its
+	// bundled SCRIPTS are not, and those only ever run sandboxed once probing
+	// lands in M5.
 	return skill.Load(tgt.Reference)
 }
 

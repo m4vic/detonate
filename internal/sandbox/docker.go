@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -108,16 +109,35 @@ func Start(ctx context.Context, name string, p Policy, mounts []Mount, command [
 	// docker client alive past the deadline we promised.
 	cmd.WaitDelay = teardownGrace
 
-	stdin, err := cmd.StdinPipe()
+	// Own the pipes explicitly instead of using cmd.StdoutPipe/StdinPipe.
+	//
+	// os/exec documents that Wait closes the pipes it hands out, and it is
+	// "incorrect to call Wait before all reads from the pipe have completed".
+	// We call Wait in a background goroutine (we have to: something must reap
+	// the client), so with cmd.StdoutPipe the pipe can close underneath a
+	// reader that has not finished draining. For a long-lived MCP session that
+	// races harmlessly; for a container that exits quickly it produces an
+	// empty read, which for a security tool reads as "the target did nothing"
+	// — the most dangerous possible wrong answer.
+	//
+	// With pipes we create, lifetime is ours: Wait cannot close them, and the
+	// reader sees EOF exactly when the child's write end goes away.
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("sandbox stdin: %w", err)
+		return nil, fmt.Errorf("sandbox stdout pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("sandbox stdout: %w", err)
+		stdoutR.Close()
+		stdoutW.Close()
+		return nil, fmt.Errorf("sandbox stdin pipe: %w", err)
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stdin = stdinR
+
+	stdin, stdout := stdinW, stdoutR
 
 	// Capture stderr rather than discarding it: when a sandbox fails to start,
 	// docker's own message on stderr is almost always the actual reason, and
@@ -127,8 +147,19 @@ func Start(ctx context.Context, name string, p Policy, mounts []Mount, command [
 
 	if err := cmd.Start(); err != nil {
 		cancel()
+		stdoutR.Close()
+		stdoutW.Close()
+		stdinR.Close()
+		stdinW.Close()
 		return nil, fmt.Errorf("starting sandbox: %w", err)
 	}
+
+	// The child now holds its own descriptors, so drop the parent's copies of
+	// the far ends. Without this the reader never sees EOF: our still-open
+	// write end keeps the pipe alive long after the container has exited, and
+	// a scan would hang waiting for output that can never come.
+	stdoutW.Close()
+	stdinR.Close()
 
 	c := &Container{
 		Name: name, Policy: p,
@@ -171,6 +202,9 @@ const teardownGrace = 5 * time.Second
 // `rm -f` is the backstop.
 func (c *Container) Close() error {
 	_ = c.stdin.Close()
+	// We own the read end too now, so it is ours to release. One leaked
+	// descriptor per scan matters for a tool meant to run in a CI loop.
+	defer c.stdout.Close()
 
 	select {
 	case <-c.done:

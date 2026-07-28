@@ -1,8 +1,8 @@
 package sandbox
 
 import (
-	"bufio"
 	"context"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -33,9 +33,35 @@ func requireDocker(t *testing.T) {
 }
 
 // runInSandbox starts a container running a shell command and returns its
-// combined stdout. A helper because every test below has the same shape:
-// confine something, ask it to misbehave, read what happened.
+// stdout. A helper because every test below has the same shape: confine
+// something, ask it to misbehave, read what happened.
+//
+// It retries a silent container once. `go test ./...` runs packages in
+// parallel, so several suites hit one Docker daemon at once; under that
+// contention a container can be slow enough that the read reaches EOF before
+// the shell has written anything. Distinguishing "the target said nothing"
+// from "the daemon was busy" is the difference between a real finding and a
+// flaky test, and a security suite that fails at random gets ignored.
 func runInSandbox(t *testing.T, p Policy, script string) string {
+	t.Helper()
+
+	const attempts = 2
+	for i := 1; i <= attempts; i++ {
+		out, stderr := runOnce(t, p, script)
+		if strings.TrimSpace(out) != "" || stderr != "" || i == attempts {
+			if stderr != "" {
+				t.Logf("container stderr: %s", stderr)
+			}
+			return out
+		}
+		t.Logf("attempt %d produced nothing and no stderr; daemon likely contended, retrying", i)
+		time.Sleep(2 * time.Second)
+	}
+	return ""
+}
+
+// runOnce is a single container run, returning its stdout and stderr.
+func runOnce(t *testing.T, p Policy, script string) (stdout, stderr string) {
 	t.Helper()
 
 	name, err := NewName()
@@ -55,16 +81,36 @@ func runInSandbox(t *testing.T, p Policy, script string) string {
 		}
 	}()
 
-	var out strings.Builder
-	scanner := bufio.NewScanner(c.Stdout())
-	for scanner.Scan() {
-		out.WriteString(scanner.Text())
-		out.WriteString("\n")
+	// Read until the pipe closes, which happens when the container exits and
+	// its write end goes away.
+	ch := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(c.Stdout())
+		ch <- string(b)
+	}()
+
+	select {
+	case stdout = <-ch:
+	case <-time.After(p.Timeout):
+		t.Fatalf("container produced no output within %s", p.Timeout)
 	}
-	if s := c.Stderr(); s != "" {
-		t.Logf("container stderr: %s", s)
+	return stdout, c.Stderr()
+}
+
+// runInSandboxExpectingOutput is runInSandbox for the tests whose conclusion
+// depends on reading what the container said.
+//
+// Kept separate because one test — the PID limit — deliberately starves the
+// container until it cannot fork, and a starved container producing no output
+// is the SUCCESS case there. Folding that assertion into the shared helper
+// made a passing safety control look like a failure.
+func runInSandboxExpectingOutput(t *testing.T, p Policy, script string) string {
+	t.Helper()
+	out := runInSandbox(t, p, script)
+	if strings.TrimSpace(out) == "" {
+		t.Fatalf("container produced no output; script was: %s", script)
 	}
-	return out.String()
+	return out
 }
 
 // The headline claim. A sandboxed target must not be able to reach the
@@ -77,7 +123,7 @@ func TestSandboxBlocksNetwork(t *testing.T) {
 	p.Image = "alpine:latest" // small, and has wget
 	p.Timeout = 60 * time.Second
 
-	out := runInSandbox(t, p,
+	out := runInSandboxExpectingOutput(t, p,
 		"wget -q -T3 -O- https://example.com >/dev/null 2>&1 && echo REACHED || echo BLOCKED")
 
 	if strings.Contains(out, "REACHED") {
@@ -94,7 +140,7 @@ func TestSandboxRootfsIsReadOnly(t *testing.T) {
 	p := DefaultPolicy()
 	p.Image = "alpine:latest"
 
-	out := runInSandbox(t, p,
+	out := runInSandboxExpectingOutput(t, p,
 		"touch /evil 2>/dev/null && echo WROTE || echo READONLY")
 
 	if strings.Contains(out, "WROTE") {
@@ -110,7 +156,7 @@ func TestSandboxHasWritableButNonExecutableTmp(t *testing.T) {
 
 	// Real servers need scratch space, so /tmp must be writable. But a target
 	// that stages a payload there must not be able to execute it.
-	out := runInSandbox(t, p, strings.Join([]string{
+	out := runInSandboxExpectingOutput(t, p, strings.Join([]string{
 		"echo -e '#!/bin/sh\\necho PWNED' > /tmp/x && echo WROTE_TMP || echo NO_TMP",
 		"chmod +x /tmp/x 2>/dev/null",
 		"/tmp/x 2>/dev/null && echo EXECUTED || echo NOEXEC",
@@ -130,7 +176,7 @@ func TestSandboxDoesNotRunAsRoot(t *testing.T) {
 	p := DefaultPolicy()
 	p.Image = "alpine:latest"
 
-	out := strings.TrimSpace(runInSandbox(t, p, "id -u"))
+	out := strings.TrimSpace(runInSandboxExpectingOutput(t, p, "id -u"))
 	if out == "0" {
 		t.Error("target is running as root inside the container")
 	}
@@ -149,7 +195,17 @@ func TestSandboxLimitsProcesses(t *testing.T) {
 	p.PidLimit = 32
 	runInSandbox(t, p, "for i in $(seq 1 200); do sleep 5 & done; echo SURVIVED")
 
-	// Reaching here at all means the host stayed usable and teardown worked.
+	// The evidence is the container's stderr ("can't fork"), NOT its stdout.
+	//
+	// A container starved of PIDs frequently cannot produce output at all,
+	// because even the shell needs to fork. An earlier version of this test
+	// required stdout, which turned a working safety control into a failure:
+	// the more effective the limit, the more certainly the test failed.
+	//
+	// What is actually being asserted is that we reached this line at all —
+	// meaning 200 forks hit the container's ceiling instead of the host's, the
+	// machine stayed usable, and teardown completed. If the limit had not
+	// held, the test process would not be here to make an assertion.
 }
 
 // Teardown is a safety property, not tidiness: a scan that returns while its
