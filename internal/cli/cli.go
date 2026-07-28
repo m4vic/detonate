@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/environment"
@@ -199,10 +200,23 @@ func (a *App) report(tr *trace.Trace) int {
 		return exitOK
 	}
 
-	var findings []trace.Event
+	// Findings drive the verdict. Observations are context printed alongside
+	// them and never change the outcome.
+	//
+	// The split exists because of a measured failure: an earlier version let
+	// info-level capability signals ("uses an API key", "runs a script") count
+	// as findings, and 11 of 12 real published skills came back "suspicious".
+	// They legitimately do those things. A scanner where almost everything is
+	// suspicious has said nothing, and the person reading it stops reading.
+	var findings, observations []trace.Event
 	for _, e := range tr.Events {
-		if e.Severity == trace.SeverityCritical || e.Severity == trace.SeverityNotable {
+		switch e.Severity {
+		case trace.SeverityCritical, trace.SeverityNotable:
 			findings = append(findings, e)
+		case trace.SeverityInfo:
+			if e.Source != "sandbox" && e.Source != "acquire" { // lifecycle noise
+				observations = append(observations, e)
+			}
 		}
 	}
 
@@ -213,6 +227,7 @@ func (a *App) report(tr *trace.Trace) int {
 		fmt.Fprintln(a.Stdout, "  VERDICT: clean")
 		fmt.Fprintln(a.Stdout, "  No suspicious behaviour observed while enumerating this target.")
 		fmt.Fprintf(a.Stdout, "%s\n", rule)
+		a.printObservations(observations)
 		// Say the limit out loud. A scanner that lets "we found nothing" be
 		// read as "this is safe" is worse than no scanner, because it converts
 		// ignorance into false confidence.
@@ -238,8 +253,24 @@ func (a *App) report(tr *trace.Trace) int {
 		fmt.Fprintf(a.Stdout, "     observed : +%dms during %s\n", e.Elapsed.Milliseconds(), orDash(e.During))
 		fmt.Fprintf(a.Stdout, "     source   : %s\n", e.Source)
 	}
+	a.printObservations(observations)
 	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
 	return exitFindings
+}
+
+// printObservations lists context that did not rise to a finding.
+//
+// Shown because a reviewer wants to know what a skill reaches for, withheld
+// from the verdict because reaching for an API key is what a database skill
+// does. Separating the two is what keeps the verdict worth reading.
+func (a *App) printObservations(observations []trace.Event) {
+	if len(observations) == 0 {
+		return
+	}
+	fmt.Fprintf(a.Stdout, "\n  Observations (context, not findings):\n")
+	for _, e := range observations {
+		fmt.Fprintf(a.Stdout, "    - %s\n", e.Summary)
+	}
 }
 
 func orDash(s string) string {
@@ -336,11 +367,24 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 		return res.Tools, res.Trace, nil
 	}
 
-	// A skill's SKILL.md is inert data, so reading it needs no container and
-	// produces no behavioural trace. Its bundled SCRIPTS are not inert, and
-	// those only ever run sandboxed once probing lands in M5.
+	// A skill is mostly a large prompt: its SKILL.md body is text an agent
+	// reads and obeys, so the analysis is of the instructions rather than of
+	// running code. Reading it needs no container.
 	tools, err := skill.Load(tgt.Reference)
-	return tools, nil, err
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sk, err := skill.LoadSkill(tgt.Reference)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
+	for _, ev := range skill.Analyze(sk) {
+		tr.Add(ev)
+	}
+	return tools, tr, nil
 }
 
 func (a *App) printTools(tools []toolinfo.ToolInfo) {

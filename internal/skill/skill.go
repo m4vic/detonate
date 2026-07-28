@@ -120,6 +120,36 @@ func FindBundledScripts(dir string) ([]string, error) {
 // The SKILL.md itself becomes one ToolInfo (the name and description a
 // poisoned frontmatter targets), plus one per bundled script (what actually
 // executes when the skill is invoked).
+// LoadSkill reads a skill directory into the parsed form Analyze needs.
+//
+// Separate from Load because the two callers want different things: the
+// pipeline wants normalized ToolInfo entries, while analysis needs the raw
+// instruction body, which is the actual attack surface and is deliberately
+// not carried in ToolInfo.
+func LoadSkill(dir string) (Skill, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		return Skill{}, fmt.Errorf("no SKILL.md found in %q: %w", dir, err)
+	}
+	fm, body := parseFrontmatter(string(raw))
+
+	name := fm.Name
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+	scripts, err := FindBundledScripts(dir)
+	if err != nil {
+		return Skill{}, err
+	}
+	return Skill{
+		Name:         name,
+		Description:  fm.Description,
+		AllowedTools: fm.AllowedTools,
+		Body:         body,
+		Scripts:      scripts,
+	}, nil
+}
+
 func Load(dir string) ([]toolinfo.ToolInfo, error) {
 	skillMD := filepath.Join(dir, "SKILL.md")
 	raw, err := os.ReadFile(skillMD)
