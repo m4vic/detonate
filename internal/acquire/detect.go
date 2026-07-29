@@ -267,6 +267,73 @@ func pythonEntryModule(path string) string {
 	return entries[names[0]]
 }
 
+// maxBuildRootDepth bounds how far above a target we will look for the config
+// it inherits from. Two levels covers the monorepo layout in practice
+// (repo/src/<server>) and stops a malformed extends chain from dragging an
+// entire drive into the container.
+const maxBuildRootDepth = 4
+
+// buildContext says where a build has to run.
+//
+// Root is the host directory to copy into the container; Sub is the target's
+// slash-separated position inside it, empty when they are the same directory.
+type buildContext struct {
+	Root string
+	Sub  string
+}
+
+// buildContextFor works out whether a project can be built alone.
+//
+// A package inside a monorepo usually cannot. The official memory server's
+// tsconfig.json is four lines and an `extends: "../../tsconfig.json"`, and the
+// root config it inherits supplies esModuleInterop and skipLibCheck. Copying
+// only the package leaves tsc with neither, so it type-checks node_modules and
+// drowns in errors from zod — a failure with no connection to the code being
+// scanned.
+//
+// Only relative extends are followed. A bare specifier like
+// "@tsconfig/node20/tsconfig.json" resolves from node_modules, which the
+// install step provides anyway.
+func buildContextFor(targetDir string) buildContext {
+	self := buildContext{Root: targetDir}
+
+	data, err := os.ReadFile(filepath.Join(targetDir, "tsconfig.json"))
+	if err != nil {
+		return self
+	}
+	var cfg struct {
+		Extends string `json:"extends"`
+	}
+	// tsconfig.json permits comments and trailing commas, which encoding/json
+	// rejects. A file we cannot parse simply means we learned nothing, and the
+	// package is built on its own exactly as before.
+	if json.Unmarshal([]byte(strings.TrimPrefix(string(data), "\uFEFF")), &cfg) != nil {
+		return self
+	}
+	if !strings.HasPrefix(cfg.Extends, "../") {
+		return self
+	}
+
+	root := filepath.Clean(filepath.Join(targetDir, filepath.FromSlash(filepath.Dir(cfg.Extends))))
+	rel, err := filepath.Rel(root, targetDir)
+	if err != nil {
+		return self
+	}
+	rel = filepath.ToSlash(rel)
+	// Rel must describe a descent. Anything containing ".." means the resolved
+	// root is not an ancestor, and copying it would not contain the target.
+	if rel == "." || strings.HasPrefix(rel, "..") {
+		return self
+	}
+	if strings.Count(rel, "/")+1 > maxBuildRootDepth {
+		return self
+	}
+	if !fileExists(filepath.Join(root, "tsconfig.json")) {
+		return self
+	}
+	return buildContext{Root: root, Sub: rel}
+}
+
 func hasBuildScript(dir string) bool {
 	return strings.TrimSpace(readPackageJSON(dir).Scripts["build"]) != ""
 }
@@ -283,7 +350,9 @@ func fileExists(path string) bool {
 // is what makes the result portable to phase 2: the deps live in a volume we
 // mount read-only, so the detonation container gets them without ever having
 // had a network.
-func (m Manifest) installCommand(depsDir string) []string {
+// sub is the target's slash-separated position inside the copied tree, empty
+// when the target is the whole thing.
+func (m Manifest) installCommand(depsDir, sub string) []string {
 	switch m.Ecosystem {
 	case EcosystemPython:
 		var pipArgs string
@@ -308,6 +377,14 @@ func (m Manifest) installCommand(depsDir string) []string {
 		// beyond a read-only copy of the target.
 		if m.NeedsBuild {
 			app := appDir(depsDir)
+			// Where the build runs. For a standalone package that is the copy
+			// root; for a monorepo package it is the package's own directory
+			// inside the copied repository, so its tsconfig can still reach
+			// the root config it extends.
+			buildDir := app
+			if sub != "" {
+				buildDir = app + "/" + sub
+			}
 			// The whole project has to move into the volume: a build writes
 			// its output next to the source, and /target is a read-only host
 			// mount precisely so a target cannot rewrite itself mid-scan.
@@ -323,7 +400,7 @@ func (m Manifest) installCommand(depsDir string) []string {
 				// inside the container its native modules are wrong. .git is
 				// dead weight that can dwarf the source.
 				"rm -rf " + app + "/node_modules " + app + "/.git",
-				"cd " + app,
+				"cd " + buildDir,
 				// devDependencies are required here, unlike the no-build
 				// branch: the compiler doing the build is one of them.
 				"npm install",

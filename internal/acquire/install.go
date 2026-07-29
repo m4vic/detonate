@@ -72,11 +72,22 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 		return nil, err
 	}
 
+	// A package inside a monorepo cannot be built alone: its tsconfig extends
+	// one at the repository root. When that is the case the copy starts higher
+	// up and the build runs in the package's own subdirectory.
+	bc := buildContext{Root: targetDir}
+	if m.NeedsBuild {
+		bc = buildContextFor(targetDir)
+	}
+
 	// A built project's dependencies land beside its source in /deps/app, not
 	// at the volume root, so the interpreter has to be pointed there instead.
 	codeRoot := DepsDir
 	if m.NeedsBuild {
 		codeRoot = appDir(DepsDir)
+		if bc.Sub != "" {
+			codeRoot += "/" + bc.Sub
+		}
 	}
 
 	res := &Result{
@@ -90,7 +101,7 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 	}
 
 	started := time.Now()
-	stdout, stderr, runErr := runInstall(ctx, targetDir, volume, m, policy)
+	stdout, stderr, runErr := runInstall(ctx, bc, volume, m, policy)
 
 	action := fmt.Sprintf("installing %s dependencies from %s", m.Ecosystem, m.File)
 	if m.NeedsBuild {
@@ -177,7 +188,7 @@ func createVolume(ctx context.Context) (string, error) {
 }
 
 // runInstall executes the package manager in a container with network access.
-func runInstall(ctx context.Context, targetDir, volume string, m Manifest, base sandbox.Policy) (stdout, stderr string, err error) {
+func runInstall(ctx context.Context, bc buildContext, volume string, m Manifest, base sandbox.Policy) (stdout, stderr string, err error) {
 	p := base
 	p.Timeout = installTimeout
 
@@ -222,12 +233,15 @@ func runInstall(ctx context.Context, targetDir, volume string, m Manifest, base 
 		return "", "", err
 	}
 
+	// /target is the build root, which for a monorepo package is an ancestor
+	// of the directory being scanned. Still read-only: a wider mount must not
+	// become a writable one.
 	mounts := []sandbox.Mount{
-		{HostPath: targetDir, ContainerPath: "/target", ReadOnly: true},
+		{HostPath: bc.Root, ContainerPath: "/target", ReadOnly: true},
 		{HostPath: volume, ContainerPath: DepsDir, ReadOnly: false},
 	}
 
-	c, startErr := sandbox.Start(ctx, name, p, mounts, m.installCommand(DepsDir))
+	c, startErr := sandbox.Start(ctx, name, p, mounts, m.installCommand(DepsDir, bc.Sub))
 	if startErr != nil {
 		return "", "", startErr
 	}

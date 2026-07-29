@@ -226,7 +226,7 @@ func TestStartCommand(t *testing.T) {
 func TestBuildInstallCommand(t *testing.T) {
 	m := Manifest{Ecosystem: EcosystemNode, File: "package.json",
 		Entry: "dist/index.js", NeedsBuild: true}
-	cmd := strings.Join(m.installCommand("/deps"), " ")
+	cmd := strings.Join(m.installCommand("/deps", ""), " ")
 
 	// The whole project must move into the volume: a build writes next to the
 	// source, and /target is a read-only host mount.
@@ -253,6 +253,85 @@ func TestBuildInstallCommand(t *testing.T) {
 	}
 	if !strings.HasPrefix(cmd, "sh -c set -e") {
 		t.Errorf("a failed build must fail the container: %q", cmd)
+	}
+}
+
+// A package inside a monorepo cannot be built alone. The official memory
+// server's tsconfig is four lines and an extends of ../../tsconfig.json, and
+// the root config supplies esModuleInterop and skipLibCheck. Copying only the
+// package left tsc without either, so it type-checked node_modules and failed
+// on errors from zod — a failure with no connection to the scanned code.
+func TestBuildContextClimbsToTheInheritedConfig(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"tsconfig.json":            `{"compilerOptions":{"esModuleInterop":true}}`,
+		"package.json":             `{"workspaces":["src/*"]}`,
+		"src/memory/tsconfig.json": `{"extends":"../../tsconfig.json"}`,
+		"src/memory/package.json":  `{"bin":"dist/index.js","scripts":{"build":"tsc"}}`,
+		"src/memory/index.ts":      `console.log(1)`,
+	})
+	target := filepath.Join(root, "src", "memory")
+
+	bc := buildContextFor(target)
+	if bc.Root != root {
+		t.Errorf("Root = %q, want the repository root %q", bc.Root, root)
+	}
+	if bc.Sub != "src/memory" {
+		t.Errorf("Sub = %q, want src/memory", bc.Sub)
+	}
+
+	// The build has to run in the package, not the copy root, or its tsconfig
+	// resolves against the wrong directory.
+	cmd := strings.Join(Manifest{Ecosystem: EcosystemNode, NeedsBuild: true}.
+		installCommand("/deps", bc.Sub), " ")
+	if !strings.Contains(cmd, "cd /deps/app/src/memory") {
+		t.Errorf("build must run in the package directory: %q", cmd)
+	}
+	// The copy still starts at the root so the inherited config comes along.
+	if !strings.Contains(cmd, "cp -a /target/. /deps/app/") {
+		t.Errorf("copy must start at the build root: %q", cmd)
+	}
+}
+
+// A standalone package must keep the existing behaviour exactly: copy its own
+// directory, build in place.
+func TestBuildContextLeavesStandaloneProjectsAlone(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"tsconfig.json": `{"compilerOptions":{"outDir":"dist"}}`,
+		"package.json":  `{"main":"dist/index.js","scripts":{"build":"tsc"}}`,
+	})
+
+	bc := buildContextFor(dir)
+	if bc.Root != dir || bc.Sub != "" {
+		t.Errorf("buildContextFor = %+v, want the target itself with no sub", bc)
+	}
+}
+
+// A bare specifier resolves from node_modules, which the install step
+// provides. Climbing for it would copy an unrelated parent directory.
+func TestBuildContextIgnoresPackageExtends(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"tsconfig.json": `{"extends":"@tsconfig/node20/tsconfig.json"}`,
+		"package.json":  `{"main":"dist/index.js","scripts":{"build":"tsc"}}`,
+	})
+	if bc := buildContextFor(dir); bc.Sub != "" {
+		t.Errorf("Sub = %q, want empty for a package extends", bc.Sub)
+	}
+}
+
+// An extends pointing at a config that is not there must not drag a parent
+// directory into the container on the strength of a broken path.
+func TestBuildContextRequiresTheConfigToExist(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "tsconfig.json"),
+		[]byte(`{"extends":"../tsconfig.json"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if bc := buildContextFor(target); bc.Sub != "" {
+		t.Errorf("Sub = %q, want empty when the inherited config is absent", bc.Sub)
 	}
 }
 
@@ -297,7 +376,7 @@ func TestEnvFor(t *testing.T) {
 
 func TestInstallCommand(t *testing.T) {
 	t.Run("requirements.txt installs from the file", func(t *testing.T) {
-		cmd := strings.Join(Manifest{Ecosystem: EcosystemPython, File: "requirements.txt"}.installCommand("/deps"), " ")
+		cmd := strings.Join(Manifest{Ecosystem: EcosystemPython, File: "requirements.txt"}.installCommand("/deps", ""), " ")
 		if !strings.Contains(cmd, "-r /target/requirements.txt") {
 			t.Errorf("command = %q", cmd)
 		}
@@ -307,7 +386,7 @@ func TestInstallCommand(t *testing.T) {
 	})
 
 	t.Run("pyproject installs the project, never editable", func(t *testing.T) {
-		cmd := strings.Join(Manifest{Ecosystem: EcosystemPython, File: "pyproject.toml"}.installCommand("/deps"), " ")
+		cmd := strings.Join(Manifest{Ecosystem: EcosystemPython, File: "pyproject.toml"}.installCommand("/deps", ""), " ")
 		// -e writes into the target directory, which is mounted read-only
 		// precisely so a target cannot modify itself mid-scan.
 		if strings.Contains(cmd, " -e ") {
@@ -316,7 +395,7 @@ func TestInstallCommand(t *testing.T) {
 	})
 
 	t.Run("node does not suppress lifecycle scripts", func(t *testing.T) {
-		cmd := strings.Join(Manifest{Ecosystem: EcosystemNode, File: "package.json"}.installCommand("/deps"), " ")
+		cmd := strings.Join(Manifest{Ecosystem: EcosystemNode, File: "package.json"}.installCommand("/deps", ""), " ")
 		// Lifecycle scripts are the supply-chain surface we exist to observe.
 		// Suppressing them would hide the most valuable thing this phase finds.
 		if strings.Contains(cmd, "--ignore-scripts") {
@@ -324,7 +403,7 @@ func TestInstallCommand(t *testing.T) {
 		}
 	})
 
-	if cmd := (Manifest{Ecosystem: EcosystemNone}).installCommand("/deps"); cmd != nil {
+	if cmd := (Manifest{Ecosystem: EcosystemNone}).installCommand("/deps", ""); cmd != nil {
 		t.Errorf("installCommand(none) = %v, want nil", cmd)
 	}
 }
