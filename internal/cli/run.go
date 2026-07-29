@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -36,10 +37,35 @@ type scanOptions struct {
 	noProbe    bool
 	noInstall  bool
 	noScripts  bool
+
+	// format is "text" (default), "json", or "sarif".
+	format string
+	// out writes machine-readable output to a file instead of stdout, which
+	// is what CI needs: the human-readable log stays in the job output while
+	// the artifact goes somewhere an upload step can find it.
+	out string
 }
 
 // RunTarget scans one target, working out for itself what it is.
 func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int {
+	switch opt.format {
+	case "", "text", "json", "sarif":
+	default:
+		fmt.Fprintf(a.Stderr, "  unknown format %q; use text, json, or sarif\n", opt.format)
+		return exitUsage
+	}
+	a.format = opt.format
+	a.outFile = opt.out
+	a.scanTarget = target
+
+	// Progress chatter would corrupt a JSON stream on stdout. It stays only
+	// when the output is for a person, or when the document is going to a file
+	// and stdout is free.
+	if (a.format == "json" || a.format == "sarif") && a.outFile == "" {
+		a.docOut = a.Stdout // the document still needs somewhere real to go
+		a.Stdout = io.Discard
+	}
+
 	// A remote target is cloned first, then re-detected on the clone: what
 	// matters is what is inside the repository, not what the URL looked like.
 	if fetch.IsURL(target) {
@@ -155,6 +181,8 @@ func bindScanFlags(fs *flag.FlagSet, opt *scanOptions) {
 	fs.BoolVar(&opt.noProbe, "no-probe", false, "Do not call tools with adversarial input.")
 	fs.BoolVar(&opt.noInstall, "no-install", false, "Do not install the target's dependencies.")
 	fs.BoolVar(&opt.noScripts, "no-scripts", false, "Do not run a skill's bundled scripts.")
+	fs.StringVar(&opt.format, "format", "text", "Output format: text, json, or sarif.")
+	fs.StringVar(&opt.out, "out", "", "Write machine-readable output to this file.")
 }
 
 // shorten trims a long absolute path for display, keeping the tail because

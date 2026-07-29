@@ -82,6 +82,25 @@ uses that path rather than a host one.
 
 **Exit codes:** `0` clean, `1` error, `2` bad usage or environment, `3` findings.
 
+### In CI
+
+`--format sarif` produces output GitHub code scanning understands, so findings
+appear as annotations on the pull request diff.
+
+```yaml
+- name: Scan agent dependencies
+  run: detonate ./mcp-servers/my-server --format sarif --out detonate.sarif
+  continue-on-error: true          # let the upload run, then gate on it
+
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: detonate.sarif
+```
+
+`--format json` gives the same scan as structured data for anything else.
+Exit codes are identical across formats, so switching to SARIF for
+annotations cannot change whether the build passes.
+
 ## What it checks
 
 **MCP servers** - the danger is code that executes.

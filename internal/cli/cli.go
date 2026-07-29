@@ -29,6 +29,7 @@ import (
 	"github.com/m4vic/detonate/internal/mcpdriver"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/probe"
+	"github.com/m4vic/detonate/internal/report"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/skill"
 	"github.com/m4vic/detonate/internal/target"
@@ -65,6 +66,23 @@ type App struct {
 	// CheckDocker is injected so tests can exercise the enumeration path on a
 	// machine without Docker. Production always gets the real check.
 	CheckDocker func(context.Context) environment.DockerStatus
+
+	// format and outFile carry the machine-readable output selection through
+	// to reporting. Fields rather than parameters because report() is called
+	// from several paths (prompt, skill, MCP) and threading two more arguments
+	// through each of them would obscure what those functions are for.
+	format  string
+	outFile string
+
+	// docOut is where the JSON or SARIF document goes once progress output has
+	// been silenced. Without it the document would be written to the same
+	// io.Discard that suppressed the chatter.
+	docOut io.Writer
+
+	// scanTarget and scanTools describe the current scan, needed to build a
+	// complete document rather than just a list of findings.
+	scanTarget string
+	scanTools  []toolinfo.ToolInfo
 }
 
 // New returns an App wired to the real environment.
@@ -158,8 +176,13 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
-	fmt.Fprint(a.Stdout, banner)
-	fmt.Fprintln(a.Stdout)
+	// The banner is decoration, and decoration on stdout corrupts a JSON or
+	// SARIF stream. Printed before RunTarget can silence output, so the check
+	// has to happen here.
+	if opt.format == "" || opt.format == "text" {
+		fmt.Fprint(a.Stdout, banner)
+		fmt.Fprintln(a.Stdout)
+	}
 	return a.RunTarget(ctx, args[0], opt)
 }
 
@@ -266,7 +289,15 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		a.diffBaseline(tgt.Label(), tools, tr)
 	}
 
-	a.printTools(tools)
+	a.scanTools = tools
+	if a.scanTarget == "" {
+		a.scanTarget = tgt.Reference
+	}
+
+	// Tool listing is decoration; suppress it when the caller wants a stream.
+	if a.format != "json" && a.format != "sarif" {
+		a.printTools(tools)
+	}
 	return a.report(tr)
 }
 
@@ -327,6 +358,13 @@ func (a *App) diffBaseline(target string, tools []toolinfo.ToolInfo, tr *trace.T
 // exits 0 while reporting an exfiltration attempt is a scanner that gets
 // ignored by the automation it was bought for.
 func (a *App) report(tr *trace.Trace) int {
+	// Machine-readable output replaces the terminal report rather than adding
+	// to it: a caller asking for JSON is piping it somewhere, and decorative
+	// text mixed into the stream would break that.
+	if a.format == "json" || a.format == "sarif" {
+		return a.reportMachine(tr)
+	}
+
 	if tr == nil {
 		fmt.Fprintln(a.Stdout, "  no behavioural trace collected "+
 			"(this target kind is not executed yet)")
@@ -389,6 +427,75 @@ func (a *App) report(tr *trace.Trace) int {
 	a.printObservations(observations)
 	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
 	return exitFindings
+}
+
+// reportMachine writes JSON or SARIF and returns the same exit code the
+// terminal report would have.
+//
+// The exit code is deliberately computed the same way regardless of format: a
+// pipeline that switches to --format sarif for annotations must not also
+// change whether the build passes.
+func (a *App) reportMachine(tr *trace.Trace) int {
+	s := report.Build(tr, a.scanTools, a.scanTarget, Version)
+
+	// docOut, not Stdout: when progress output was silenced to keep the stream
+	// clean, Stdout is io.Discard and writing the document there would throw
+	// away the entire report.
+	w := a.docOut
+	if w == nil {
+		w = a.Stdout
+	}
+	if a.outFile != "" {
+		f, err := os.Create(a.outFile)
+		if err != nil {
+			fmt.Fprintf(a.Stderr, "detonate: cannot write %s: %v\n", a.outFile, err)
+			return exitFailure
+		}
+		defer f.Close()
+		w = f
+	}
+
+	var err error
+	if a.format == "sarif" {
+		err = report.SARIF(w, tr, a.sarifURI(), Version)
+	} else {
+		err = report.JSON(w, s)
+	}
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: writing report: %v\n", err)
+		return exitFailure
+	}
+
+	if a.outFile != "" {
+		fmt.Fprintf(a.Stdout, "  wrote %s (%s)\n", a.outFile, a.format)
+	}
+
+	if s.Counts.Critical > 0 || s.Counts.Notable > 0 {
+		return exitFindings
+	}
+	return exitOK
+}
+
+// sarifURI is what a finding gets attached to in a code-scanning UI.
+//
+// GitHub resolves this relative to the repository root, so a path outside the
+// checkout cannot be annotated on a line. Falling back to the bare target name
+// puts the finding on the run itself, which is visible, rather than silently
+// attaching it to a file that does not exist.
+func (a *App) sarifURI() string {
+	if rel, err := filepath.Rel(mustWD(), a.scanTarget); err == nil &&
+		!strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(filepath.Base(a.scanTarget))
+}
+
+func mustWD() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
 }
 
 // printObservations lists context that did not rise to a finding.
