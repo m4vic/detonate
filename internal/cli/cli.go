@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"github.com/m4vic/detonate/internal/acquire"
+	"github.com/m4vic/detonate/internal/baseline"
 	"github.com/m4vic/detonate/internal/environment"
+	"github.com/m4vic/detonate/internal/fetch"
 	"github.com/m4vic/detonate/internal/mcpdriver"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/probe"
@@ -75,26 +77,34 @@ const usage = `detonate %s
 Detonate untrusted AI-connected tools in a sandbox and report what they
 actually do, not what their manifest claims.
 
-Usage:
-  detonate scan --mcp <command>   Scan an MCP server launched over stdio
-  detonate scan --skill <path>    Scan an agent skill directory
-  detonate --version              Print the version
+Run detonate with no arguments for a guided scan.
 
-Flags:
-  --dir <path>   Host directory holding the server, mounted read-only
-                 at /target inside the sandbox.
-  --install      Install the target's dependencies first, in a separate
-                 container that has network access but never runs the
-                 target. Needed for any server that imports a package.
+Targets:
+  --mcp <command>    An MCP server, launched over stdio in the sandbox
+  --skill <path>     An agent skill folder (contains SKILL.md)
+  --prompt <file>    A prompt or instruction file (no Docker needed)
+  --git <url>        Clone a repository and scan it
+
+Options:
+  --dir <path>       Folder holding the server, mounted read-only at
+                     /target inside the sandbox
+  --path <sub>       Sub-directory to scan inside a cloned repo
+  --install          Install dependencies first, in a separate container
+                     that has network access but never runs the target
+  --probe            Call each tool with adversarial arguments and watch
+  --run-scripts      Run a skill's bundled scripts in the sandbox
+  --no-baseline      Skip comparing against the previous scan
 
 Examples:
+  detonate
   detonate scan --skill ./skills/pdf-extractor
-  detonate scan --mcp "python /target/server.py" --dir ./my-server
-  detonate scan --mcp "python /target/server.py" --dir ./my-server --install
+  detonate scan --prompt ./system-prompt.txt
+  detonate scan --git github.com/owner/repo --path skills/foo
+  detonate scan --mcp "python /target/server.py" --dir ./srv --install --probe
 
 Exit codes:
   0  clean    2  bad usage or environment
-  1  error    3  behavioural findings
+  1  error    3  findings
 `
 
 // Run executes one CLI invocation and returns a process exit code. It never
@@ -143,15 +153,53 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	fs.SetOutput(a.Stderr)
 	mcpCmd := fs.String("mcp", "", "An MCP server launched over stdio (e.g. 'python /target/server.py').")
 	skillPath := fs.String("skill", "", "An agent skill directory (a SKILL.md plus its bundled scripts).")
+	promptPath := fs.String("prompt", "", "A prompt or instruction file to analyse for injected instructions.")
+	gitURL := fs.String("git", "", "Clone a repository and scan it (e.g. github.com/owner/repo).")
+	subPath := fs.String("path", "", "Sub-directory inside the cloned repo to scan.")
 	mountDir := fs.String("dir", "", "Host directory holding the MCP server, mounted read-only at /target in the sandbox.")
 	install := fs.Bool("install", false, "Install the target's dependencies first, in a separate network-enabled container.")
 	doProbe := fs.Bool("probe", false, "Call each discovered tool with adversarial arguments and watch what it does.")
+	runScripts := fs.Bool("run-scripts", false, "Run a skill's bundled scripts in the sandbox and watch them.")
+	noBaseline := fs.Bool("no-baseline", false, "Skip comparing against the previous scan of this target.")
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
 
-	tgt, err := resolveTarget(*mcpCmd, *skillPath)
+	// --prompt needs no Docker and no target: a prompt is inert text, and the
+	// analysis is the same instruction check a skill body gets. Handled first
+	// so it stays usable on a machine with no container runtime at all.
+	if *promptPath != "" {
+		return a.scanPrompt(*promptPath)
+	}
+
+	// --git clones first, then the rest of the scan proceeds against the
+	// clone as if the user had passed --dir.
+	dir := *mountDir
+	skillDir := *skillPath
+	if *gitURL != "" {
+		fetched, err := fetch.Git(ctx, *gitURL)
+		if err != nil {
+			fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
+			return exitFailure
+		}
+		defer fetched.Cleanup()
+
+		root, err := fetched.SubDir(*subPath)
+		if err != nil {
+			fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
+			return exitUsage
+		}
+		fmt.Fprintf(a.Stdout, "detonate: cloned %s\n", fetched.Source)
+
+		if *skillPath != "" || fileExists(filepath.Join(root, "SKILL.md")) {
+			skillDir = root
+		} else {
+			dir = root
+		}
+	}
+
+	tgt, err := resolveTarget(*mcpCmd, skillDir)
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
 		return exitUsage
@@ -180,14 +228,72 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		fmt.Fprintf(a.Stdout, "detonate: reaped %d orphaned container(s) from a previous run\n", n)
 	}
 
-	tools, tr, err := a.enumerate(ctx, tgt, *mountDir, *install, *doProbe)
+	tools, tr, err := a.enumerate(ctx, tgt, dir, *install, *doProbe, *runScripts)
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "detonate: enumeration failed: %v\n", err)
 		return exitFailure
 	}
 
+	// Compare against the last scan of this target. Every other check here is
+	// a snapshot, and a snapshot cannot detect a rug pull by definition — a
+	// server that serves clean descriptions during review and swaps them
+	// afterwards looks perfect every single time it is looked at once.
+	if !*noBaseline && len(tools) > 0 && tr != nil {
+		a.diffBaseline(tgt.Label(), tools, tr)
+	}
+
 	a.printTools(tools)
 	return a.report(tr)
+}
+
+// scanPrompt analyses a prompt or instruction file.
+//
+// No Docker, no container: a prompt is inert text that cannot be run, so the
+// only thing to do is read it. Kept usable without a container runtime because
+// the most likely user is someone checking a file they were sent.
+func (a *App) scanPrompt(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: cannot read %s: %v\n", path, err)
+		return exitUsage
+	}
+
+	fmt.Fprintf(a.Stdout, "detonate: target: prompt:%s (%d bytes)\n", path, len(data))
+
+	tr := &trace.Trace{Target: path, Started: time.Now()}
+	for _, ev := range skill.AnalyzePrompt(string(data)) {
+		tr.Add(ev)
+	}
+	return a.report(tr)
+}
+
+// diffBaseline compares this scan against the previous one and records the
+// result for next time.
+//
+// Failures here are reported but never fail the scan: a missing or unwritable
+// baseline directory is a housekeeping problem, and refusing to report real
+// findings because of it would be the wrong trade.
+func (a *App) diffBaseline(target string, tools []toolinfo.ToolInfo, tr *trace.Trace) {
+	current := baseline.Capture(target, tools)
+
+	previous, existed, err := baseline.Load(target)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: could not read baseline: %v\n", err)
+		return
+	}
+
+	if existed {
+		for _, ev := range baseline.Compare(previous, current) {
+			tr.Add(ev)
+		}
+	} else {
+		fmt.Fprintln(a.Stdout, "detonate: first scan of this target; recording a baseline "+
+			"so the next run can detect changed tool descriptions")
+	}
+
+	if err := baseline.Save(current); err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: could not save baseline: %v\n", err)
+	}
 }
 
 // report prints observed behaviour and picks the exit code.
@@ -296,7 +402,7 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 	}
 }
 
-func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string, install, doProbe bool) ([]toolinfo.ToolInfo, *trace.Trace, error) {
+func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string, install, doProbe, runScripts bool) ([]toolinfo.ToolInfo, *trace.Trace, error) {
 	if tgt.Kind == target.KindMCP {
 		policy := sandbox.DefaultPolicy()
 
@@ -420,6 +526,18 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 	tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
 	for _, ev := range skill.Analyze(sk) {
 		tr.Add(ev)
+	}
+
+	// The dynamic half of skill analysis. SKILL.md is a prompt and can only be
+	// read, but the bundled scripts are real programs an agent will execute on
+	// the user's machine — and until they run, a script that phones home is
+	// indistinguishable from one that formats a table.
+	if runScripts && len(sk.Scripts) > 0 {
+		fmt.Fprintf(a.Stdout, "detonate: running %d bundled script(s) in the sandbox...\n",
+			len(sk.Scripts))
+		for _, ev := range skill.DetonateScripts(ctx, tgt.Reference, sk, sandbox.DefaultPolicy()) {
+			tr.Add(ev)
+		}
 	}
 	return tools, tr, nil
 }

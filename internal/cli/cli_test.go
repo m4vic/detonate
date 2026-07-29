@@ -63,8 +63,8 @@ func TestUsageAndVersion(t *testing.T) {
 		if code := app.printUsageAndExit(); code != 0 {
 			t.Errorf("exit = %d, want 0", code)
 		}
-		if !strings.Contains(stdout.String(), "Usage:") {
-			t.Errorf("expected usage, got %q", stdout.String())
+		if !strings.Contains(stdout.String(), "Targets:") {
+			t.Errorf("help output missing the Targets section, got %q", stdout.String())
 		}
 	})
 
@@ -73,8 +73,8 @@ func TestUsageAndVersion(t *testing.T) {
 		if code := app.Run(context.Background(), []string{"--help"}); code != 0 {
 			t.Errorf("exit = %d, want 0", code)
 		}
-		if !strings.Contains(stdout.String(), "Usage:") {
-			t.Errorf("expected usage, got %q", stdout.String())
+		if !strings.Contains(stdout.String(), "Targets:") {
+			t.Errorf("help output missing the Targets section, got %q", stdout.String())
 		}
 	})
 

@@ -28,6 +28,19 @@ import (
 // The second is the valuable one, and it is the same "declared versus actual"
 // idea that makes the MCP side work.
 
+// AnalyzePrompt runs the instruction analysis over arbitrary text.
+//
+// A skill's body IS a prompt, so the same signatures apply to a raw prompt
+// file, a system prompt, an agent config, or a README that an agent is going
+// to read. The only thing that changes is that there are no declared
+// permissions to compare against, so the permission check is skipped.
+//
+// This is the cheapest useful surface detonate has: injected instructions look
+// the same wherever they are hiding.
+func AnalyzePrompt(text string) []trace.Event {
+	return Analyze(Skill{Name: "prompt", Body: text, skipPermissions: true})
+}
+
 // Analyze inspects a skill's instructions and permissions.
 func Analyze(sk Skill) []trace.Event {
 	var events []trace.Event
@@ -57,7 +70,9 @@ func Analyze(sk Skill) []trace.Event {
 		}
 	}
 
-	events = append(events, checkPermissions(sk, now)...)
+	if !sk.skipPermissions {
+		events = append(events, checkPermissions(sk, now)...)
+	}
 	return events
 }
 
@@ -69,6 +84,11 @@ type Skill struct {
 	AllowedTools []string
 	Body         string
 	Scripts      []string
+
+	// skipPermissions suppresses the declared-versus-actual check for inputs
+	// that make no declaration, such as a raw prompt file. Reporting "declares
+	// no allowed-tools" for something that was never a skill would be noise.
+	skipPermissions bool
 }
 
 // warningContext marks a line as cautionary rather than instructional.
