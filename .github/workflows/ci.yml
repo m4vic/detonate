@@ -16,6 +16,17 @@ jobs:
           go-version: '1.25'
           cache: true
 
+      # Formatting drifted unnoticed across seven files because nothing checked
+      # it. gofmt has one right answer, so a gate here costs nothing and keeps
+      # review diffs about behaviour rather than whitespace.
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
       - name: Vet
         run: go vet ./...
 

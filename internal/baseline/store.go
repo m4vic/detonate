@@ -29,9 +29,9 @@ import (
 
 // Record is what a target looked like at one point in time.
 type Record struct {
-	Target    string            `json:"target"`
-	RecordedAt time.Time        `json:"recorded_at"`
-	Tools     map[string]string `json:"tools"` // tool name -> description hash
+	Target       string            `json:"target"`
+	RecordedAt   time.Time         `json:"recorded_at"`
+	Tools        map[string]string `json:"tools"`        // tool name -> description hash
 	Descriptions map[string]string `json:"descriptions"` // name -> description, for the diff
 }
 

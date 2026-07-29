@@ -65,9 +65,9 @@ func TestWizardAsksOnceAndDetects(t *testing.T) {
 
 	s := out.String()
 	for _, want := range []string{
-		"Target:",                      // the single question
-		"MCP server",                   // it worked out the kind
-		"python /target/server.py",     // and the start command
+		"Target:",                  // the single question
+		"MCP server",               // it worked out the kind
+		"python /target/server.py", // and the start command
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("wizard output missing %q\n---\n%s", want, s)

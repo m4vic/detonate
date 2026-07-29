@@ -49,8 +49,8 @@ type Container struct {
 func containerArgs(name string, p Policy, mounts []Mount, command []string) []string {
 	args := []string{
 		"run",
-		"--rm",           // delete the container when it exits; scans leave no litter
-		"--interactive",  // keep stdin open: this is the MCP pipe
+		"--rm",          // delete the container when it exits; scans leave no litter
+		"--interactive", // keep stdin open: this is the MCP pipe
 		"--name", name,
 		"--user", p.User,
 		"--memory", strconv.FormatInt(p.MemoryBytes, 10),

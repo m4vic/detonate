@@ -40,9 +40,9 @@ func TestDefaultPolicyIsLockedDown(t *testing.T) {
 	args := argsFor(DefaultPolicy())
 
 	checks := []struct {
-		what  string
-		ok    bool
-		why   string
+		what string
+		ok   bool
+		why  string
 	}{
 		{"--network none", hasFlag(args, "--network", "none"),
 			"network access is the difference between a scan and an incident"},

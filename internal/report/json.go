@@ -47,15 +47,15 @@ type Counts struct {
 // trace.Event carries a free-form Detail map, which is right internally and
 // awkward for a consumer. The fields that matter are lifted out and named.
 type Finding struct {
-	Severity string `json:"severity"`
-	Kind     string `json:"kind"`
-	Summary  string `json:"summary"`
-	Evidence string `json:"evidence,omitempty"`
-	Payload  string `json:"payload,omitempty"`
-	Why      string `json:"why,omitempty"`
-	During   string `json:"during,omitempty"`
-	Source   string `json:"source"`
-	ElapsedMS int64 `json:"elapsed_ms"`
+	Severity  string `json:"severity"`
+	Kind      string `json:"kind"`
+	Summary   string `json:"summary"`
+	Evidence  string `json:"evidence,omitempty"`
+	Payload   string `json:"payload,omitempty"`
+	Why       string `json:"why,omitempty"`
+	During    string `json:"during,omitempty"`
+	Source    string `json:"source"`
+	ElapsedMS int64  `json:"elapsed_ms"`
 }
 
 // Build assembles a Scan from a trace.

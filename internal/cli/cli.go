@@ -313,8 +313,6 @@ func (a *App) scanPrompt(path string) int {
 		return exitUsage
 	}
 
-	
-
 	tr := &trace.Trace{Target: path, Started: time.Now()}
 	for _, ev := range skill.AnalyzePrompt(string(data)) {
 		tr.Add(ev)

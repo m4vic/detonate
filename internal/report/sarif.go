@@ -24,9 +24,9 @@ const (
 )
 
 type sarifLog struct {
-	Schema  string      `json:"$schema"`
-	Version string      `json:"version"`
-	Runs    []sarifRun  `json:"runs"`
+	Schema  string     `json:"$schema"`
+	Version string     `json:"version"`
+	Runs    []sarifRun `json:"runs"`
 }
 
 type sarifRun struct {
@@ -46,12 +46,12 @@ type sarifDriver struct {
 }
 
 type sarifRule struct {
-	ID                   string            `json:"id"`
-	Name                 string            `json:"name"`
-	ShortDescription     sarifText         `json:"shortDescription"`
-	FullDescription      sarifText         `json:"fullDescription"`
-	DefaultConfiguration sarifConfig       `json:"defaultConfiguration"`
-	Properties           map[string]any    `json:"properties,omitempty"`
+	ID                   string         `json:"id"`
+	Name                 string         `json:"name"`
+	ShortDescription     sarifText      `json:"shortDescription"`
+	FullDescription      sarifText      `json:"fullDescription"`
+	DefaultConfiguration sarifConfig    `json:"defaultConfiguration"`
+	Properties           map[string]any `json:"properties,omitempty"`
 }
 
 type sarifText struct {
@@ -132,10 +132,10 @@ func SARIF(w io.Writer, tr *trace.Trace, artifactURI, version string) error {
 		id := ruleID(e)
 		if _, seen := rules[id]; !seen {
 			rules[id] = sarifRule{
-				ID:               id,
-				Name:             string(e.Kind),
-				ShortDescription: sarifText{Text: shortDescriptionFor(e)},
-				FullDescription:  sarifText{Text: fullDescriptionFor(e)},
+				ID:                   id,
+				Name:                 string(e.Kind),
+				ShortDescription:     sarifText{Text: shortDescriptionFor(e)},
+				FullDescription:      sarifText{Text: fullDescriptionFor(e)},
 				DefaultConfiguration: sarifConfig{Level: levelFor(e.Severity)},
 				Properties: map[string]any{
 					"tags": []string{"security", "ai-supply-chain", string(e.Kind)},
