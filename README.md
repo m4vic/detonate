@@ -154,9 +154,6 @@ one that warns you never to commit private keys, is not an attack.
 
 Working and useful. Interfaces may still change.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for what is next.
-
 ## License
 
 Apache-2.0
