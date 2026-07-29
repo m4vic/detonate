@@ -131,5 +131,24 @@ func tmpfsMounts(size string) map[string]string {
 	}
 	return map[string]string{
 		"/tmp": "rw,noexec,nosuid,size=" + size,
+
+		// A writable HOME, and the reason is calibration rather than
+		// convenience.
+		//
+		// Most MCP servers store state under ~/.something on startup. With no
+		// writable home, every one of them fails a write and gets reported as
+		// "attempted a write the sandbox denied" — a finding about our
+		// environment, not their behaviour. Scanning a real server surfaced
+		// exactly that: it tried to create ~/.ctx and, with HOME unset,
+		// resolved to /.ctx at the read-only root.
+		//
+		// Giving targets a realistic home makes writing there unremarkable and
+		// turns a write ANYWHERE ELSE back into a real signal. Still a tmpfs:
+		// nothing survives the container, and noexec means a payload dropped
+		// here cannot be run.
+		containerHome: "rw,noexec,nosuid,size=" + size,
 	}
 }
+
+// containerHome is the home directory given to a sandboxed target.
+const containerHome = "/home/detonate"

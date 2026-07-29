@@ -77,11 +77,19 @@ func containerArgs(name string, p Policy, mounts []Mount, command []string) []st
 		args = append(args, "--volume", m.arg())
 	}
 
+	// HOME must be set explicitly, or the tmpfs home above is invisible: a
+	// target resolving ~ with HOME unset gets "/" and writes to the read-only
+	// root instead. Overridable, but a caller has to mean it.
+	env := map[string]string{"HOME": containerHome}
+	for k, v := range p.Env {
+		env[k] = v
+	}
+
 	// Sorted so the argument list is deterministic. Map iteration order is
 	// random in Go, and a scanner whose invocation differs run to run is one
 	// whose failures cannot be reproduced from a log.
-	for _, k := range sortedKeys(p.Env) {
-		args = append(args, "--env", k+"="+p.Env[k])
+	for _, k := range sortedKeys(env) {
+		args = append(args, "--env", k+"="+env[k])
 	}
 
 	args = append(args, p.Image)

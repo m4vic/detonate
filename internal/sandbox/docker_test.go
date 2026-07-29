@@ -170,6 +170,54 @@ func TestSandboxHasWritableButNonExecutableTmp(t *testing.T) {
 	}
 }
 
+// Most MCP servers write state to ~/.something on startup. Without a writable
+// home every one of them fails a write and gets reported for it, which is a
+// finding about our environment rather than their behaviour. Scanning a real
+// server surfaced exactly that.
+//
+// A realistic home makes writing there unremarkable, which is what keeps a
+// write ANYWHERE ELSE meaningful.
+func TestSandboxGivesTargetsAWritableHome(t *testing.T) {
+	requireDocker(t)
+
+	p := DefaultPolicy()
+	p.Image = "alpine:latest"
+
+	out := runInSandboxExpectingOutput(t, p,
+		`echo "HOME=$HOME"; mkdir -p "$HOME/.state" && echo WROTE_HOME || echo NO_HOME`)
+
+	if !strings.Contains(out, "WROTE_HOME") {
+		t.Errorf("target could not write to its own home; every stateful server "+
+			"would be reported for it.\ngot: %s", out)
+	}
+	if !strings.Contains(out, "HOME="+containerHome) {
+		t.Errorf("HOME not set to %s; a target resolving ~ would land on the "+
+			"read-only root.\ngot: %s", containerHome, out)
+	}
+}
+
+// The home is writable but must not be a staging ground: a payload dropped
+// there still cannot execute.
+func TestSandboxHomeIsNotExecutable(t *testing.T) {
+	requireDocker(t)
+
+	p := DefaultPolicy()
+	p.Image = "alpine:latest"
+
+	out := runInSandboxExpectingOutput(t, p, strings.Join([]string{
+		`printf '#!/bin/sh\necho PWNED\n' > "$HOME/x" && echo WROTE || echo NO_WRITE`,
+		`chmod +x "$HOME/x" 2>/dev/null`,
+		`"$HOME/x" 2>/dev/null && echo EXECUTED || echo NOEXEC`,
+	}, "; "))
+
+	if !strings.Contains(out, "WROTE") {
+		t.Error("home is not writable")
+	}
+	if strings.Contains(out, "EXECUTED") {
+		t.Error("code staged in HOME executed; noexec is not holding")
+	}
+}
+
 func TestSandboxDoesNotRunAsRoot(t *testing.T) {
 	requireDocker(t)
 
