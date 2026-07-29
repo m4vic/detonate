@@ -63,8 +63,8 @@ func TestUsageAndVersion(t *testing.T) {
 		if code := app.printUsageAndExit(); code != 0 {
 			t.Errorf("exit = %d, want 0", code)
 		}
-		if !strings.Contains(stdout.String(), "Targets:") {
-			t.Errorf("help output missing the Targets section, got %q", stdout.String())
+		if !strings.Contains(stdout.String(), "Usage:") {
+			t.Errorf("help output missing the Usage section, got %q", stdout.String())
 		}
 	})
 
@@ -73,8 +73,8 @@ func TestUsageAndVersion(t *testing.T) {
 		if code := app.Run(context.Background(), []string{"--help"}); code != 0 {
 			t.Errorf("exit = %d, want 0", code)
 		}
-		if !strings.Contains(stdout.String(), "Targets:") {
-			t.Errorf("help output missing the Targets section, got %q", stdout.String())
+		if !strings.Contains(stdout.String(), "Usage:") {
+			t.Errorf("help output missing the Usage section, got %q", stdout.String())
 		}
 	})
 
@@ -86,12 +86,26 @@ func TestUsageAndVersion(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown command is a usage error", func(t *testing.T) {
+	// A bare word is now a TARGET, not a subcommand, so a typo reports what a
+	// user can act on: the path does not exist. "unknown command" would be
+	// technically true and useless, since there are no subcommands to get
+	// wrong any more.
+	t.Run("a nonexistent target is a usage error", func(t *testing.T) {
 		app, _, stderr := newTestApp(true)
-		if code := app.Run(context.Background(), []string{"detonat"}); code != exitUsage {
+		if code := app.Run(context.Background(), []string{"no-such-folder-xyz"}); code != exitUsage {
 			t.Errorf("exit = %d, want %d", code, exitUsage)
 		}
-		if !strings.Contains(stderr.String(), "unknown command") {
+		if !strings.Contains(stderr.String(), "does not exist") {
+			t.Errorf("stderr = %q", stderr.String())
+		}
+	})
+
+	t.Run("an unknown option is a usage error", func(t *testing.T) {
+		app, _, stderr := newTestApp(true)
+		if code := app.Run(context.Background(), []string{"--nope"}); code != exitUsage {
+			t.Errorf("exit = %d, want %d", code, exitUsage)
+		}
+		if !strings.Contains(stderr.String(), "unknown option") {
 			t.Errorf("stderr = %q", stderr.String())
 		}
 	})

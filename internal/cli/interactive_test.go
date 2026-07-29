@@ -49,27 +49,25 @@ func wizardApp(dockerReady bool) (*App, *bytes.Buffer, *bytes.Buffer) {
 	}, &out, &errb
 }
 
-// The wizard's whole reason to exist: a user should never have to learn that
-// the server command must reference /target rather than their own path.
-func TestWizardDetectsEntryPoint(t *testing.T) {
+// The wizard now asks ONE question. It used to ask four — kind, folder,
+// command, install — and three of those are things detection answers. The one
+// it kept is the only one a user is equipped to answer: where the thing is.
+func TestWizardAsksOnceAndDetects(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "server.py"), []byte("print(1)"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	app, out, _ := wizardApp(true)
-	withStdin(t, "1\n"+dir+"\ny\n", func() {
+	withStdin(t, dir+"\n", func() {
 		app.runInteractive(context.Background())
 	})
 
 	s := out.String()
 	for _, want := range []string{
-		"What do you want to scan?",
-		"Detected entry point",
-		"python /target/server.py",
-		// The equivalent flag form matters: someone who runs this once by hand
-		// and then wants it in CI should copy a line, not reread the docs.
-		"Equivalent command",
+		"Target:",                      // the single question
+		"MCP server",                   // it worked out the kind
+		"python /target/server.py",     // and the start command
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("wizard output missing %q\n---\n%s", want, s)
@@ -77,9 +75,25 @@ func TestWizardDetectsEntryPoint(t *testing.T) {
 	}
 }
 
+func TestWizardDetectsSkill(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"),
+		[]byte("---\nname: x\ndescription: y\n---\nBody."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, out, _ := wizardApp(true)
+	withStdin(t, dir+"\n", func() {
+		app.runInteractive(context.Background())
+	})
+	if !strings.Contains(out.String(), "skill") {
+		t.Errorf("SKILL.md folder not detected as a skill:\n%s", out.String())
+	}
+}
+
 func TestWizardChecksDockerBeforeAsking(t *testing.T) {
-	// Being told "Docker is not running" after answering four questions is
-	// worse than being told before the first.
+	// Being told "Docker is not running" after answering a question is worse
+	// than being told before it.
 	app, out, errb := wizardApp(false)
 	withStdin(t, "", func() {
 		if code := app.runInteractive(context.Background()); code != exitUsage {
@@ -90,14 +104,14 @@ func TestWizardChecksDockerBeforeAsking(t *testing.T) {
 	if !strings.Contains(errb.String(), "Docker is not ready") {
 		t.Errorf("stderr = %q", errb.String())
 	}
-	if strings.Contains(out.String(), "What do you want to scan?") {
-		t.Error("wizard asked questions despite Docker being unavailable")
+	if strings.Contains(out.String(), "Target:") {
+		t.Error("wizard asked for a target despite Docker being unavailable")
 	}
 }
 
 func TestWizardRejectsMissingPath(t *testing.T) {
 	app, _, errb := wizardApp(true)
-	withStdin(t, "1\nZ:\\definitely\\not\\here\n", func() {
+	withStdin(t, "Z:\\definitely\\not\\here\n", func() {
 		if code := app.runInteractive(context.Background()); code != exitUsage {
 			t.Errorf("exit = %d, want %d", code, exitUsage)
 		}
@@ -107,13 +121,20 @@ func TestWizardRejectsMissingPath(t *testing.T) {
 	}
 }
 
-func TestWizardRejectsSkillFolderWithoutSkillMD(t *testing.T) {
-	app, _, errb := wizardApp(true)
-	withStdin(t, "2\n"+t.TempDir()+"\n", func() {
+// Paths pasted from a terminal or dragged into one arrive quoted. Failing on
+// a path the user actually got right is a bad first experience.
+func TestWizardStripsQuotesFromPaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "server.py"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, out, _ := wizardApp(true)
+	withStdin(t, "\""+dir+"\"\n", func() {
 		app.runInteractive(context.Background())
 	})
-	if !strings.Contains(errb.String(), "No SKILL.md") {
-		t.Errorf("stderr = %q", errb.String())
+	if !strings.Contains(out.String(), "MCP server") {
+		t.Errorf("quoted path was not accepted\n---\n%s", out.String())
 	}
 }
 
@@ -138,22 +159,5 @@ func TestGuessCommand(t *testing.T) {
 
 	if got := guessCommand(t.TempDir()); got != "" {
 		t.Errorf("guessCommand(empty dir) = %q, want empty so the user is asked", got)
-	}
-}
-
-// Paths pasted from a terminal or dragged into one arrive quoted. Failing on
-// a path the user actually got right is a bad first experience.
-func TestWizardStripsQuotesFromPaths(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "server.py"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	app, out, _ := wizardApp(true)
-	withStdin(t, "1\n\""+dir+"\"\ny\n", func() {
-		app.runInteractive(context.Background())
-	})
-	if !strings.Contains(out.String(), "Detected entry point") {
-		t.Errorf("quoted path was not accepted\n---\n%s", out.String())
 	}
 }

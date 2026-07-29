@@ -77,30 +77,35 @@ const usage = `detonate %s
 Detonate untrusted AI-connected tools in a sandbox and report what they
 actually do, not what their manifest claims.
 
-Run detonate with no arguments for a guided scan.
+Usage:
+  detonate <target>     Scan a folder, a file, or a repository URL
+  detonate              Guided scan
 
-Targets:
-  --mcp <command>    An MCP server, launched over stdio in the sandbox
-  --skill <path>     An agent skill folder (contains SKILL.md)
-  --prompt <file>    A prompt or instruction file (no Docker needed)
-  --git <url>        Clone a repository and scan it
+detonate works out what the target is: a folder with SKILL.md is a skill, a
+folder with an entry point is an MCP server, a .txt or .md file is a prompt.
+
+Scans are thorough by default. Dependencies are installed in a separate
+container that never runs the target, tools are called with adversarial
+input, and a skill's bundled scripts are executed in the sandbox.
 
 Options:
-  --dir <path>       Folder holding the server, mounted read-only at
-                     /target inside the sandbox
-  --path <sub>       Sub-directory to scan inside a cloned repo
-  --install          Install dependencies first, in a separate container
-                     that has network access but never runs the target
-  --probe            Call each tool with adversarial arguments and watch
-  --run-scripts      Run a skill's bundled scripts in the sandbox
-  --no-baseline      Skip comparing against the previous scan
+  --cmd <command>    Command that starts the server, if detection got it wrong
+  --path <sub>       Sub-directory to scan inside a cloned repository
+  --quick            Skip install, probes and script execution
+  --no-probe         Do not call tools with adversarial input
+  --no-install       Do not install dependencies
+  --no-scripts       Do not run a skill's bundled scripts
+  --no-baseline      Do not compare against the previous scan
 
 Examples:
-  detonate
-  detonate scan --skill ./skills/pdf-extractor
-  detonate scan --prompt ./system-prompt.txt
-  detonate scan --git github.com/owner/repo --path skills/foo
-  detonate scan --mcp "python /target/server.py" --dir ./srv --install --probe
+  detonate ./my-server
+  detonate github.com/owner/repo
+  detonate ./skills/pdf-extractor
+  detonate ./system-prompt.txt
+  detonate ./weird-server --cmd "python /target/main.py"
+
+Inside the sandbox your folder is mounted at /target, so --cmd uses paths
+like /target/server.py rather than a host path.
 
 Exit codes:
   0  clean    2  bad usage or environment
@@ -121,19 +126,37 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 
 	switch args[0] {
-	case "scan":
-		return a.scan(ctx, args[1:])
 	case "--version", "-version", "version":
 		fmt.Fprintf(a.Stdout, "detonate %s\n", Version)
 		return exitOK
 	case "help", "--help", "-h":
 		a.printUsage()
 		return exitOK
-	default:
-		fmt.Fprintf(a.Stderr, "detonate: unknown command %q\n", args[0])
+	case "scan":
+		// The explicit form, kept working. Anyone who scripted against it
+		// should not have their pipeline broken by a UX improvement.
+		return a.scan(ctx, args[1:])
+	}
+
+	if strings.HasPrefix(args[0], "-") {
+		fmt.Fprintf(a.Stderr, "detonate: unknown option %q\n\n", args[0])
 		a.printUsage()
 		return exitUsage
 	}
+
+	// The primary form: `detonate <target> [options]`. One argument, and
+	// detonate works out what it is.
+	fs := flag.NewFlagSet("detonate", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	var opt scanOptions
+	bindScanFlags(fs, &opt)
+	if err := fs.Parse(args[1:]); err != nil {
+		return exitUsage
+	}
+
+	fmt.Fprint(a.Stdout, banner)
+	fmt.Fprintln(a.Stdout)
+	return a.RunTarget(ctx, args[0], opt)
 }
 
 func (a *App) printUsage() {
@@ -190,7 +213,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 			fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
 			return exitUsage
 		}
-		fmt.Fprintf(a.Stdout, "detonate: cloned %s\n", fetched.Source)
+		fmt.Fprintf(a.Stdout, "  cloned %s\n", fetched.Source)
 
 		if *skillPath != "" || fileExists(filepath.Join(root, "SKILL.md")) {
 			skillDir = root
@@ -217,15 +240,12 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
-	fmt.Fprintf(a.Stdout, "detonate: docker: %s\n", status.Detail)
-	fmt.Fprintf(a.Stdout, "detonate: target: %s\n", tgt.Label())
-
 	// Clear anything a previous run leaked. A scan that died hard (SIGKILL,
 	// power loss, a panic of ours) leaves a container with no client attached,
 	// and the whole promise of this tool is that untrusted code does not
 	// outlive the scan.
 	if n := sandbox.ReapOrphans(ctx); n > 0 {
-		fmt.Fprintf(a.Stdout, "detonate: reaped %d orphaned container(s) from a previous run\n", n)
+		fmt.Fprintf(a.Stdout, "  cleaned up %d orphaned container(s) from a previous run\n", n)
 	}
 
 	tools, tr, err := a.enumerate(ctx, tgt, dir, *install, *doProbe, *runScripts)
@@ -258,7 +278,7 @@ func (a *App) scanPrompt(path string) int {
 		return exitUsage
 	}
 
-	fmt.Fprintf(a.Stdout, "detonate: target: prompt:%s (%d bytes)\n", path, len(data))
+	
 
 	tr := &trace.Trace{Target: path, Started: time.Now()}
 	for _, ev := range skill.AnalyzePrompt(string(data)) {
@@ -287,7 +307,7 @@ func (a *App) diffBaseline(target string, tools []toolinfo.ToolInfo, tr *trace.T
 			tr.Add(ev)
 		}
 	} else {
-		fmt.Fprintln(a.Stdout, "detonate: first scan of this target; recording a baseline "+
+		fmt.Fprintln(a.Stdout, "  first scan of this target; recording a baseline "+
 			"so the next run can detect changed tool descriptions")
 	}
 
@@ -304,7 +324,7 @@ func (a *App) diffBaseline(target string, tools []toolinfo.ToolInfo, tr *trace.T
 // ignored by the automation it was bought for.
 func (a *App) report(tr *trace.Trace) int {
 	if tr == nil {
-		fmt.Fprintln(a.Stdout, "detonate: no behavioural trace collected "+
+		fmt.Fprintln(a.Stdout, "  no behavioural trace collected "+
 			"(this target kind is not executed yet)")
 		return exitOK
 	}
@@ -431,9 +451,9 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 			}
 			m := acquire.Detect(absDir)
 			if m.Ecosystem == acquire.EcosystemNone {
-				fmt.Fprintln(a.Stdout, "detonate: no dependency manifest found; skipping install")
+				fmt.Fprintln(a.Stdout, "  no dependency manifest found; skipping install")
 			} else {
-				fmt.Fprintf(a.Stdout, "detonate: [1/2] installing %s deps from %s "+
+				fmt.Fprintf(a.Stdout, "  [1/2] installing %s deps from %s "+
 					"(separate container, network ON, target NOT executed)\n", m.Ecosystem, m.File)
 			}
 
@@ -456,10 +476,10 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 		if install {
 			phase = "[2/2] "
 		}
-		fmt.Fprintf(a.Stdout, "detonate: %slaunching target inside a sandbox "+
+		fmt.Fprintf(a.Stdout, "  %slaunching target inside a sandbox "+
 			"(network off, read-only root, no capabilities, non-root)\n", phase)
 		if absDir != "" {
-			fmt.Fprintf(a.Stdout, "detonate: mounting %s read-only at /target\n", absDir)
+			
 		}
 
 		if !doProbe {
@@ -496,7 +516,7 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 			}
 		}
 
-		fmt.Fprintf(a.Stdout, "detonate: probing %d tool(s) with %d adversarial payload(s)...\n",
+		fmt.Fprintf(a.Stdout, "  probing %d tool(s) with %d adversarial payload(s)...\n",
 			len(tools), len(probe.Payloads()))
 
 		for _, ev := range probe.Run(ctx, sess, tools, 0) {
@@ -533,7 +553,7 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 	// the user's machine — and until they run, a script that phones home is
 	// indistinguishable from one that formats a table.
 	if runScripts && len(sk.Scripts) > 0 {
-		fmt.Fprintf(a.Stdout, "detonate: running %d bundled script(s) in the sandbox...\n",
+		fmt.Fprintf(a.Stdout, "  running %d bundled script(s) in the sandbox...\n",
 			len(sk.Scripts))
 		for _, ev := range skill.DetonateScripts(ctx, tgt.Reference, sk, sandbox.DefaultPolicy()) {
 			tr.Add(ev)
@@ -543,7 +563,7 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 }
 
 func (a *App) printTools(tools []toolinfo.ToolInfo) {
-	fmt.Fprintf(a.Stdout, "detonate: discovered %d tool(s):\n", len(tools))
+	fmt.Fprintf(a.Stdout, "\n  discovered %d tool(s):\n", len(tools))
 	for _, t := range tools {
 		fmt.Fprintf(a.Stdout, "    %s\n", t)
 	}

@@ -48,31 +48,37 @@ go build -o detonate ./cmd/detonate
 
 ## Use
 
-Run it with no arguments for a guided scan:
+Point it at a thing:
+
+```bash
+detonate ./my-server                  # MCP server
+detonate ./skills/pdf-extractor       # agent skill
+detonate ./system-prompt.txt          # prompt (no Docker needed)
+detonate github.com/owner/repo        # clone and scan
+```
+
+detonate works out what the target is. A folder with a `SKILL.md` is a skill,
+a folder with an entry point is an MCP server, a `.txt` or `.md` file is a
+prompt.
+
+Or run it with no arguments for a guided scan:
 
 ```
 detonate
 ```
 
-Or drive it directly:
+**Scans are thorough by default.** Dependencies are installed in a separate
+container that never runs the target, tools are called with adversarial input,
+and a skill's bundled scripts are executed in the sandbox. `--quick` opts out.
+
+If detection guesses the start command wrong:
 
 ```bash
-# an MCP server you have locally
-detonate scan --mcp "python /target/server.py" --dir ./my-server --install --probe
-
-# straight from a repository
-detonate scan --git github.com/owner/repo --path skills/foo
-
-# an agent skill, including running its bundled scripts
-detonate scan --skill ./skills/pdf-extractor --run-scripts
-
-# a prompt or agent config (no Docker needed)
-detonate scan --prompt ./system-prompt.txt
+detonate ./weird-server --cmd "python /target/main.py"
 ```
 
-Inside the sandbox your folder is mounted at `/target`, so the command
-references `/target/...` rather than a host path. The guided mode works that
-out for you.
+Inside the sandbox your folder is mounted at `/target`, which is why `--cmd`
+uses that path rather than a host one.
 
 **Exit codes:** `0` clean, `1` error, `2` bad usage or environment, `3` findings.
 

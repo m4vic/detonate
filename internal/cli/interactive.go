@@ -68,17 +68,25 @@ func (a *App) runInteractive(ctx context.Context) int {
 	}
 	fmt.Fprintf(a.Stdout, "\n  docker: %s\n", status.Detail)
 
-	kind := a.ask(in, "\n  What do you want to scan?\n"+
-		"    1) MCP server   (a plugin for Claude Desktop, Cursor, etc.)\n"+
-		"    2) Agent skill  (a folder with a SKILL.md)\n"+
-		"\n  Choose [1/2]: ", "1")
+	// One question instead of four.
+	//
+	// The wizard used to ask what kind of thing it was, then where, then which
+	// command, then whether to install. Detection answers all but the first,
+	// and the first is the one a user is least equipped to answer: they have a
+	// folder someone sent them, not a taxonomy.
+	fmt.Fprintln(a.Stdout, "\n  Paste a folder, a file, or a repository URL.")
+	fmt.Fprintln(a.Stdout, "    a folder with SKILL.md   -> scanned as a skill")
+	fmt.Fprintln(a.Stdout, "    a folder with a server   -> run in the sandbox and probed")
+	fmt.Fprintln(a.Stdout, "    a .txt or .md file       -> analysed as a prompt")
 
-	switch strings.TrimSpace(kind) {
-	case "2":
-		return a.interactiveSkill(in, ctx)
-	default:
-		return a.interactiveMCP(in, ctx)
+	target := strings.Trim(strings.TrimSpace(a.ask(in, "\n  Target: ", "")), `"'`)
+	if target == "" {
+		fmt.Fprintln(a.Stderr, "  Nothing given.")
+		return exitUsage
 	}
+
+	fmt.Fprintln(a.Stdout)
+	return a.RunTarget(ctx, target, scanOptions{})
 }
 
 func (a *App) interactiveSkill(in *bufio.Reader, ctx context.Context) int {
