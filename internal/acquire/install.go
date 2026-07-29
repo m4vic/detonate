@@ -37,6 +37,11 @@ type Result struct {
 	// ecosystem, not just a volume.
 	Image string
 
+	// Root is where the target's code lives in the detonation container when
+	// phase 1 had to build it. Empty means the code is still read straight
+	// from /target, which is the common case.
+	Root string
+
 	// Events is what the target's installation did. Empty for a target with
 	// no dependencies.
 	Events []trace.Event
@@ -67,20 +72,33 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 		return nil, err
 	}
 
+	// A built project's dependencies land beside its source in /deps/app, not
+	// at the volume root, so the interpreter has to be pointed there instead.
+	codeRoot := DepsDir
+	if m.NeedsBuild {
+		codeRoot = appDir(DepsDir)
+	}
+
 	res := &Result{
 		Volume:   volume,
-		Env:      m.EnvFor(DepsDir),
+		Env:      m.EnvFor(codeRoot),
 		Image:    imageFor(m.Ecosystem, policy.Image),
 		manifest: m,
+	}
+	if m.NeedsBuild {
+		res.Root = codeRoot
 	}
 
 	started := time.Now()
 	stdout, stderr, runErr := runInstall(ctx, targetDir, volume, m, policy)
 
+	action := fmt.Sprintf("installing %s dependencies from %s", m.Ecosystem, m.File)
+	if m.NeedsBuild {
+		action += fmt.Sprintf(" and building %s", m.Entry)
+	}
 	res.Events = append(res.Events, trace.Event{
 		Kind: trace.KindLifecycle, Severity: trace.SeverityInfo, At: started,
-		Summary: fmt.Sprintf("installing %s dependencies from %s", m.Ecosystem, m.File),
-		Source:  "acquire", During: "install",
+		Summary: action, Source: "acquire", During: "install",
 	})
 
 	// Analyse installer output for behaviour worth reporting. The network is
@@ -91,10 +109,28 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 
 	if runErr != nil {
 		_ = res.Cleanup(context.Background())
-		return nil, fmt.Errorf("installing dependencies for %s: %w (%s)",
-			m.File, runErr, truncate(strings.TrimSpace(stderr), 800))
+		// Naming the phase matters: a failed `npm run build` and a failed
+		// `npm install` need different fixes, and the stderr alone rarely says
+		// which one it was.
+		return nil, fmt.Errorf("%s: %w (%s)",
+			action, runErr, truncate(strings.TrimSpace(stderr), 800))
 	}
 	return res, nil
+}
+
+// Command rewrites a start command to point at the built code.
+//
+// Detection runs before the build and can only describe the target as it sits
+// on disk, so it produces `node /target/dist/index.js` for an entry point that
+// does not exist yet. After a build that file exists in the volume instead,
+// and launching the original path would fail with MODULE_NOT_FOUND.
+//
+// A no-op when nothing was built, which keeps the common path untouched.
+func (r *Result) Command(detected string) string {
+	if r.Root == "" {
+		return detected
+	}
+	return strings.ReplaceAll(detected, "/target/", r.Root+"/")
 }
 
 // Mounts returns what the detonation container should mount, read-only.

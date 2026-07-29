@@ -62,6 +62,156 @@ func TestDetectIgnoresDirectories(t *testing.T) {
 	}
 }
 
+// writeJSON writes a file into a fresh temp dir and returns the dir.
+func writeProject(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestNodeEntry(t *testing.T) {
+	cases := []struct {
+		name string
+		pkg  string
+		want string
+	}{
+		{"bin as a string", `{"bin":"./dist/cli.js"}`, "dist/cli.js"},
+		{"main fallback", `{"main":"index.js"}`, "index.js"},
+
+		// bin wins: a published MCP server declares bin because that is how an
+		// agent host launches it.
+		{"bin beats main", `{"bin":"dist/cli.js","main":"lib/index.js"}`, "dist/cli.js"},
+
+		// Sorted, so the same package always yields the same entry point.
+		{"bin object picks lowest name", `{"bin":{"z":"z.js","a":"a.js"}}`, "a.js"},
+
+		{"neither declared", `{"name":"x"}`, ""},
+		{"malformed json", `{`, ""},
+
+		// Found on a real file: a BOM makes encoding/json reject an otherwise
+		// valid manifest, and the entry point silently comes back empty.
+		{"utf-8 BOM", "\uFEFF" + `{"main":"index.js"}`, "index.js"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeProject(t, map[string]string{"package.json": tc.pkg})
+			if got := NodeEntry(dir); got != tc.want {
+				t.Errorf("NodeEntry = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The TypeScript case: package.json points at compiled output that is not in
+// the source tree. Without a build phase this target fails phase 2 with
+// MODULE_NOT_FOUND, which reports nothing about its safety.
+func TestDetectNeedsBuildWhenEntryIsMissing(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"package.json": `{"main":"dist/index.js","scripts":{"build":"tsc"}}`,
+		"src/index.ts": `console.log(1)`,
+	})
+
+	m := Detect(dir)
+	if m.Ecosystem != EcosystemNode {
+		t.Fatalf("Ecosystem = %q, want node", m.Ecosystem)
+	}
+	if m.Entry != "dist/index.js" {
+		t.Errorf("Entry = %q, want dist/index.js", m.Entry)
+	}
+	if !m.NeedsBuild {
+		t.Error("NeedsBuild = false; a declared entry that is absent needs building")
+	}
+}
+
+// A project shipping its compiled output already runs. Building it anyway
+// would pull a whole devDependency tree for nothing.
+func TestDetectSkipsBuildWhenEntryExists(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"package.json":  `{"main":"dist/index.js","scripts":{"build":"tsc"}}`,
+		"dist/index.js": `console.log(1)`,
+	})
+	if Detect(dir).NeedsBuild {
+		t.Error("NeedsBuild = true for a project whose entry point is present")
+	}
+}
+
+// No build script means we cannot fix a missing entry, and pretending
+// otherwise would fail with a confusing error instead of an honest one.
+func TestDetectSkipsBuildWithoutABuildScript(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"package.json": `{"main":"dist/index.js"}`,
+	})
+	if Detect(dir).NeedsBuild {
+		t.Error("NeedsBuild = true for a project with no build script")
+	}
+}
+
+func TestBuildInstallCommand(t *testing.T) {
+	m := Manifest{Ecosystem: EcosystemNode, File: "package.json",
+		Entry: "dist/index.js", NeedsBuild: true}
+	cmd := strings.Join(m.installCommand("/deps"), " ")
+
+	// The whole project must move into the volume: a build writes next to the
+	// source, and /target is a read-only host mount.
+	if !strings.Contains(cmd, "cp -a /target/. /deps/app/") {
+		t.Errorf("build must copy the project into the volume: %q", cmd)
+	}
+	if !strings.Contains(cmd, "npm run build") {
+		t.Errorf("build command missing: %q", cmd)
+	}
+	// The compiler is a devDependency, so omitting them makes the build fail.
+	if strings.Contains(cmd, "--omit=dev") {
+		t.Errorf("build needs devDependencies: %q", cmd)
+	}
+	if strings.Contains(cmd, "--ignore-scripts") {
+		t.Errorf("lifecycle scripts must still be observable: %q", cmd)
+	}
+	// A host node_modules holds native modules built for the wrong OS.
+	if !strings.Contains(cmd, "rm -rf /deps/app/node_modules") {
+		t.Errorf("stale host node_modules must be dropped: %q", cmd)
+	}
+	// Phase 2 runs as a uid unrelated to the root uid that wrote these files.
+	if !strings.Contains(cmd, "chmod -R a+rX /deps/app") {
+		t.Errorf("built files must be readable by the detonation uid: %q", cmd)
+	}
+	if !strings.HasPrefix(cmd, "sh -c set -e") {
+		t.Errorf("a failed build must fail the container: %q", cmd)
+	}
+}
+
+func TestResultCommandRewrite(t *testing.T) {
+	built := &Result{Root: "/deps/app"}
+	got := built.Command("node /target/dist/index.js")
+	if got != "node /deps/app/dist/index.js" {
+		t.Errorf("Command = %q, want the built path", got)
+	}
+
+	// Nothing was built, so nothing moved. The common path must be untouched.
+	plain := &Result{}
+	if got := plain.Command("python /target/server.py"); got != "python /target/server.py" {
+		t.Errorf("Command = %q, want it unchanged", got)
+	}
+}
+
+// A built project's node_modules sits beside its source, not at the volume
+// root, so NODE_PATH has to follow it.
+func TestEnvForFollowsTheBuiltRoot(t *testing.T) {
+	env := Manifest{Ecosystem: EcosystemNode}.EnvFor(appDir("/deps"))
+	if env["NODE_PATH"] != "/deps/app/node_modules" {
+		t.Errorf("NODE_PATH = %q, want /deps/app/node_modules", env["NODE_PATH"])
+	}
+}
+
 func TestEnvFor(t *testing.T) {
 	py := Manifest{Ecosystem: EcosystemPython}.EnvFor("/deps")
 	if py["PYTHONPATH"] != "/deps" {

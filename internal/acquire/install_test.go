@@ -105,6 +105,86 @@ func TestInstallMakesPackagesImportableWithoutNetwork(t *testing.T) {
 	}
 }
 
+// The TypeScript claim, end to end: a project whose entry point exists only
+// after compilation is built in phase 1 (network ON) and runs in phase 2
+// (network OFF).
+//
+// This is the shape of most published MCP servers — package.json points at
+// dist/, dist/ is gitignored, and the compiler is a devDependency. Before the
+// build phase every one of them failed with MODULE_NOT_FOUND, which is a scan
+// that reports nothing about the target's safety.
+func TestInstallBuildsATypeScriptProject(t *testing.T) {
+	requireDocker(t)
+
+	dir := writeProject(t, map[string]string{
+		// Pinned so the test does not start failing when a new compiler ships.
+		"package.json": `{
+			"name": "buildable", "version": "1.0.0",
+			"main": "dist/index.js",
+			"scripts": {"build": "tsc"},
+			"devDependencies": {"typescript": "5.6.3"}
+		}`,
+		"tsconfig.json": `{
+			"compilerOptions": {
+				"outDir": "dist", "module": "commonjs",
+				"target": "es2020", "rootDir": "src"
+			},
+			"include": ["src"]
+		}`,
+		"src/index.ts": `const marker: string = "BUILD_OK"; console.log(marker);`,
+	})
+
+	m := Detect(dir)
+	if !m.NeedsBuild {
+		t.Fatal("Detect did not flag this project as needing a build")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	res, err := Install(ctx, dir, sandbox.DefaultPolicy())
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	defer res.Cleanup(context.Background())
+
+	if res.Root != DepsDir+"/app" {
+		t.Fatalf("Root = %q, want %q", res.Root, DepsDir+"/app")
+	}
+
+	// The command detection produced before the build pointed at a file that
+	// did not exist. It must now point into the volume.
+	command := res.Command("node /target/dist/index.js")
+	if command != "node "+DepsDir+"/app/dist/index.js" {
+		t.Fatalf("Command = %q, want it rewritten into the volume", command)
+	}
+
+	p := sandbox.DefaultPolicy()
+	p.Image = res.Image
+	p.Env = res.Env
+	p.Timeout = 90 * time.Second
+
+	if err := sandbox.EnsureImage(ctx, p.Image); err != nil {
+		t.Skipf("cannot pull %s: %v", p.Image, err)
+	}
+
+	name, err := sandbox.NewName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := sandbox.Start(ctx, name, p, res.Mounts(), strings.Fields(command))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer c.Close()
+
+	out := readAll(t, c)
+	if !strings.Contains(out, "BUILD_OK") {
+		t.Fatalf("compiled entry point did not run in the offline sandbox.\n"+
+			"stdout: %q\nstderr: %q", out, c.Stderr())
+	}
+}
+
 // The dependency mount must be read-only in phase 2: a target that can rewrite
 // its own dependencies while being observed means the code we report on is not
 // the code that ran.

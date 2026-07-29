@@ -584,6 +584,15 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 			if installed.Image != "" {
 				policy.Image = installed.Image
 			}
+
+			// A project that had to be compiled now lives in the volume, not
+			// at /target. Detection ran before the build and could only name
+			// the entry point the package declares, which did not exist on
+			// disk yet.
+			if rewritten := installed.Command(tgt.Reference); rewritten != tgt.Reference {
+				fmt.Fprintf(a.Stdout, "  built   running from %s\n", installed.Root)
+				tgt.Reference = rewritten
+			}
 		}
 
 		// Always sandboxed. There is no host-execution path reachable from the
@@ -596,9 +605,6 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 		}
 		fmt.Fprintf(a.Stdout, "  %slaunching target inside a sandbox "+
 			"(network off, read-only root, no capabilities, non-root)\n", phase)
-		if absDir != "" {
-			
-		}
 
 		if !doProbe {
 			res, err := mcpdriver.EnumerateSandboxedWithTrace(ctx, tgt.Reference, policy, mounts)

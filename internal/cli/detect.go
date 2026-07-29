@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/m4vic/detonate/internal/acquire"
@@ -127,8 +125,15 @@ func detectDir(dir string) (Detected, error) {
 	// A package.json with no obvious entry file still names its start command
 	// in "bin" or "main". Reading it beats guessing, and beats reporting "no
 	// recognisable entry point" for a project that plainly states one.
-	if cmd == "" && m.Ecosystem == acquire.EcosystemNode {
-		cmd = nodeEntryFromPackageJSON(dir)
+	//
+	// The declared entry is preferred over a guessed one when the project
+	// needs building: a TypeScript server usually has an index.ts sitting in
+	// the root that a guess would happily latch onto, but `node index.ts` is
+	// not how it starts — the compiled dist/ is.
+	if m.Ecosystem == acquire.EcosystemNode && (cmd == "" || m.NeedsBuild) {
+		if m.Entry != "" {
+			cmd = "node /target/" + m.Entry
+		}
 	}
 
 	if cmd == "" {
@@ -156,55 +161,6 @@ func detectDir(dir string) (Detected, error) {
 		d.Why = "entry point detected, no dependencies to install"
 	}
 	return d, nil
-}
-
-// nodeEntryFromPackageJSON reads the start command a Node project declares.
-//
-// "bin" first, then "main". A published MCP server declares a bin entry
-// because that is how it gets launched by an agent host, so it is the closest
-// thing to a statement of intent the package offers.
-func nodeEntryFromPackageJSON(dir string) string {
-	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
-	if err != nil {
-		return ""
-	}
-
-	var pkg struct {
-		Bin  json.RawMessage `json:"bin"`
-		Main string          `json:"main"`
-	}
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return ""
-	}
-
-	// "bin" is either a string or an object of name -> path.
-	if len(pkg.Bin) > 0 {
-		var s string
-		if json.Unmarshal(pkg.Bin, &s) == nil && s != "" {
-			return "node /target/" + strings.TrimPrefix(filepath.ToSlash(s), "./")
-		}
-		var m map[string]string
-		if json.Unmarshal(pkg.Bin, &m) == nil {
-			// Sorted so the same package always yields the same command;
-			// map order in Go is random, and a scan that picks a different
-			// entry point per run is not reproducible.
-			names := make([]string, 0, len(m))
-			for k := range m {
-				names = append(names, k)
-			}
-			sort.Strings(names)
-			for _, n := range names {
-				if p := m[n]; p != "" {
-					return "node /target/" + strings.TrimPrefix(filepath.ToSlash(p), "./")
-				}
-			}
-		}
-	}
-
-	if pkg.Main != "" {
-		return "node /target/" + strings.TrimPrefix(filepath.ToSlash(pkg.Main), "./")
-	}
-	return ""
 }
 
 func countScripts(dir string) int {
