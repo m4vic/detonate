@@ -130,6 +130,71 @@ func TestEnumerateSandboxedRunsInContainer(t *testing.T) {
 	}
 }
 
+// A server that logs to stdout has corrupted its own protocol channel. The
+// SDK reports the parse error and discards the bytes that caused it, so
+// without the tap a user is told only that "invalid character 'C'" happened
+// to output they never see.
+//
+// Found on a real published server, which prints a configuration banner to
+// stdout and is unusable over stdio as a result.
+func TestEnumerateSandboxedQuotesNonProtocolOutput(t *testing.T) {
+	requireDocker(t)
+
+	policy := sandbox.DefaultPolicy()
+	policy.Image = "alpine:latest"
+	policy.Timeout = 60 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	_, err := EnumerateSandboxed(ctx,
+		`sh -c "echo Configuration: ENV_FILE=/.env; sleep 5"`, policy, nil)
+	if err == nil {
+		t.Fatal("expected a protocol failure from a server that logs to stdout")
+	}
+	if !strings.Contains(err.Error(), "Configuration:") {
+		t.Errorf("error does not quote what the target actually wrote: %v", err)
+	}
+}
+
+func TestFirstBytes(t *testing.T) {
+	t.Run("reports full writes so TeeReader does not break", func(t *testing.T) {
+		f := &firstBytes{max: 4}
+		// A short write makes io.TeeReader return ErrShortWrite and abort the
+		// protocol stream it is teeing, which would turn a diagnostic aid into
+		// a cause of failure.
+		n, err := f.Write([]byte("abcdefghij"))
+		if n != 10 || err != nil {
+			t.Errorf("Write = (%d, %v), want (10, nil)", n, err)
+		}
+	})
+
+	t.Run("caps at max and marks the truncation", func(t *testing.T) {
+		f := &firstBytes{max: 4}
+		f.Write([]byte("abcdefghij"))
+		if got := f.String(); got != "abcd..." {
+			t.Errorf("String = %q, want %q", got, "abcd...")
+		}
+	})
+
+	t.Run("keeps the opening bytes across several writes", func(t *testing.T) {
+		f := &firstBytes{max: 100}
+		f.Write([]byte("Config"))
+		f.Write([]byte("uration:\n"))
+		if got := f.String(); got != "Configuration:" {
+			t.Errorf("String = %q", got)
+		}
+	})
+
+	t.Run("silent target yields nothing to quote", func(t *testing.T) {
+		f := &firstBytes{max: 100}
+		f.Write([]byte("  \n "))
+		if got := f.String(); got != "" {
+			t.Errorf("String = %q, want empty", got)
+		}
+	})
+}
+
 // The sandbox must leave nothing behind, including on the failure path.
 func TestEnumerateSandboxedLeavesNoOrphans(t *testing.T) {
 	requireDocker(t)

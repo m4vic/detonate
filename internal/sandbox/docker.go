@@ -243,8 +243,30 @@ func (c *Container) Failed() (bool, string) {
 
 // Stdin and Stdout are the container's pipes, so a protocol client can be
 // pointed straight at the sandboxed process.
-func (c *Container) Stdin() io.WriteCloser { return c.stdin }
-func (c *Container) Stdout() io.ReadCloser { return c.stdout }
+//
+// Both satisfy io.Closer but ignore Close. Pipe lifetime belongs to the
+// Container, which is the only thing that knows when the container is actually
+// gone — the same reasoning that made Start own the pipes rather than let
+// os/exec's Wait close them.
+//
+// The concrete failure: the MCP SDK's IOTransport hands both streams to
+// jsonrpc2 as its Closer, so a FAILED handshake tore down the container's
+// stdout while the container was still writing to it. The docker client then
+// died of EPIPE, and that self-inflicted error was reported as the target's
+// reason for failing — hiding whatever the server had actually said.
+func (c *Container) Stdin() io.WriteCloser { return nopClose{w: c.stdin} }
+func (c *Container) Stdout() io.ReadCloser { return nopClose{r: c.stdout} }
+
+// nopClose adapts a pipe to the Closer interfaces callers expect while keeping
+// the real lifetime with the Container.
+type nopClose struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (n nopClose) Read(p []byte) (int, error)  { return n.r.Read(p) }
+func (n nopClose) Write(p []byte) (int, error) { return n.w.Write(p) }
+func (n nopClose) Close() error                { return nil }
 
 // Stderr returns whatever the container wrote to stderr so far. Useful both
 // for diagnosing a failed start and, later, as evidence.

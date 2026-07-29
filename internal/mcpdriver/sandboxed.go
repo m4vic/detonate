@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -179,14 +182,76 @@ func connectOverPipes(ctx context.Context, c *sandbox.Container, timeout time.Du
 	defer cancel()
 
 	client := mcp.NewClient(clientInfo, nil)
-	transport := &mcp.IOTransport{Reader: c.Stdout(), Writer: c.Stdin()}
+
+	// Tap stdout on the way to the protocol client. When a handshake fails
+	// the SDK reports the parse error ("invalid character 'C'") and discards
+	// the bytes that caused it, which leaves a user knowing only that
+	// something was wrong with output they never get to see.
+	//
+	// Anything a target writes here that is not JSON-RPC is itself worth
+	// reading: a server logging to stdout has corrupted its own protocol
+	// channel, and the text it emitted usually says why.
+	tap := &firstBytes{max: 400}
+	transport := &mcp.IOTransport{
+		Reader: readCloser{io.TeeReader(c.Stdout(), tap)},
+		Writer: c.Stdin(),
+	}
 
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
+		if wrote := tap.String(); wrote != "" {
+			return nil, fmt.Errorf("connecting to sandboxed MCP server: %w "+
+				"(target wrote this to stdout instead of protocol: %q)", err, wrote)
+		}
 		return nil, fmt.Errorf("connecting to sandboxed MCP server: %w", err)
 	}
 	return session, nil
 }
+
+// firstBytes records the opening bytes of a stream and then stops, so a
+// chatty target cannot grow it without bound.
+//
+// Writes come from the SDK's read loop while the error path reads it, so the
+// mutex is guarding a real cross-goroutine race rather than a theoretical one.
+type firstBytes struct {
+	mu   sync.Mutex
+	buf  []byte
+	max  int
+	full bool
+}
+
+func (f *firstBytes) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if room := f.max - len(f.buf); room > 0 {
+		if len(p) <= room {
+			f.buf = append(f.buf, p...)
+		} else {
+			f.buf = append(f.buf, p[:room]...)
+			f.full = true
+		}
+	}
+	// Always report the whole write as consumed: a TeeReader treats a short
+	// write as an error and would break the protocol stream it is teeing.
+	return len(p), nil
+}
+
+func (f *firstBytes) String() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := strings.TrimSpace(string(f.buf))
+	if s != "" && f.full {
+		s += "..."
+	}
+	return s
+}
+
+// readCloser gives a plain reader the Close the transport interface demands.
+// Closing is a no-op for the same reason it is on the container's own pipes:
+// lifetime belongs to the container.
+type readCloser struct{ io.Reader }
+
+func (readCloser) Close() error { return nil }
 
 // splitForContainer turns the target's command string into argv for the
 // container. Reuses the same tokenizer as the unsandboxed path so quoting
