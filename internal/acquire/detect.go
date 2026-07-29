@@ -112,6 +112,34 @@ func (m Manifest) installCommand(depsDir string) []string {
 	return nil
 }
 
+// Images are pinned to a major version rather than :latest so a scan run twice
+// a month apart behaves the same. A scanner whose environment drifts produces
+// findings that cannot be reproduced.
+const (
+	// PythonImage carries pip and a Python runtime.
+	PythonImage = "python:3.12-slim"
+
+	// NodeImage carries npm and a Node runtime. Chosen because most published
+	// MCP servers are Node packages, and the Python image has no npm at all.
+	NodeImage = "node:22-slim"
+)
+
+// imageFor picks the container image an ecosystem needs.
+func imageFor(eco Ecosystem, fallback string) string {
+	switch eco {
+	case EcosystemNode:
+		return NodeImage
+	case EcosystemPython:
+		return PythonImage
+	default:
+		return fallback
+	}
+}
+
+// ImageFor is the exported form, so the detonation phase can run a target on
+// the runtime its dependencies were built for.
+func ImageFor(eco Ecosystem, fallback string) string { return imageFor(eco, fallback) }
+
 // EnvFor returns the environment that points an interpreter at depsDir.
 func (m Manifest) EnvFor(depsDir string) map[string]string {
 	switch m.Ecosystem {

@@ -577,6 +577,13 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 
 			mounts = append(mounts, installed.Mounts()...)
 			policy.Env = installed.Env
+
+			// Detonate on the runtime the dependencies were built for. A Node
+			// package installed into a volume is useless inside a Python
+			// image: the deps are present but `node` is not.
+			if installed.Image != "" {
+				policy.Image = installed.Image
+			}
 		}
 
 		// Always sandboxed. There is no host-execution path reachable from the

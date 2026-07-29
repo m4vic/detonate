@@ -30,6 +30,13 @@ type Result struct {
 	// Env points the interpreter at the installed dependencies.
 	Env map[string]string
 
+	// Image is the runtime the detonation phase must use.
+	//
+	// A Node package installed into a volume is useless inside a Python image:
+	// the deps are there but `node` is not. The two phases therefore share an
+	// ecosystem, not just a volume.
+	Image string
+
 	// Events is what the target's installation did. Empty for a target with
 	// no dependencies.
 	Events []trace.Event
@@ -63,6 +70,7 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 	res := &Result{
 		Volume:   volume,
 		Env:      m.EnvFor(DepsDir),
+		Image:    imageFor(m.Ecosystem, policy.Image),
 		manifest: m,
 	}
 
@@ -137,6 +145,16 @@ func createVolume(ctx context.Context) (string, error) {
 func runInstall(ctx context.Context, targetDir, volume string, m Manifest, base sandbox.Policy) (stdout, stderr string, err error) {
 	p := base
 	p.Timeout = installTimeout
+
+	// The image has to match the ecosystem. The default is python:3.12-slim,
+	// which has no npm, so every Node MCP server failed to install with
+	// "sh: 1: npm: not found" — and Node is most of the ecosystem.
+	//
+	// Chosen per phase rather than globally because the two phases need
+	// different things: install needs a package manager, detonation needs only
+	// a runtime. Keeping them separate means the detonation image can stay
+	// minimal.
+	p.Image = imageFor(m.Ecosystem, base.Image)
 
 	// The two deliberate relaxations, and only these two.
 	p.NetworkEnabled = true  // a package manager cannot work without one
