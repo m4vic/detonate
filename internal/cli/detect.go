@@ -127,14 +127,17 @@ func detectDir(dir string) (Detected, error) {
 	// in "bin" or "main". Reading it beats guessing, and beats reporting "no
 	// recognisable entry point" for a project that plainly states one.
 	//
-	// The declared entry is preferred over a guessed one when the project
-	// needs building: a TypeScript server usually has an index.ts sitting in
+	// Fall back to what the manifest declares, and prefer it outright when the
+	// project must be built: a TypeScript server usually has an index.ts in
 	// the root that a guess would happily latch onto, but `node index.ts` is
 	// not how it starts — the compiled dist/ is.
-	if m.Ecosystem == acquire.EcosystemNode && (cmd == "" || m.NeedsBuild) {
-		if m.Entry != "" {
-			cmd = "node /target/" + m.Entry
-		}
+	//
+	// This is also the only way Python servers are found at all. They keep
+	// their code in src/<package>/ and are started through the installed
+	// module, so there is no top-level file to guess and every one of the
+	// official reference servers reported "no recognisable entry point".
+	if declared := m.StartCommand(); declared != "" && (cmd == "" || m.NeedsBuild) {
+		cmd = declared
 	}
 
 	if cmd == "" {

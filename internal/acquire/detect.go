@@ -56,6 +56,39 @@ type Manifest struct {
 	// one of those targets fails phase 2 with MODULE_NOT_FOUND, which is a
 	// scan that says nothing about the target's safety.
 	NeedsBuild bool
+
+	// Module is the importable module a Python project declares as its
+	// console script, e.g. "mcp_server_fetch" from the pyproject entry
+	// mcp-server-fetch = "mcp_server_fetch:main".
+	//
+	// Python servers rarely keep a runnable file at the top level — the code
+	// lives in src/<package>/ and is reached through the installed package —
+	// so filename guessing finds nothing and the declaration is the only
+	// statement of how to start them.
+	Module string
+}
+
+// StartCommand is the command that launches this project inside the sandbox,
+// or "" when the manifest declares none.
+//
+// Both ecosystems are answered here so that "how is this started" lives with
+// the code that already parses the manifest, rather than being re-derived by
+// whoever needs it.
+func (m Manifest) StartCommand() string {
+	switch m.Ecosystem {
+	case EcosystemNode:
+		if m.Entry != "" {
+			return "node /target/" + m.Entry
+		}
+	case EcosystemPython:
+		if m.Module != "" {
+			// -m rather than a path: after `pip install --target`, the package
+			// is reached through PYTHONPATH, and its source directory inside
+			// /target is not importable on its own.
+			return "python -m " + m.Module
+		}
+	}
+	return ""
 }
 
 // manifestFiles maps a filename to the ecosystem that owns it, in priority
@@ -85,6 +118,9 @@ func Detect(dir string) Manifest {
 			continue
 		}
 		found := Manifest{Ecosystem: m.eco, File: m.name}
+		if m.eco == EcosystemPython && m.name == "pyproject.toml" {
+			found.Module = pythonEntryModule(filepath.Join(dir, m.name))
+		}
 		if m.eco == EcosystemNode {
 			found.Entry = NodeEntry(dir)
 			// Only a declared-but-absent entry justifies a build. A project
@@ -171,6 +207,64 @@ func NodeEntry(dir string) string {
 
 func cleanEntry(p string) string {
 	return strings.TrimPrefix(filepath.ToSlash(p), "./")
+}
+
+// pythonEntryModule reads the module named by a pyproject's [project.scripts]
+// table, e.g. "mcp_server_fetch" from:
+//
+//	[project.scripts]
+//	mcp-server-fetch = "mcp_server_fetch:main"
+//
+// A deliberately narrow reader rather than a TOML dependency. Only one table
+// of simple `name = "module:function"` lines is needed, which is a dozen lines
+// of scanning; a parser for the whole format would be a dependency earning its
+// place on one field. Anything it cannot understand yields "", which lands on
+// the same "no recognisable entry point" message as before — no worse than
+// not looking.
+func pythonEntryModule(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	inScripts := false
+	entries := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "\uFEFF"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			// Any new table ends the one we care about.
+			inScripts = strings.HasPrefix(line, "[project.scripts]")
+			continue
+		}
+		if !inScripts {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		// "module:function" — the module is what `python -m` needs.
+		if mod, _, found := strings.Cut(value, ":"); found && mod != "" {
+			entries[strings.TrimSpace(name)] = mod
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+
+	// Sorted, so a project declaring several scripts always yields the same
+	// one. Go map order is random, and a scan that starts a different process
+	// per run is not reproducible.
+	names := make([]string, 0, len(entries))
+	for n := range entries {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return entries[names[0]]
 }
 
 func hasBuildScript(dir string) bool {

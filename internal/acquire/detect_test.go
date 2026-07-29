@@ -156,6 +156,73 @@ func TestDetectSkipsBuildWithoutABuildScript(t *testing.T) {
 	}
 }
 
+// Python MCP servers keep their code in src/<package>/ and are started
+// through the installed module, so there is no top-level file to guess. Every
+// official Python reference server (fetch, git, time) reported "no
+// recognisable entry point" until this was read.
+func TestPythonEntryModule(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+		want string
+	}{
+		{
+			"the shape the reference servers use",
+			"[project]\nname = \"mcp-server-fetch\"\n\n[project.scripts]\nmcp-server-fetch = \"mcp_server_fetch:main\"\n",
+			"mcp_server_fetch",
+		},
+		{
+			// Sorted, so a project declaring several always yields the same one.
+			"several scripts pick the lowest name",
+			"[project.scripts]\nzeta = \"zeta_mod:main\"\nalpha = \"alpha_mod:main\"\n",
+			"alpha_mod",
+		},
+		{
+			"dotted module path",
+			"[project.scripts]\nsrv = \"pkg.cli:run\"\n",
+			"pkg.cli",
+		},
+		{
+			// A later table must not leak into the one we care about.
+			"following table ends the section",
+			"[project.scripts]\nsrv = \"real_mod:main\"\n\n[build-system]\nrequires = [\"hatchling\"]\n",
+			"real_mod",
+		},
+		{"comments and blanks ignored", "[project.scripts]\n# a comment\n\nsrv = \"m:main\"\n", "m"},
+		{"no scripts table", "[project]\nname = \"x\"\n", ""},
+		{"script without a function is not an entry point", "[project.scripts]\nsrv = \"justamodule\"\n", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeProject(t, map[string]string{"pyproject.toml": tc.toml})
+			if got := Detect(dir).Module; got != tc.want {
+				t.Errorf("Module = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartCommand(t *testing.T) {
+	// -m, not a path: after `pip install --target`, the package is reached
+	// through PYTHONPATH and its source directory is not importable on its own.
+	py := Manifest{Ecosystem: EcosystemPython, Module: "mcp_server_fetch"}
+	if got := py.StartCommand(); got != "python -m mcp_server_fetch" {
+		t.Errorf("StartCommand = %q", got)
+	}
+
+	node := Manifest{Ecosystem: EcosystemNode, Entry: "dist/index.js"}
+	if got := node.StartCommand(); got != "node /target/dist/index.js" {
+		t.Errorf("StartCommand = %q", got)
+	}
+
+	// Nothing declared must stay empty so the caller can say so plainly
+	// rather than launching a command it invented.
+	if got := (Manifest{Ecosystem: EcosystemPython}).StartCommand(); got != "" {
+		t.Errorf("StartCommand = %q, want empty", got)
+	}
+}
+
 func TestBuildInstallCommand(t *testing.T) {
 	m := Manifest{Ecosystem: EcosystemNode, File: "package.json",
 		Entry: "dist/index.js", NeedsBuild: true}
