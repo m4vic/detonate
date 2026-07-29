@@ -137,7 +137,7 @@ annotations cannot change whether the build passes.
 ## How it works
 
 ```
---git / --dir      clone or mount the target, read-only
+TARGET             clone or mount it, read-only
     |
 ACQUIRE            separate container, network ON, target NOT executed
                    install scripts observed
@@ -165,7 +165,13 @@ runs cannot gate a CI pipeline.
   errors leaves no trace, and probes only reach tools with string parameters.
 - **Startup and invocation are observed; syscalls are not.** eBPF-level tracing
   would close that gap and is not built.
-- **Docker is required** for everything except `--prompt`.
+- **Docker is required** for everything except prompt files.
+- **Servers that shell out to system binaries may not start.** The sandbox
+  images are slim, so `mcp-server-git` fails on a missing `git` executable. The
+  error names the cause, but the scan does not complete.
+- **Monorepo packages that rely on hoisted workspace dependencies still fail.**
+  Packages that inherit only a tsconfig are handled; ones that need the root
+  `node_modules` are not.
 
 ## Calibration
 
@@ -181,9 +187,21 @@ Earlier revisions flagged 30/59 and 11/12. Both times the cause was the same:
 measuring *capability* as if it were *malice*. A skill that uses an API key, or
 one that warns you never to commit private keys, is not an attack.
 
+False *negatives* get the same treatment, and one was worse. Script discovery
+only looked at a skill's top level, so Anthropic's own `docx` skill — 15 Python
+files under `scripts/` — was reported as **0 bundled scripts, instructions
+only**. A clean verdict on the reference implementation of the format. An error
+tells you to look closer; a clean verdict tells you not to bother.
+
+Every wrong answer so far has come from static pattern-matching, none from the
+sandbox. Weight your scepticism accordingly: "ran it and watched" is the part
+to trust, "this text looks bad" is the part to check.
+
 ## Status
 
-Working and useful. Interfaces may still change.
+Usable. Scanned against the official MCP reference servers and a range of
+published third-party ones; see *Honest limitations* for what still fails.
+Interfaces may still change.
 
 ## License
 
