@@ -8,6 +8,7 @@ import (
 
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/fetch"
+	"github.com/m4vic/detonate/internal/skill"
 )
 
 // Target auto-detection: work out what the user pointed at.
@@ -163,20 +164,17 @@ func detectDir(dir string) (Detected, error) {
 	return d, nil
 }
 
+// countScripts reports how many bundled scripts a skill would detonate.
+//
+// Delegates to the skill package rather than counting here. A second copy of
+// this logic is a second chance to disagree with the code that actually runs
+// the scripts, and that is exactly what happened: this counted only the top
+// level while the convention puts executable code in scripts/, so the plan
+// line promised "analyse instructions only" for skills full of Python.
 func countScripts(dir string) int {
-	entries, err := os.ReadDir(dir)
+	scripts, err := skill.FindBundledScripts(dir)
 	if err != nil {
 		return 0
 	}
-	n := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		switch strings.ToLower(filepath.Ext(e.Name())) {
-		case ".py", ".sh", ".js", ".ts":
-			n++
-		}
-	}
-	return n
+	return len(scripts)
 }

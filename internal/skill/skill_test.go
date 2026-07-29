@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,14 @@ func writeSkill(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		// Parents first: real skills nest their code under scripts/, and a
+		// helper that only handles flat layouts cannot express the case that
+		// actually broke.
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating parent of %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatalf("writing %s: %v", name, err)
 		}
 	}
@@ -170,5 +178,89 @@ func TestFindBundledScripts(t *testing.T) {
 		if scripts[i] != want[i] {
 			t.Errorf("scripts[%d] = %q, want %q", i, scripts[i], want[i])
 		}
+	}
+}
+
+// The Agent Skills convention puts executable code in scripts/. Anthropic's
+// own docx skill keeps 15 Python files under scripts/, including
+// scripts/office/validators/ — and a non-recursive scan reported "0 bundled
+// scripts, analyse instructions only" for it.
+//
+// That is a false clean on the reference implementation of the format: the
+// verdict told a user not to look at the only part that executes.
+func TestFindBundledScriptsRecursesIntoSubdirectories(t *testing.T) {
+	dir := writeSkill(t, map[string]string{
+		"SKILL.md":                          goodSkill,
+		"scripts/convert.py":                "",
+		"scripts/office/validate.py":        "",
+		"scripts/office/validators/base.py": "",
+		"scripts/setup.sh":                  "",
+		"references/guide.md":               "", // documentation, not executable
+	})
+
+	scripts, err := FindBundledScripts(dir)
+	if err != nil {
+		t.Fatalf("FindBundledScripts: %v", err)
+	}
+
+	want := []string{
+		"scripts/convert.py",
+		"scripts/office/validate.py",
+		"scripts/office/validators/base.py",
+		"scripts/setup.sh",
+	}
+	if len(scripts) != len(want) {
+		t.Fatalf("got %v, want %v", scripts, want)
+	}
+	for i := range want {
+		// Slash-separated, because these are joined onto a container path and
+		// a Windows separator would not resolve inside a Linux sandbox.
+		if scripts[i] != want[i] {
+			t.Errorf("scripts[%d] = %q, want %q", i, scripts[i], want[i])
+		}
+	}
+}
+
+// Vendored dependencies are not the skill's own code. Running them would
+// attribute a library's behaviour to the skill that bundled it, and a single
+// node_modules would turn one scan into thousands of containers.
+func TestFindBundledScriptsSkipsVendoredDirectories(t *testing.T) {
+	dir := writeSkill(t, map[string]string{
+		"SKILL.md":                       goodSkill,
+		"run.py":                         "",
+		"node_modules/left-pad/index.js": "",
+		"__pycache__/run.cpython-312.py": "",
+		".venv/lib/thing.py":             "",
+	})
+
+	scripts, err := FindBundledScripts(dir)
+	if err != nil {
+		t.Fatalf("FindBundledScripts: %v", err)
+	}
+	if len(scripts) != 1 || scripts[0] != "run.py" {
+		t.Errorf("got %v, want just [run.py]", scripts)
+	}
+}
+
+// Each script costs a container, so an unbounded count is an unbounded scan.
+// Hitting the cap must not fail the scan — every caller treats an error as
+// fatal, and abandoning a skill we successfully read turns a partial result
+// into none at all.
+func TestFindBundledScriptsCapsRunawayCounts(t *testing.T) {
+	files := map[string]string{"SKILL.md": goodSkill}
+	for i := 0; i < maxBundledScripts+25; i++ {
+		files[fmt.Sprintf("s%03d.py", i)] = ""
+	}
+	dir := writeSkill(t, files)
+
+	scripts, err := FindBundledScripts(dir)
+	if err != nil {
+		t.Fatalf("hitting the cap must not be an error: %v", err)
+	}
+	if len(scripts) != maxBundledScripts {
+		t.Errorf("got %d scripts, want the cap of %d", len(scripts), maxBundledScripts)
+	}
+	if !ScriptsTruncated(scripts) {
+		t.Error("ScriptsTruncated = false; the user would not be told the scan was incomplete")
 	}
 }

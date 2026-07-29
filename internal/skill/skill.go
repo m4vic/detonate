@@ -11,6 +11,7 @@ package skill
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,30 +91,85 @@ func parseFrontmatter(text string) (frontmatter, string) {
 	return frontmatter{}, text
 }
 
-// FindBundledScripts lists the script-like files in a skill directory.
+// maxBundledScripts bounds how many scripts one skill can contribute.
 //
-// Non-recursive at this milestone. Deeply nested skills are a later
-// refinement, not something needed to prove the loader works.
+// Each script costs a container, so an unbounded count is an unbounded scan.
+// Well past anything legitimate: the largest official skill ships 15.
+const maxBundledScripts = 60
+
+// skipDirs are directories whose contents belong to somebody else. Vendored
+// dependencies are not the skill's own code, and running them would attribute
+// a library's behaviour to the skill that happened to bundle it.
+var skipDirs = map[string]bool{
+	"node_modules": true, ".git": true, "__pycache__": true,
+	".venv": true, "venv": true, "site-packages": true,
+	"dist": true, "build": true, ".tox": true, "vendor": true,
+}
+
+// FindBundledScripts lists the script-like files in a skill directory,
+// recursively, as slash-separated paths relative to dir.
+//
+// Recursion is not a refinement here, it is the difference between a right
+// and a wrong answer. The Agent Skills convention puts executable code in a
+// scripts/ subdirectory — Anthropic's own docx skill keeps 15 Python files
+// under scripts/, including scripts/office/validators/. A non-recursive scan
+// reported "0 bundled scripts, analyse instructions only" for that skill and
+// silently skipped the only part of it that can execute.
+//
+// That failure mode is worse than an error. An error tells a user to look
+// closer; a clean verdict tells them not to bother.
 func FindBundledScripts(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	var scripts []string
+
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// An unreadable subdirectory must not abort discovery of the rest.
+			// Skipping it loses one branch; returning kills the whole scan.
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if path != dir && skipDirs[strings.ToLower(d.Name())] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if len(scripts) >= maxBundledScripts {
+			return fs.SkipAll
+		}
+		if !scriptExtensions[strings.ToLower(filepath.Ext(d.Name()))] {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		// Slash-separated: this path is joined onto a container path, and a
+		// Windows separator would not resolve inside a Linux sandbox.
+		scripts = append(scripts, filepath.ToSlash(rel))
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reading skill directory %q: %w", dir, err)
 	}
 
-	var scripts []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if scriptExtensions[strings.ToLower(filepath.Ext(e.Name()))] {
-			scripts = append(scripts, e.Name())
-		}
-	}
-	// ReadDir is already sorted, but sort explicitly so report order is
+	// WalkDir is lexical already, but sort explicitly so report order is
 	// guaranteed by us rather than inherited from a filesystem's promise.
 	sort.Strings(scripts)
+
+	// Hitting the cap is deliberately NOT an error. Every caller treats a
+	// non-nil error as fatal, so reporting it that way would abandon a skill
+	// we had successfully read — turning a partial result into none at all.
+	// Callers detect it with ScriptsTruncated and must say so in the report,
+	// because a user has to know the examination was incomplete.
 	return scripts, nil
 }
+
+// ScriptsTruncated reports whether discovery stopped at the cap, meaning some
+// of the skill's executable code was never examined.
+func ScriptsTruncated(scripts []string) bool { return len(scripts) >= maxBundledScripts }
 
 // Load reads a skill directory's SKILL.md and returns it as ToolInfo entries.
 //
