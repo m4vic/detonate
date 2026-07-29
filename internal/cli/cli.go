@@ -36,7 +36,11 @@ import (
 	"github.com/m4vic/detonate/internal/trace"
 )
 
-const Version = "0.0.1"
+// Version is overwritten at build time by the release workflow's ldflags, so
+// a downloaded binary reports the tag it was cut from rather than whatever
+// string happened to be committed. A var, not a const: the linker cannot
+// rewrite a constant.
+var Version = "dev"
 
 // Exit codes. Separating "your environment is wrong" from "the scan failed"
 // matters for CI: one means fix the runner, the other means look at the tool

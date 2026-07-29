@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      # The race detector is off on the developer's Windows machine (it needs
+      # cgo and a C toolchain), so CI is the only place it runs. detonate is
+      # concurrent by nature — a container's stderr is written by one goroutine
+      # while another reads it — and that exact pattern already produced a real
+      # bug where a finding was silently lost.
+      - name: Test
+        run: go test -race -count=1 -timeout 25m ./...
+
+      # Ubuntu runners ship with Docker, so the sandbox integration tests run
+      # for real here rather than skipping.
+      - name: Confirm Docker was available
+        run: docker version
