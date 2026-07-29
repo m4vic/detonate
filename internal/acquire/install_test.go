@@ -202,6 +202,38 @@ func TestDependencyMountIsReadOnly(t *testing.T) {
 	}
 }
 
+// A failed build reported nothing useful until this was fixed, twice over.
+//
+// Scanning a real server showed both faults in one run: npm writes only
+// "command failed" to stderr while tsc puts the actual diagnostic on stdout,
+// and cutting output from the front buried the reason under three screens of
+// deprecation warnings.
+func TestFailureOutputShowsTheReason(t *testing.T) {
+	t.Run("includes stdout, where build tools write diagnostics", func(t *testing.T) {
+		got := failureOutput("error TS5083: Cannot read file '/tsconfig.json'.", "npm error command failed")
+		if !strings.Contains(got, "TS5083") {
+			t.Errorf("the actual reason was dropped: %q", got)
+		}
+		if !strings.Contains(got, "npm error command failed") {
+			t.Errorf("stderr was dropped: %q", got)
+		}
+	})
+
+	t.Run("keeps the tail, where the reason lives", func(t *testing.T) {
+		noise := strings.Repeat("npm warn deprecated glob@7.2.3 blah blah\n", 200)
+		got := failureOutput(noise+"error TS5083: the real problem", "")
+		if !strings.Contains(got, "TS5083") {
+			t.Error("truncation cut the reason and kept the warnings")
+		}
+	})
+
+	t.Run("empty streams produce nothing", func(t *testing.T) {
+		if got := failureOutput("  ", "\n"); got != "" {
+			t.Errorf("failureOutput = %q, want empty", got)
+		}
+	})
+}
+
 func TestCleanupIsIdempotent(t *testing.T) {
 	requireDocker(t)
 

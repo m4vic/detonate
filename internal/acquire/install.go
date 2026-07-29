@@ -110,10 +110,9 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 	if runErr != nil {
 		_ = res.Cleanup(context.Background())
 		// Naming the phase matters: a failed `npm run build` and a failed
-		// `npm install` need different fixes, and the stderr alone rarely says
+		// `npm install` need different fixes, and the output alone rarely says
 		// which one it was.
-		return nil, fmt.Errorf("%s: %w (%s)",
-			action, runErr, truncate(strings.TrimSpace(stderr), 800))
+		return nil, fmt.Errorf("%s: %w%s", action, runErr, failureOutput(stdout, stderr))
 	}
 	return res, nil
 }
@@ -286,4 +285,37 @@ func truncate(s string, max int) string {
 		return s[:max] + "..."
 	}
 	return s
+}
+
+// truncateTail keeps the END of a string, which is where a failing build or
+// install puts its reason.
+func truncateTail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return "..." + s[len(s)-max:]
+}
+
+// failureOutput renders what a failed install or build actually said.
+//
+// Both streams are reported, because the reason is split across them: tsc and
+// most build tools write diagnostics to STDOUT, while npm writes only
+// "command failed" to stderr. Showing stderr alone — which is what this did
+// first — reported that something failed without ever saying what.
+//
+// Each is cut from the TAIL. A package manager opens with pages of
+// deprecation warnings and states the failure last, so trimming from the
+// front showed nothing but npm's opinion of glob@7.
+func failureOutput(stdout, stderr string) string {
+	var b strings.Builder
+	for _, s := range []struct{ label, text string }{
+		{"output", strings.TrimSpace(stdout)},
+		{"stderr", strings.TrimSpace(stderr)},
+	} {
+		if s.text == "" {
+			continue
+		}
+		b.WriteString("\n  " + s.label + ": " + truncateTail(s.text, 1500))
+	}
+	return b.String()
 }
