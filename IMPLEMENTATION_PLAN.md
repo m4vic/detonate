@@ -145,21 +145,26 @@ A skill is largely a big prompt plus scripts, so weight shifts to text:
 - [x] **M0** — Scaffold: CLI, target kinds, Docker pre-flight
 - [x] **M1** — Drivers: MCP stdio enumeration + skill loader → `ToolInfo`
 - [x] **M2** — Sandbox: disposable container, verified confinement
-- [ ] **M3** — Sandboxed execution wired into the scan path *(in progress)*
-- [ ] **M4** — Behavioral monitor: egress, fs, process spawns
-- [ ] **M5** — Adversarial probes, structured on MCPTox's 14 classes
-- [ ] **M6** — Verdict + evidence; git URL input
-- [ ] **M7** — Two-phase package acquisition
-- [ ] **M8** — Rug-pull detection (baseline store)
-- [ ] **M9** — JSON / SARIF / Markdown output
+- [x] **M3** — Sandboxed execution wired into the scan path, orphan reaper
+- [x] **M4** — Behavioural monitor: egress, denied writes, resource limits
+- [x] **M5** — Adversarial probes over MCPTox classes, with baseline diffing
+- [x] **M6** — Verdict + evidence; `--git` URL input
+- [x] **M7** — Two-phase package acquisition (`--install`)
+- [x] **M8** — Rug-pull detection (baseline store)
+- [x] **M8.5** — Skill instruction analysis, permission mismatch,
+      `--run-scripts`, `--prompt`
+- [ ] **M9** — JSON / SARIF output *(next)*
 - [ ] **M10** — Release: cross-compiled binaries, CI, install docs
 
-### M3 detail (current)
+### What is next, in order
 
-1. Run the MCP server inside the container, stdio crossing the boundary
-2. Mount skills read-only, enumerate inside
-3. Remove the "sandbox not yet implemented" warning and flip its guard test
-4. Orphan reaper on startup for `detonate-*` containers from crashed runs
+1. **JSON / SARIF output.** The exit code gates CI today, but a pipeline that
+   wants to annotate a PR needs structured findings. SARIF is what GitHub code
+   scanning consumes.
+2. **Release binaries.** `go install` needs Go; a downloadable binary needs
+   nothing. This is the adoption blocker, not features.
+3. **CI** running the suite against the calibration corpora, so a new pattern
+   cannot regress the false-positive rate silently.
 
 ---
 
