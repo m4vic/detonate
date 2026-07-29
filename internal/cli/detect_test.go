@@ -64,6 +64,52 @@ func TestDeclaredEntryBeatsAGuessWhenABuildIsNeeded(t *testing.T) {
 	}
 }
 
+// A start command does not identify a target. Every TypeScript server in the
+// MCP reference monorepo builds to dist/index.js, so memory,
+// sequentialthinking and everything shared one baseline — and scanning the
+// second reported "9 tool(s) removed since the last scan", a rug-pull finding
+// invented entirely by the collision.
+func TestBaselineIdentityDistinguishesPackagesInOneRepo(t *testing.T) {
+	const repo = "github.com/modelcontextprotocol/servers"
+
+	memory := baselineIdentity(repo, "src/memory")
+	sequential := baselineIdentity(repo, "src/sequentialthinking")
+	if memory == sequential {
+		t.Fatalf("two packages share the identity %q; each would report the "+
+			"other's tools as removed", memory)
+	}
+
+	// Stable across runs, which a clone's temp directory is not.
+	if again := baselineIdentity(repo, "src/memory"); again != memory {
+		t.Errorf("identity changed between runs: %q then %q", memory, again)
+	}
+
+	// A repository scanned whole is not the same target as a package in it.
+	if whole := baselineIdentity(repo, ""); whole == memory {
+		t.Error("scanning the whole repo collides with scanning one package")
+	}
+}
+
+// A local path must resolve to the same identity however it is spelled, or
+// each scan records a fresh baseline and rug-pull detection never fires.
+func TestBaselineIdentityIsAbsoluteForLocalPaths(t *testing.T) {
+	id := baselineIdentity(".", "")
+	if !filepath.IsAbs(id) {
+		t.Errorf("baselineIdentity(%q) = %q, want an absolute path", ".", id)
+	}
+	// "." and "./" name one directory and must not produce two baselines.
+	if other := baselineIdentity("./", ""); other != id {
+		t.Errorf("same folder, different identities: %q vs %q", id, other)
+	}
+
+	// A URL is kept verbatim: its clone lands somewhere different every run,
+	// so resolving it would defeat the comparison entirely.
+	const repo = "github.com/owner/repo"
+	if got := baselineIdentity(repo, ""); got != repo {
+		t.Errorf("baselineIdentity(%q) = %q, want it unchanged", repo, got)
+	}
+}
+
 // A project that ships its compiled output needs no build, and the guess and
 // the declaration agree. This is the path that already worked and must keep
 // working.

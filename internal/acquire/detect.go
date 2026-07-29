@@ -331,6 +331,18 @@ func buildContextFor(targetDir string) buildContext {
 	if !fileExists(filepath.Join(root, "tsconfig.json")) {
 		return self
 	}
+	// The root must look like a project root, not merely a directory that
+	// happens to hold a tsconfig.
+	//
+	// This is a security bound, not tidiness. Widening the copy widens what
+	// phase 1 can read, and phase 1 is the phase WITH a network — a malicious
+	// postinstall in a package that ships a doctored `extends` could otherwise
+	// nominate an arbitrary parent directory and exfiltrate it. Requiring a
+	// package.json or a .git alongside the config keeps the climb inside
+	// something that is recognisably one project.
+	if !fileExists(filepath.Join(root, "package.json")) && !exists(filepath.Join(root, ".git")) {
+		return self
+	}
 	return buildContext{Root: root, Sub: rel}
 }
 
@@ -341,6 +353,13 @@ func hasBuildScript(dir string) bool {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// exists reports whether anything is at path, directory included. Used for
+// .git, which is a directory in a clone and a file in a worktree.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // installCommand is the shell command that installs a manifest's dependencies

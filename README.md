@@ -61,6 +61,18 @@ detonate works out what the target is. A folder with a `SKILL.md` is a skill,
 a folder with an entry point is an MCP server, a `.txt` or `.md` file is a
 prompt.
 
+A package inside a monorepo is reached with `--path`:
+
+```bash
+detonate github.com/modelcontextprotocol/servers --path src/memory
+```
+
+The entry point comes from the manifest, so servers with no runnable file on
+disk are handled: `bin`/`main` for Node, `[project.scripts]` for Python.
+TypeScript projects whose `dist/` is generated at publish time are compiled
+first, in the install container — including monorepo packages, whose build
+needs the config they inherit from the repository root.
+
 Or run it with no arguments for a guided scan:
 
 ```

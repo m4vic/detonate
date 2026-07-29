@@ -57,6 +57,7 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 	a.format = opt.format
 	a.outFile = opt.out
 	a.scanTarget = target
+	a.scanIdentity = baselineIdentity(target, opt.subPath)
 
 	// Progress chatter would corrupt a JSON stream on stdout. It stays only
 	// when the output is for a person, or when the document is going to a file
@@ -183,6 +184,27 @@ func bindScanFlags(fs *flag.FlagSet, opt *scanOptions) {
 	fs.BoolVar(&opt.noScripts, "no-scripts", false, "Do not run a skill's bundled scripts.")
 	fs.StringVar(&opt.format, "format", "text", "Output format: text, json, or sarif.")
 	fs.StringVar(&opt.out, "out", "", "Write machine-readable output to this file.")
+}
+
+// baselineIdentity names a target stably across runs.
+//
+// Built from what the user asked for rather than what it resolved to. A local
+// path is made absolute so the same folder matches from any working directory;
+// a URL is kept as-is because its clone lands somewhere different every run.
+// --path is folded in because two packages in one repository are two targets,
+// and without it they share a baseline and invent rug-pull findings about each
+// other.
+func baselineIdentity(target, subPath string) string {
+	id := target
+	if !fetch.IsURL(target) {
+		if abs, err := filepath.Abs(target); err == nil {
+			id = abs
+		}
+	}
+	if subPath != "" {
+		id += "#" + filepath.ToSlash(subPath)
+	}
+	return id
 }
 
 // shorten trims a long absolute path for display, keeping the tail because

@@ -83,6 +83,19 @@ type App struct {
 	// complete document rather than just a list of findings.
 	scanTarget string
 	scanTools  []toolinfo.ToolInfo
+
+	// scanIdentity names the thing being scanned, for baseline purposes only.
+	//
+	// It exists because a start command does not identify a target. Every
+	// TypeScript server in the MCP reference monorepo builds to dist/index.js,
+	// so memory, sequentialthinking and everything all shared one baseline —
+	// and scanning the second reported "9 tool(s) removed since the last
+	// scan", a rug-pull finding invented entirely by the collision.
+	//
+	// The user's own argument plus --path is used rather than the resolved
+	// directory: a clone lands in a fresh temp path every run, which would
+	// never match a previous baseline.
+	scanIdentity string
 }
 
 // New returns an App wired to the real environment.
@@ -286,7 +299,12 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	// server that serves clean descriptions during review and swaps them
 	// afterwards looks perfect every single time it is looked at once.
 	if !*noBaseline && len(tools) > 0 && tr != nil {
-		a.diffBaseline(tgt.Label(), tools, tr)
+		key := a.scanIdentity
+		if key == "" {
+			// The explicit `scan --mcp` form, which names a command directly.
+			key = tgt.Label()
+		}
+		a.diffBaseline(key, tools, tr)
 	}
 
 	a.scanTools = tools

@@ -318,6 +318,24 @@ func TestBuildContextIgnoresPackageExtends(t *testing.T) {
 	}
 }
 
+// Widening the copy widens what phase 1 can read, and phase 1 is the phase
+// WITH a network. A package shipping a doctored `extends` must not be able to
+// nominate an arbitrary parent directory for a postinstall to exfiltrate, so
+// the root has to look like a project root rather than merely hold a tsconfig.
+func TestBuildContextRefusesARootThatIsNotAProject(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		// A tsconfig and nothing else that marks a project boundary.
+		"tsconfig.json":     `{"compilerOptions":{}}`,
+		"pkg/tsconfig.json": `{"extends":"../tsconfig.json"}`,
+		"pkg/package.json":  `{"main":"dist/i.js","scripts":{"build":"tsc"}}`,
+	})
+	target := filepath.Join(root, "pkg")
+
+	if bc := buildContextFor(target); bc.Sub != "" {
+		t.Errorf("Sub = %q; climbed into a directory with no package.json or .git", bc.Sub)
+	}
+}
+
 // An extends pointing at a config that is not there must not drag a parent
 // directory into the container on the strength of a broken path.
 func TestBuildContextRequiresTheConfigToExist(t *testing.T) {
