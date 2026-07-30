@@ -127,6 +127,18 @@ func EnumerateSandboxedWithTrace(
 
 	result, err := session.ListTools(listCtx, &mcp.ListToolsParams{})
 	if err != nil {
+		// A crash between the handshake and this call surfaces as a bare EOF.
+		// The reason is in the container's output — a missing env var, a
+		// database it could not reach — so include it rather than report EOF
+		// alone.
+		if failed, detail := c.Failed(); failed {
+			return nil, fmt.Errorf("the sandboxed server %q exited during enumeration: %s",
+				command, truncate(detail, 600))
+		}
+		if stderr := c.Stderr(); stderr != "" {
+			return nil, fmt.Errorf("listing tools from sandboxed %q: %w (container stderr: %s)",
+				command, err, truncate(stderr, 600))
+		}
 		return nil, fmt.Errorf("listing tools from sandboxed %q: %w", command, err)
 	}
 

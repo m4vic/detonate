@@ -241,6 +241,22 @@ func (c *Container) Failed() (bool, string) {
 	return true, detail
 }
 
+// FailedWithin is Failed, but it waits up to d for the container to exit first.
+//
+// A protocol error like EOF and the container's death are a race: the reader
+// sees the closed pipe before the reaper goroutine records the exit status. A
+// bare Failed() at that instant reports "still running" and loses the reason.
+// Giving the exit a brief moment to land turns "EOF" into "the server exited",
+// which tells a developer their server crashed rather than that the scanner
+// broke — even when the server wrote nothing to stderr.
+func (c *Container) FailedWithin(d time.Duration) (bool, string) {
+	select {
+	case <-c.done:
+	case <-time.After(d):
+	}
+	return c.Failed()
+}
+
 // Stdin and Stdout are the container's pipes, so a protocol client can be
 // pointed straight at the sandboxed process.
 //

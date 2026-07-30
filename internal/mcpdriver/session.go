@@ -80,7 +80,7 @@ func OpenSession(
 func (s *Session) Tools(ctx context.Context) ([]toolinfo.ToolInfo, error) {
 	result, err := s.session.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
-		return nil, fmt.Errorf("listing tools from sandboxed %q: %w", s.command, err)
+		return nil, s.enumerationError("listing tools", err)
 	}
 
 	tools := make([]toolinfo.ToolInfo, 0, len(result.Tools))
@@ -102,6 +102,29 @@ func (s *Session) Tools(ctx context.Context) ([]toolinfo.ToolInfo, error) {
 		})
 	}
 	return tools, nil
+}
+
+// enumerationError explains a protocol failure with what the container said.
+//
+// A bare "EOF" means the server died between the handshake and this call, and
+// on its own tells a developer nothing. The reason is almost always in the
+// container's stderr — a missing env var, a database it could not reach, an
+// unhandled exception on startup. mcp-server-mysql, for one, exits when it
+// cannot connect to a database, and "EOF" hid that entirely.
+func (s *Session) enumerationError(action string, err error) error {
+	// Wait briefly: an EOF here and the container's exit race, and the exit
+	// usually wins a moment later. This is what turns mysql-server's silent
+	// death — no stderr at all — into "the server exited" rather than a bare
+	// "EOF" that reads like the scanner's fault.
+	if failed, detail := s.container.FailedWithin(2 * time.Second); failed {
+		return fmt.Errorf("%s from sandboxed %q: the server exited: %s",
+			action, s.command, truncate(detail, 600))
+	}
+	if stderr := strings.TrimSpace(s.container.Stderr()); stderr != "" {
+		return fmt.Errorf("%s from sandboxed %q: %w (container stderr: %s)",
+			action, s.command, err, truncate(stderr, 600))
+	}
+	return fmt.Errorf("%s from sandboxed %q: %w", action, s.command, err)
 }
 
 // callTimeout bounds a single tool invocation. A tool that hangs on hostile
