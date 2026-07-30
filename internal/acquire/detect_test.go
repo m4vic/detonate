@@ -169,46 +169,50 @@ func TestPythonEntryModule(t *testing.T) {
 		{
 			"the shape the reference servers use",
 			"[project]\nname = \"mcp-server-fetch\"\n\n[project.scripts]\nmcp-server-fetch = \"mcp_server_fetch:main\"\n",
-			"mcp_server_fetch",
+			"mcp_server_fetch:main",
 		},
 		{
 			// Sorted, so a project declaring several always yields the same one.
 			"several scripts pick the lowest name",
-			"[project.scripts]\nzeta = \"zeta_mod:main\"\nalpha = \"alpha_mod:main\"\n",
-			"alpha_mod",
+			"[project.scripts]\nzeta = \"zeta_mod:main\"\nalpha = \"alpha_mod:go\"\n",
+			"alpha_mod:go",
 		},
 		{
 			"dotted module path",
 			"[project.scripts]\nsrv = \"pkg.cli:run\"\n",
-			"pkg.cli",
+			"pkg.cli:run",
 		},
 		{
 			// A later table must not leak into the one we care about.
 			"following table ends the section",
 			"[project.scripts]\nsrv = \"real_mod:main\"\n\n[build-system]\nrequires = [\"hatchling\"]\n",
-			"real_mod",
+			"real_mod:main",
 		},
-		{"comments and blanks ignored", "[project.scripts]\n# a comment\n\nsrv = \"m:main\"\n", "m"},
+		{"comments and blanks ignored", "[project.scripts]\n# a comment\n\nsrv = \"m:main\"\n", "m:main"},
 		{"no scripts table", "[project]\nname = \"x\"\n", ""},
-		{"script without a function is not an entry point", "[project.scripts]\nsrv = \"justamodule\"\n", ""},
+		// A bare module with no function cannot be turned into a console-script
+		// call, so it is not an entry point.
+		{"module without a function is not an entry point", "[project.scripts]\nsrv = \"justamodule\"\n", ""},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := writeProject(t, map[string]string{"pyproject.toml": tc.toml})
-			if got := Detect(dir).Module; got != tc.want {
-				t.Errorf("Module = %q, want %q", got, tc.want)
+			if got := Detect(dir).PyEntry; got != tc.want {
+				t.Errorf("PyEntry = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
 func TestStartCommand(t *testing.T) {
-	// -m, not a path: after `pip install --target`, the package is reached
-	// through PYTHONPATH and its source directory is not importable on its own.
-	py := Manifest{Ecosystem: EcosystemPython, Module: "mcp_server_fetch"}
-	if got := py.StartCommand(); got != "python -m mcp_server_fetch" {
-		t.Errorf("StartCommand = %q", got)
+	// python -c, not -m: the console-script "module:function" form means
+	// "call function", and -m fails on any package without a __main__.py —
+	// which is most FastMCP servers, e.g. mcp-atlassian.
+	py := Manifest{Ecosystem: EcosystemPython, PyEntry: "mcp_server_fetch:main"}
+	want := `python -c "from mcp_server_fetch import main; main()"`
+	if got := py.StartCommand(); got != want {
+		t.Errorf("StartCommand = %q, want %q", got, want)
 	}
 
 	node := Manifest{Ecosystem: EcosystemNode, Entry: "dist/index.js"}

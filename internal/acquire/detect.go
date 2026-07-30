@@ -20,6 +20,7 @@ package acquire
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,15 +58,17 @@ type Manifest struct {
 	// scan that says nothing about the target's safety.
 	NeedsBuild bool
 
-	// Module is the importable module a Python project declares as its
-	// console script, e.g. "mcp_server_fetch" from the pyproject entry
-	// mcp-server-fetch = "mcp_server_fetch:main".
+	// PyEntry is the console script a Python project declares, as the raw
+	// "module:function" spec, e.g. "mcp_server_fetch:main" from the pyproject
+	// entry  mcp-server-fetch = "mcp_server_fetch:main".
 	//
 	// Python servers rarely keep a runnable file at the top level — the code
 	// lives in src/<package>/ and is reached through the installed package —
 	// so filename guessing finds nothing and the declaration is the only
-	// statement of how to start them.
-	Module string
+	// statement of how to start them. Both halves are kept because a console
+	// script calls the function directly; `python -m module` is not equivalent
+	// and fails on any package without a __main__.py.
+	PyEntry string
 }
 
 // StartCommand is the command that launches this project inside the sandbox,
@@ -81,11 +84,16 @@ func (m Manifest) StartCommand() string {
 			return "node /target/" + m.Entry
 		}
 	case EcosystemPython:
-		if m.Module != "" {
-			// -m rather than a path: after `pip install --target`, the package
-			// is reached through PYTHONPATH, and its source directory inside
-			// /target is not importable on its own.
-			return "python -m " + m.Module
+		if mod, fn, ok := strings.Cut(m.PyEntry, ":"); ok && mod != "" && fn != "" {
+			// python -c, not -m: the console-script form "module:function"
+			// means "call function", and -m only works for a package that
+			// ships a __main__.py. mcp-atlassian and most FastMCP servers do
+			// not, so -m failed with "cannot be directly executed" for the
+			// bulk of the Python ecosystem.
+			//
+			// After pip install --target, the package is on PYTHONPATH, so the
+			// import resolves without the source tree being importable itself.
+			return fmt.Sprintf("python -c \"from %s import %s; %s()\"", mod, fn, fn)
 		}
 	}
 	return ""
@@ -119,7 +127,7 @@ func Detect(dir string) Manifest {
 		}
 		found := Manifest{Ecosystem: m.eco, File: m.name}
 		if m.eco == EcosystemPython && m.name == "pyproject.toml" {
-			found.Module = pythonEntryModule(filepath.Join(dir, m.name))
+			found.PyEntry = pythonEntryModule(filepath.Join(dir, m.name))
 		}
 		if m.eco == EcosystemNode {
 			found.Entry = NodeEntry(dir)
@@ -247,9 +255,11 @@ func pythonEntryModule(path string) string {
 			continue
 		}
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		// "module:function" — the module is what `python -m` needs.
-		if mod, _, found := strings.Cut(value, ":"); found && mod != "" {
-			entries[strings.TrimSpace(name)] = mod
+		// "module:function". Both halves are kept: the function is what a
+		// console script actually calls, and `python -m module` only works
+		// when the module ships a __main__.py — which most do not.
+		if mod, fn, found := strings.Cut(value, ":"); found && mod != "" && fn != "" {
+			entries[strings.TrimSpace(name)] = strings.TrimSpace(mod) + ":" + strings.TrimSpace(fn)
 		}
 	}
 	if len(entries) == 0 {
