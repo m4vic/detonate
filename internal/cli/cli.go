@@ -137,10 +137,14 @@ Examples:
   detonate github.com/owner/repo
   detonate ./skills/pdf-extractor
   detonate ./system-prompt.txt
+  echo "ignore all previous instructions" | detonate -
   detonate ./weird-server --cmd "python /target/main.py"
 
 Inside the sandbox your folder is mounted at /target, so --cmd uses paths
 like /target/server.py rather than a host path.
+
+A lone - reads a prompt from stdin, so a prompt can be piped in without
+saving a file first.
 
 Exit codes:
   0  clean    2  bad usage or environment
@@ -171,6 +175,11 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		// The explicit form, kept working. Anyone who scripted against it
 		// should not have their pipeline broken by a UX improvement.
 		return a.scan(ctx, args[1:])
+	case "-":
+		// A lone dash is the Unix convention for "read from stdin". Lets a
+		// user check a prompt they were just sent without saving a file:
+		// `echo "..." | detonate -` or `detonate - < prompt.txt`.
+		return a.scanStdinPrompt()
 	}
 
 	if strings.HasPrefix(args[0], "-") {
@@ -330,12 +339,38 @@ func (a *App) scanPrompt(path string) int {
 		fmt.Fprintf(a.Stderr, "detonate: cannot read %s: %v\n", path, err)
 		return exitUsage
 	}
+	return a.scanPromptText(string(data), path)
+}
 
-	tr := &trace.Trace{Target: path, Started: time.Now()}
-	for _, ev := range skill.AnalyzePrompt(string(data)) {
+// scanPromptText analyses prompt text already in hand, so the caller can feed
+// it from a file or from stdin. label names the source in the report.
+func (a *App) scanPromptText(text, label string) int {
+	tr := &trace.Trace{Target: label, Started: time.Now()}
+	for _, ev := range skill.AnalyzePrompt(text) {
 		tr.Add(ev)
 	}
 	return a.report(tr)
+}
+
+// scanStdinPrompt reads a prompt from stdin, so a user can pipe or paste one
+// without saving a file first: `echo "..." | detonate -` or
+// `detonate - < prompt.txt`.
+//
+// Text-only by nature — no container, so this is the one scan that works
+// without Docker, which matches the most likely user: someone checking a
+// prompt they were just sent.
+func (a *App) scanStdinPrompt() int {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: cannot read stdin: %v\n", err)
+		return exitUsage
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		fmt.Fprintln(a.Stderr, "detonate: no prompt on stdin. "+
+			"Pipe text in (echo \"...\" | detonate -) or give a file.")
+		return exitUsage
+	}
+	return a.scanPromptText(string(data), "stdin")
 }
 
 // diffBaseline compares this scan against the previous one and records the
