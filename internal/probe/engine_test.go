@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -15,12 +16,18 @@ import (
 // transport is faked.
 type fakeCaller struct {
 	respond func(tool string, args map[string]any) string
-	stderr  string
-	calls   []string
+	// fail, when set, returns an error for every call — the shape of a tool
+	// that cannot run in the sandbox, e.g. one that needs network egress.
+	fail   error
+	stderr string
+	calls  []string
 }
 
 func (f *fakeCaller) Call(_ context.Context, tool string, args map[string]any) (string, error) {
 	f.calls = append(f.calls, tool)
+	if f.fail != nil {
+		return "", f.fail
+	}
 	if f.respond == nil {
 		return "", nil
 	}
@@ -176,6 +183,75 @@ func TestRunReportsToolsItCannotProbe(t *testing.T) {
 	}
 	if len(events) != 1 || !strings.Contains(events[0].Summary, "not probed") {
 		t.Errorf("expected an explicit not-probed note, got %v", events)
+	}
+}
+
+// An API-backed server whose tools all need network egress must not be called
+// dangerous for it. The sandbox blocks the network on purpose, so every tool
+// fails its benign call with a DNS error — and reporting each as a finding is
+// a confident false accusation. This reproduces the Notion scan: 24 tools, all
+// failing on api.notion.com, previously 24 findings and VERDICT: dangerous.
+func TestNetworkBlockedToolsAreNotFindings(t *testing.T) {
+	c := &fakeCaller{fail: errors.New(`calling "tools/call": getaddrinfo EAI_AGAIN api.notion.com`)}
+
+	tools := []toolinfo.ToolInfo{
+		{Name: "API-get-user", InputSchema: schema("id")},
+		{Name: "API-post-search", InputSchema: schema("query")},
+	}
+	events := Run(context.Background(), c, tools, 0)
+
+	if f := findingsOnly(events); len(f) != 0 {
+		t.Fatalf("network-blocked tools produced %d finding(s); a no-network "+
+			"sandbox blocking an API call is not a defect in the tool: %v", len(f), f)
+	}
+	// It must still say something — the author needs to know these tools were
+	// not exercised, and why.
+	var noted bool
+	for _, e := range events {
+		if strings.Contains(e.Summary, "needs network access") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Errorf("expected an Info note that the tools need network; got %v", events)
+	}
+}
+
+// A benign call that fails for a NON-network reason is still not a security
+// finding, but it is a different message: the tool is broken on valid input,
+// which its author should hear.
+func TestNonNetworkBenignFailureIsNotAFinding(t *testing.T) {
+	c := &fakeCaller{fail: errors.New("TypeError: cannot read property 'x' of undefined")}
+	tools := []toolinfo.ToolInfo{{Name: "broken", InputSchema: schema("arg")}}
+
+	events := Run(context.Background(), c, tools, 0)
+	if f := findingsOnly(events); len(f) != 0 {
+		t.Errorf("a tool broken on benign input is not a security finding: %v", f)
+	}
+}
+
+func TestIsNetworkBlocked(t *testing.T) {
+	blocked := []string{
+		"getaddrinfo EAI_AGAIN api.notion.com",
+		"getaddrinfo ENOTFOUND slack.com",
+		"connect ECONNREFUSED 1.2.3.4:443",
+		"Temporary failure in name resolution",
+		"network is unreachable",
+	}
+	for _, s := range blocked {
+		if !isNetworkBlocked(errors.New(s)) {
+			t.Errorf("isNetworkBlocked(%q) = false, want true", s)
+		}
+	}
+	notBlocked := []string{
+		"invalid path",
+		"TypeError: undefined is not a function",
+		"permission denied",
+	}
+	for _, s := range notBlocked {
+		if isNetworkBlocked(errors.New(s)) {
+			t.Errorf("isNetworkBlocked(%q) = true, want false", s)
+		}
 	}
 }
 

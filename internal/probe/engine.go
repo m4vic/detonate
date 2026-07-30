@@ -51,15 +51,38 @@ func Run(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.
 
 		baseline := c.Stderr()
 		if _, err := c.Call(ctx, tool.Name, argsFor(params, benign)); err != nil {
-			// A tool that cannot handle "hello" is broken, not hardened. Say
-			// so and move on rather than reporting every later payload as a
-			// finding against a tool that never worked.
+			// A tool that reaches an external host cannot be probed here,
+			// because the sandbox denies the network on purpose. That is the
+			// sandbox working, not a defect in the tool — so it is an
+			// observation, not a finding, and it must not push the verdict to
+			// "dangerous". Reporting 24 API tools as suspicious because Notion
+			// could not reach api.notion.com is a confident false accusation,
+			// which is worse than saying nothing.
+			//
+			// The message is still useful to the tool's own author: it names
+			// exactly which tools need egress and so cannot be exercised in a
+			// sealed sandbox.
+			sev, summary := trace.SeverityInfo, fmt.Sprintf(
+				"tool %q needs network access the sandbox denies; not probed", tool.Name)
+			if !isNetworkBlocked(err) {
+				// A benign call that fails for some OTHER reason means the tool
+				// is broken on valid input. Still not a security finding — but
+				// worth surfacing to its author, and it means the payloads
+				// below cannot be trusted.
+				summary = fmt.Sprintf("tool %q failed on a benign call; probes may be unreliable", tool.Name)
+			}
 			events = append(events, trace.Event{
-				Kind: trace.KindProtocol, Severity: trace.SeverityNotable, At: time.Now(),
-				Summary: fmt.Sprintf("tool %q failed on a benign call; probes may be unreliable", tool.Name),
+				Kind: trace.KindProtocol, Severity: sev, At: time.Now(),
+				Summary: summary,
 				During:  "probe:baseline", Source: "probe-engine",
 				Detail: map[string]any{"evidence": clip(err.Error(), 200)},
 			})
+			if isNetworkBlocked(err) {
+				// Every payload would hit the same network wall first, so
+				// probing this tool learns nothing. Skip it rather than emit a
+				// crash finding per payload for an error the sandbox caused.
+				continue
+			}
 		}
 		baseline = c.Stderr() // after the benign call: this is "normal"
 
@@ -190,6 +213,31 @@ func argsFor(params []string, value string) map[string]any {
 		args[p] = value
 	}
 	return args
+}
+
+// isNetworkBlocked reports whether an error is the sandbox denying egress
+// rather than the tool misbehaving.
+//
+// These are the resolver and connection errors a runtime raises when DNS or
+// TCP is unavailable — which, in this sandbox, is always, by design. A tool
+// that produces one of these is trying to reach the outside world and being
+// stopped, which is the sandbox doing its job, not a finding about the tool.
+func isNetworkBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"eai_again", "getaddrinfo", "enotfound", "econnrefused",
+		"network is unreachable", "enetunreach", "name resolution",
+		"temporary failure in name resolution", "no address associated",
+		"dns", "socket hang up", "eai_fail",
+	} {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // isCrash distinguishes a target falling over from it politely refusing.

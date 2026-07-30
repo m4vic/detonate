@@ -691,15 +691,28 @@ func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string,
 			}
 		}
 
+		// Enumeration-phase behaviour: what the server did just from being
+		// launched and asked for its tool list, BEFORE any tool was called. A
+		// network attempt here is unprovoked — nobody invoked anything — so it
+		// is the real phone-home signal and stays a finding.
+		//
+		// Captured before probing on purpose. A tool that legitimately reaches
+		// its own API when we call it must not be confused with the server
+		// reaching out on its own; only the second is suspicious.
+		for _, ev := range monitor.Analyze(sess.Stderr(), "enumeration") {
+			tr.Add(ev)
+		}
+
 		fmt.Fprintf(a.Stdout, "  probing %d tool(s) with %d adversarial payload(s)...\n",
 			len(tools), len(probe.Payloads()))
 
+		// The engine attributes probe-phase behaviour to the specific payload
+		// and tool that provoked it, and skips tools that need the network
+		// (their egress is expected, not a finding). There is deliberately no
+		// aggregate re-scan of the whole stderr buffer afterwards: it re-flagged
+		// the expected, blocked network noise from every API-backed tool as a
+		// critical finding, which turned a clean Notion server into "dangerous".
 		for _, ev := range probe.Run(ctx, sess, tools, 0) {
-			tr.Add(ev)
-		}
-		// Read stderr once more: behaviour triggered by the last probe may
-		// only surface after the call returned.
-		for _, ev := range monitor.Analyze(sess.Stderr(), "probe") {
 			tr.Add(ev)
 		}
 		return tools, tr, nil

@@ -163,6 +163,11 @@ runs cannot gate a CI pipeline.
   root: defence in depth, because the boundary is not absolute.
 - **A clean verdict is not proof of safety.** A target that swallows its own
   errors leaves no trace, and probes only reach tools with string parameters.
+- **Tools that need the network cannot be behaviourally probed.** The sandbox
+  denies egress on purpose, so a tool that calls an external API (Notion, Slack,
+  a database) fails its probe with a resolver error. This is reported as an
+  observation naming which tools need egress, not as a finding — the sandbox
+  working is not a defect in the tool.
 - **Startup and invocation are observed; syscalls are not.** eBPF-level tracing
   would close that gap and is not built.
 - **Docker is required** for everything except prompt files.
