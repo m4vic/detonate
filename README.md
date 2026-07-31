@@ -1,5 +1,9 @@
 # detonate
 
+> **Experimental / not production-grade:** Detonate can have bugs, false
+> positives, and false negatives. A `no_findings` result is not a security
+> certification. Use disposable test targets, never provide real secrets, and
+
 **Run untrusted AI tools in a sandbox and report what they actually do, not what
 their manifest claims.**
 
