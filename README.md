@@ -1,8 +1,7 @@
 # detonate
 
-> **This project is constantly evolving and is currently not production-grade.**
-> Detonate can have bugs, false
-> positives, and false negatives. A `no_findings` result is not a security
+ **This project is constantly evolving and is currently not production-grade.**
+Detonate can have bugs, false positives, and false negatives. A `no_findings` result is not a security
 **Run untrusted AI tools in a sandbox and report what they actually do, not what
 their manifest claims.**
 
