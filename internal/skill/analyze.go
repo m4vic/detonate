@@ -58,7 +58,7 @@ func Analyze(sk Skill) []trace.Event {
 			// documentation talks about dangerous things constantly. Matching
 			// the mention rather than the instruction makes the careful skills
 			// look the worst, which is exactly backwards.
-			if sig.warningsAreBenign && isWarning(m) {
+			if sig.warningsAreBenign && isWarning(m, sig.warningAction) {
 				continue
 			}
 			events = append(events, trace.Event{
@@ -101,7 +101,15 @@ var warningContext = regexp.MustCompile(`(?i)\b(never|do not|don't|avoid|warns?|
 
 // isWarning reports whether a matched line is telling the reader NOT to do the
 // thing, rather than telling the agent to do it.
-func isWarning(line string) bool {
+
+func isWarning(line string, action *regexp.Regexp) bool {
+	if action != nil {
+		if loc := action.FindStringIndex(line); loc != nil {
+			// A warning applies to the action it precedes. Do not let a later
+			// concealment clause suppress an earlier credential-access action.
+			line = line[:loc[0]]
+		}
+	}
 	return warningContext.MatchString(line)
 }
 
@@ -121,7 +129,10 @@ type textSignature struct {
 	// mention: "never commit private keys" is advice, "read ~/.ssh/id_rsa" is
 	// not.
 	warningsAreBenign bool
+	warningAction     *regexp.Regexp
 }
+
+var credentialAction = regexp.MustCompile(`(?i)\b(read|cat|open|load|send|upload|exfiltrat\w*|include|copy|print|dump|fetch)\b[^\n]*(~/\.ssh|id_rsa|id_ed25519|\.aws/credentials|\.kube/config)`)
 
 // textSignatures are patterns in a skill's instructions worth reporting.
 //
@@ -172,6 +183,7 @@ var textSignatures = []textSignature{
 		kind:    trace.KindFile, severity: trace.SeverityCritical,
 		summary:           "instructions tell the agent to read private keys or cloud credentials",
 		warningsAreBenign: true,
+		warningAction:     credentialAction,
 	},
 	{
 		pattern: regexp.MustCompile(`(?i)[^\n]*(~/\.env|\.env\b|API[_ ]KEY|SECRET[_ ]KEY|ACCESS[_ ]TOKEN|password)[^\n]*`),

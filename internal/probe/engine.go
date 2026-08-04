@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/monitor"
+	scenariodef "github.com/m4vic/detonate/internal/scenario"
+	"github.com/m4vic/detonate/internal/toolcall"
 	"github.com/m4vic/detonate/internal/toolinfo"
 	"github.com/m4vic/detonate/internal/trace"
 )
@@ -18,8 +21,9 @@ import (
 // tested without Docker, and so the same probes can later drive a skill's
 // bundled scripts, which are a different thing wearing the same shape.
 type Caller interface {
-	// Call invokes a tool and returns its response as text.
-	Call(ctx context.Context, tool string, args map[string]any) (string, error)
+	// Call invokes a tool. A tool-declared IsError result is a valid response;
+	// only transport or protocol failures belong in the Go error.
+	Call(ctx context.Context, tool string, args map[string]any) (toolcall.Result, error)
 
 	// Stderr returns everything the target has written so far. The engine
 	// diffs this across calls to attribute behaviour to a specific probe.
@@ -33,9 +37,28 @@ type Caller interface {
 // the target exhibits normally. Without the baseline, a server that always
 // logs a warning would produce a finding on every probe.
 func Run(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration) []trace.Event {
-	var events []trace.Event
+	return RunWithResults(ctx, c, tools, timeout).Events
+}
 
-	for _, tool := range tools {
+// Result includes both evidence and the coverage state for every tool. The
+// events answer "what happened"; scenarios answer "what did we actually
+// manage to test".
+type Result struct {
+	Events    []trace.Event
+	Scenarios []assessment.ScenarioResult
+}
+
+// RunWithResults probes every tool and records one terminal scenario result
+// per tool, including tools that cannot be reached by the current payload set.
+func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration) Result {
+	var events []trace.Event
+	var scenarios []assessment.ScenarioResult
+
+	for i, tool := range tools {
+		scenario := assessment.ScenarioResult{
+			ID: scenariodef.MCPToolID(tool.Name), Required: true,
+		}
+		eventStart := len(events)
 		params := stringParams(tool.InputSchema)
 		if len(params) == 0 {
 			// Nothing to inject into. A tool with no string inputs is not
@@ -46,11 +69,15 @@ func Run(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.
 				Summary: fmt.Sprintf("tool %q has no string parameters; not probed", tool.Name),
 				During:  "probe", Source: "probe-engine",
 			})
+			scenario.Outcome = assessment.OutcomeUnsupported
+			scenario.Reason = "tool has no string parameters reachable by the current probe set"
+			scenarios = append(scenarios, scenario)
 			continue
 		}
 
 		baseline := c.Stderr()
-		if _, err := c.Call(ctx, tool.Name, argsFor(params, benign)); err != nil {
+		baselineResult, err := c.Call(ctx, tool.Name, argsFor(params, benign))
+		if err != nil {
 			// A tool that reaches an external host cannot be probed here,
 			// because the sandbox denies the network on purpose. That is the
 			// sandbox working, not a defect in the tool — so it is an
@@ -81,26 +108,55 @@ func Run(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.
 				// Every payload would hit the same network wall first, so
 				// probing this tool learns nothing. Skip it rather than emit a
 				// crash finding per payload for an error the sandbox caused.
+				scenario.Outcome = assessment.OutcomeUnsupported
+				scenario.Reason = "tool requires network access denied by the selected sandbox profile"
+				scenarios = append(scenarios, scenario)
 				continue
 			}
+			scenario.Outcome = assessment.OutcomeTargetError
+			scenario.Reason = "tool failed on a benign schema-valid call"
+		} else if baselineResult.IsError {
+			events = append(events, trace.Event{
+				Kind: trace.KindProtocol, Severity: trace.SeverityInfo, At: time.Now(),
+				Summary: fmt.Sprintf("tool %q returned isError on a benign call", tool.Name),
+				During:  "probe:baseline", Source: "probe-engine",
+				Detail: map[string]any{
+					"evidence": clip(baselineResult.SearchableText(), 200),
+				},
+			})
+			scenario.Outcome = assessment.OutcomeTargetError
+			scenario.Reason = "tool returned isError on a benign schema-valid call"
 		}
 		baseline = c.Stderr() // after the benign call: this is "normal"
 
 		for _, p := range payloads {
 			select {
 			case <-ctx.Done():
-				return events
+				scenario.Outcome = assessment.OutcomeTimeout
+				scenario.Reason = ctx.Err().Error()
+				scenarios = append(scenarios, scenario)
+				for _, pending := range tools[i+1:] {
+					scenarios = append(scenarios, assessment.ScenarioResult{
+						ID:       scenariodef.MCPToolID(pending.Name),
+						Required: true,
+						Outcome:  assessment.OutcomeSkipped,
+						Reason:   "scan cancelled before scenario started",
+					})
+				}
+				return Result{Events: events, Scenarios: scenarios}
 			default:
 			}
 
 			before := c.Stderr()
-			resp, err := c.Call(ctx, tool.Name, argsFor(params, p.Value))
+			result, err := c.Call(ctx, tool.Name, argsFor(params, p.Value))
 			after := c.Stderr()
 
 			during := fmt.Sprintf("probe:%s on %s", p.Category, tool.Name)
 
 			// 1. Did the RESPONSE prove the payload worked?
-			if ev := checkResponse(tool.Name, p, resp, during); ev != nil {
+			if ev := checkResponse(
+				tool.Name, p, result.SearchableText(), during,
+			); ev != nil {
 				events = append(events, *ev)
 			}
 
@@ -130,9 +186,32 @@ func Run(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.
 					},
 				})
 			}
+			if ctx.Err() != nil {
+				scenario.Outcome = assessment.OutcomeTimeout
+				scenario.Reason = ctx.Err().Error()
+				break
+			}
+		}
+
+		if hasFinding(events[eventStart:]) {
+			scenario.Outcome = assessment.OutcomeFinding
+			scenario.Reason = "one or more probe findings were observed"
+		} else if scenario.Outcome == "" {
+			scenario.Outcome = assessment.OutcomePass
+		}
+		scenarios = append(scenarios, scenario)
+	}
+	return Result{Events: events, Scenarios: scenarios}
+}
+
+func hasFinding(events []trace.Event) bool {
+	for _, event := range events {
+		if event.Severity == trace.SeverityCritical ||
+			event.Severity == trace.SeverityNotable {
+			return true
 		}
 	}
-	return events
+	return false
 }
 
 // checkResponse looks for proof in what the tool returned.

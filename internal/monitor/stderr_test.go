@@ -100,6 +100,25 @@ func TestAnalyzeIsQuietOnCleanOutput(t *testing.T) {
 	}
 }
 
+func TestAnalyzeDoesNotTreatMissingModuleAsNetwork(t *testing.T) {
+	stderr := `Traceback (most recent call last):
+ModuleNotFoundError: No module named 'pypdf'`
+	if events := Analyze(stderr, "skill"); len(events) != 0 {
+		t.Fatalf("missing dependency was misclassified as network activity: %v", events)
+	}
+}
+
+func TestAnalyzeDetectsStandaloneNodeNotFound(t *testing.T) {
+	stderr := `Error: getaddrinfo ENOTFOUND example.com`
+	events := Analyze(stderr, "enumeration")
+	for _, event := range events {
+		if event.Kind == trace.KindNetwork {
+			return
+		}
+	}
+	t.Fatalf("standalone ENOTFOUND was not classified as network activity: %v", events)
+}
+
 // A retry loop writing the same error 50 times is one behaviour, not 50
 // findings. Collapsing them is what keeps a report readable.
 func TestAnalyzeDeduplicatesRepeatedErrors(t *testing.T) {

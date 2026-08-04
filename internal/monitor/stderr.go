@@ -79,7 +79,7 @@ var signatures = []signature{
 	{
 		// Python's requests/urllib and Node's fetch produce these even when
 		// the underlying cause is the blocked network.
-		pattern: regexp.MustCompile(`(?i).*(urllib|requests\.exceptions|ConnectionError|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|httpx\.).*`),
+		pattern: regexp.MustCompile(`(?i).*(urllib|requests\.exceptions|ConnectionError|ECONNREFUSED|\bENOTFOUND\b|EAI_AGAIN|httpx\.).*`),
 		kind:    trace.KindNetwork, severity: trace.SeverityCritical,
 		summary: "target used an HTTP client during enumeration",
 	},
