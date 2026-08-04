@@ -37,6 +37,14 @@ Legend: **P0** release/safety blocker · **P1** required for trustworthy release
 
 ## v0.2.0 — Canary instrumentation
 
+Prerequisite, done ahead of the canary work because it touches every stage:
+
+- [x] **P1/M** Extract `internal/scan` — pipeline out of the CLI, typed
+      `Request`/`Stages`, `Progress` callback
+      — *check:* no path builds command-line flags to call itself
+- [x] **P1/S** `static` and `dynamic` modes accept the shared scan flags
+      — *check:* `detonate static <p> --format sarif --out f` exits 3 and writes valid SARIF
+
 - [ ] **P1/M** Canary token generator: high entropy, fresh per scan, collision-checked
       — *check:* generated token never matches plausible target content in the corpus
 - [ ] **P1/M** Environment canaries seeded into the container env

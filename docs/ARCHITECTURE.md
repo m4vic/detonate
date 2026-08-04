@@ -92,12 +92,13 @@ interface. Deep is good.
 | `assessment` | Turn evidence into risk + completeness | **Deep, narrow** |
 | `baseline` | Detect rug pulls across runs | Medium |
 | `monitor` | Observe a running target | Medium |
+| `scan` | Run one target through the whole pipeline | **Deep** |
 | `report` | Render a scan as text, JSON, SARIF | Medium |
 | `fetch` | Clone a remote target | Shallow, correctly |
 | `environment` | Docker pre-flight | Shallow, correctly |
 | `mcptest` | A real MCP server for our own tests | Test support |
 | `trace` `toolinfo` `toolcall` `target` `scenario` | Shared vocabulary | Thin **on purpose** — see §5 |
-| `cli` | Command-line surface | **Too wide** — see §6 |
+| `cli` | Flags, interactive mode, terminal rendering | Wide, but now only a surface |
 
 ## 4. The modules in detail
 
@@ -261,67 +262,51 @@ package *is* a shared type. These are the second kind.
 `trace` is the most important of them: read its package comment before changing
 anything about evidence.
 
-## 6. The one structural problem: `cli`
-
-`cli` is ~45 functions across six files and holds the real scan pipeline —
-fetch, detect, acquire, enumerate, probe, baseline, assess, render — mixed
-together with flag parsing and terminal printing.
-
-The clearest symptom is in [run.go](../internal/cli/run.go): `runMCP` builds a
-**string slice of command-line flags** and hands it to `a.scan(ctx, args)`,
-which parses them again.
+## 6. `scan` — the pipeline, and why it is its own package
 
 ```go
+Run(ctx, Request, Progress) (*Report, error)
+```
+
+`scan` acquires dependencies, launches the target in the sandbox, enumerates
+what it exposes, and probes it. It does no printing, reads no flags, and picks
+no exit code.
+
+The pipeline used to live inside `cli`, and the internal callers did not call
+it directly — they built a command line and handed it back to the flag parser:
+
+```go
+// what runMCP used to do
 args := []string{"--mcp", d.Command, "--dir", d.Dir}
 if install { args = append(args, "--install") }
-if probe   { args = append(args, "--probe") }
 return a.scan(ctx, args)
 ```
 
-The pipeline is being driven by synthesizing and re-parsing its own command
-line. Options cross that boundary as strings, so the compiler cannot check
-them, and the scan cannot be invoked except through the CLI.
+Every option crossed that boundary as a string the compiler could not check,
+and nothing but a terminal could start a scan.
 
-### The fix — one extraction, not a redesign
+Two design points worth keeping:
 
-Extract a `scan` package holding the pipeline, with a deep interface:
+**`Stages` is named for what runs, not what is skipped.** A zero value means
+the least execution, so a caller that forgets a field gets a safer scan rather
+than a more dangerous one. For a package whose job is running untrusted code,
+the default has to fail toward doing less.
 
-```go
-// Package scan runs one target through the whole pipeline and returns what
-// was observed. It does no printing and reads no flags.
-package scan
+**`Progress` is a callback, not a writer.** A scan spends minutes doing things
+the user should be told about, but the pipeline does not know whether a
+terminal, a log, or nothing is listening. The caller decides.
 
-type Request struct {
-    Target   string
-    SubPath  string
-    Command  string        // override detection
-    Skip     Stages        // what to leave out
-    Timeouts Budget
-}
+`cli` is now a surface: parse flags → build a `Request` → call `scan.Run` →
+render. Everything that scans arrives at one typed entry point, `execute()`.
 
-func Run(ctx context.Context, req Request) (Report, error)
-```
+### What remains in `cli`
 
-`cli` then becomes what it should be: parse flags → build a `Request` → call
-`scan.Run` → hand the `Report` to `report`. Roughly:
+Fetching and detection stayed, deliberately. They are how a *person* names a
+target — resolving a URL, guessing whether a folder is a skill — and they are
+well covered by tests where they are. `scan` deals in targets that have already
+been named.
 
-- Everything currently below "detect" moves to `scan`.
-- `cli` keeps argument parsing, interactive mode, and human rendering.
-- Options travel as typed struct fields, not as re-parsed strings.
-
-Three things this buys, in order:
-
-1. The pipeline becomes testable without driving a CLI.
-2. Detonate becomes usable as a Go library, which matters for registry
-   operators who want to scan in bulk.
-3. Every feature on the roadmap — canaries, capabilities, budgets — has one
-   obvious place to land instead of another branch inside a flag handler.
-
-**Do this before v0.2.0.** Canary instrumentation touches every pipeline stage,
-and threading it through argv synthesis would be genuinely painful.
-
-This is the only structural change recommended. The engine modules are in good
-shape and should be left alone.
+The engine modules are in good shape and should be left alone.
 
 ## 7. Conventions
 
@@ -352,6 +337,8 @@ containers.
   SARIF consume. Never re-derive findings from the trace in a renderer.
 - **A new evidence source** → emit `trace.Event` with an accurate `Source`.
   Evidence that cannot name its own origin is not evidence.
+- **A new pipeline stage** (canaries, budgets) → `scan`, announced through
+  `Progress`. It should not require a new flag to reach.
 
 ## 8. Invariants
 
