@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -18,21 +20,74 @@ const modeUsage = `Usage:
   detonate combined <target>               Not available in alpha
 `
 
-func (a *App) runStatic(ctx context.Context, args []string) int {
-	if len(args) != 1 {
+// modeArgs separates the one target from the options that follow it.
+//
+// The mode subcommands used to require exactly one argument, which meant any
+// flag at all was rejected as bad usage: `detonate static ./skill --format
+// json` printed usage and exited 2. That made the two documented CI outputs
+// unreachable from the mode a CI job should be using, since static mode is the
+// one that needs no Docker.
+func (a *App) modeArgs(name string, args []string) (string, scanOptions, bool) {
+	var opt scanOptions
+	if len(args) == 0 {
 		fmt.Fprint(a.Stderr, modeUsage)
+		return "", opt, false
+	}
+
+	// The target comes first so the flag parser sees only flags. Accepting it
+	// anywhere would mean guessing which bare word is the target.
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	bindScanFlags(fs, &opt)
+	if err := fs.Parse(args[1:]); err != nil {
+		return "", opt, false
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(a.Stderr, "detonate: %s takes one target; put options after it\n\n", name)
+		fmt.Fprint(a.Stderr, modeUsage)
+		return "", opt, false
+	}
+	switch opt.format {
+	case "", "text", "json", "sarif":
+	default:
+		fmt.Fprintf(a.Stderr, "detonate: unknown format %q; use text, json, or sarif\n", opt.format)
+		return "", opt, false
+	}
+	return args[0], opt, true
+}
+
+func (a *App) runStatic(ctx context.Context, args []string) int {
+	input, opt, ok := a.modeArgs("static", args)
+	if !ok {
 		return exitUsage
 	}
-	return a.scanStatic(ctx, args[0])
+	// Static mode reports through the same machine-readable contract as a
+	// dynamic scan, so a CI job can gate on it without a container runtime.
+	a.format = opt.format
+	a.outFile = opt.out
+	a.failIncomplete = opt.failIncomplete
+	if (a.format == "json" || a.format == "sarif") && a.outFile == "" {
+		a.docOut = a.Stdout
+		a.Stdout = io.Discard
+	}
+	return a.scanStatic(ctx, input)
 }
 
 func (a *App) runDynamic(ctx context.Context, args []string) int {
-	if len(args) != 1 {
-		fmt.Fprint(a.Stderr, modeUsage)
+	input, opt, ok := a.modeArgs("dynamic", args)
+	if !ok {
 		return exitUsage
 	}
-	fmt.Fprintln(a.Stdout, "dynamic mode is experimental: target code runs only in Docker when available")
-	return a.RunTarget(ctx, args[0], scanOptions{})
+	// The notice is decoration, and decoration on stdout corrupts a JSON or
+	// SARIF stream. It has to be suppressed here rather than by RunTarget,
+	// which cannot silence output that was already written before it was
+	// called.
+	if opt.format == "" || opt.format == "text" {
+		fmt.Fprintln(a.Stdout, "dynamic mode is experimental: target code runs only in Docker when available")
+	}
+	// RunTarget owns format selection and output redirection for this path,
+	// so the parsed options are handed over whole rather than applied here.
+	return a.RunTarget(ctx, input, opt)
 }
 
 func (a *App) runCombined(args []string) int {
