@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible Detonate failure or incorrect result
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not disclose vulnerabilities or secrets here. Use SECURITY.md for
+        private security reporting.
+  - type: input
+    id: version
+    attributes:
+      label: Detonate version or commit
+      placeholder: v0.2.0-alpha.1 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, Go version, and Docker version
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Exact command with every credential and private value removed
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and exit code
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Minimal logs or report fragment with secrets removed
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private prompts, and proprietary source.
+          required: true
+        - label: This is not an undisclosed security vulnerability.
+          required: true
+

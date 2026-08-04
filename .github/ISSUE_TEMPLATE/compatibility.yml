@@ -1,0 +1,75 @@
+name: MCP or skill compatibility
+description: Report a target that Detonate cannot acquire, run, or test
+title: "compat: "
+labels:
+  - compatibility
+body:
+  - type: dropdown
+    id: target_type
+    attributes:
+      label: Target type
+      options:
+        - MCP server over stdio
+        - MCP server over HTTP
+        - Agent Skill
+        - Prompt
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Public target and immutable version
+      description: Repository plus commit, package plus version, or minimized fixture
+    validations:
+      required: true
+  - type: input
+    id: detonate
+    attributes:
+      label: Detonate version or commit
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, runtime, and Docker version
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Sanitized command
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Failing phase
+      options:
+        - Detection
+        - Acquisition or build
+        - Startup
+        - MCP negotiation
+        - Tool discovery
+        - Dynamic probe
+        - Skill script
+        - Teardown
+        - Reporting
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Actual result and expected support
+    validations:
+      required: true
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Corpus consent
+      options:
+        - label: This public target may be added to Detonate's compatibility corpus.
+
