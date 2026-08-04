@@ -10,7 +10,7 @@ permissions:
   contents: write # needed to create the release and upload assets
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,10 +20,37 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      # Never publish binaries from a red build. A release is the one artefact
-      # people run without reading, so it has to have passed the suite.
+      - name: Verify release inputs are tracked
+        run: git ls-files --error-unmatch cmd/detonate/main.go
+
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
       - name: Test
-        run: go test -count=1 -timeout 25m ./...
+        run: go test -race -count=1 -timeout 25m ./...
+
+      - name: Confirm Docker was available
+        run: docker version
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
 
       # One Go toolchain cross-compiles every target. No Docker images, no
       # per-platform runners, no C dependencies to reconcile — this is the

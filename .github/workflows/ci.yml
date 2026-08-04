@@ -42,3 +42,93 @@ jobs:
       # for real here rather than skipping.
       - name: Confirm Docker was available
         run: docker version
+
+  # A normal checkout is already clean on GitHub, but extracting git archive
+  # makes the invariant explicit: ignored and untracked developer files cannot
+  # make this job pass. This caught cmd/detonate/main.go being present locally
+  # while absent from the repository.
+  clean-checkout:
+    name: Clean checkout (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            extension: ''
+          - os: macos-latest
+            extension: ''
+          - os: windows-latest
+            extension: '.exe'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: source/go.sum
+
+      - name: Export tracked source
+        shell: pwsh
+        run: |
+          git -C source ls-files --error-unmatch cmd/detonate/main.go
+          if ($LASTEXITCODE -ne 0) {
+            throw "cmd/detonate/main.go is not tracked"
+          }
+
+          $archive = Join-Path $env:RUNNER_TEMP "detonate-source.tar"
+          $clean = Join-Path $env:RUNNER_TEMP "detonate-clean"
+          git -C source archive --format=tar --output=$archive HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "git archive failed"
+          }
+          New-Item -ItemType Directory -Force -Path $clean | Out-Null
+          tar -xf $archive -C $clean
+          if ($LASTEXITCODE -ne 0) {
+            throw "extracting the tracked source archive failed"
+          }
+
+      - name: Build, install, and smoke test tracked source
+        shell: pwsh
+        run: |
+          $clean = Join-Path $env:RUNNER_TEMP "detonate-clean"
+          $binary = Join-Path $env:RUNNER_TEMP "detonate${{ matrix.extension }}"
+          $installDir = Join-Path $env:RUNNER_TEMP "detonate-install"
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+          Push-Location $clean
+          try {
+            go build -trimpath -o $binary ./cmd/detonate
+            if ($LASTEXITCODE -ne 0) {
+              throw "go build failed"
+            }
+
+            $env:GOBIN = $installDir
+            go install ./cmd/detonate
+            if ($LASTEXITCODE -ne 0) {
+              throw "go install failed"
+            }
+
+            $version = & $binary --version
+            if ($LASTEXITCODE -ne 0 -or $version -notmatch '^detonate \S+$') {
+              throw "version smoke test failed: $version"
+            }
+
+            $json = "Summarize the user's text clearly." |
+              & $binary - --format json
+            if ($LASTEXITCODE -ne 0) {
+              throw "prompt smoke test failed with exit code $LASTEXITCODE"
+            }
+            $report = $json | ConvertFrom-Json
+            if ($report.schema -ne "detonate.report/v1" -or
+                $report.tool -ne "detonate") {
+              throw "prompt smoke test returned an invalid report"
+            }
+          }
+          finally {
+            Pop-Location
+          }
