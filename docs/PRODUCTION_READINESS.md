@@ -6,6 +6,7 @@ This document defines the shortest credible path from the current Detonate
 prototype to an installable, trustworthy, and promotable product. It is the
 release and product contract. Detailed component work remains in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), architectural invariants in
+[TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md), the code as it stands in
 [ARCHITECTURE.md](ARCHITECTURE.md), and live evidence in
 [COMPATIBILITY.md](COMPATIBILITY.md).
 

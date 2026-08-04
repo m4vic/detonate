@@ -2,8 +2,9 @@
 
 Status: implementation in progress, 2026-07-30.
 
-This plan implements [ARCHITECTURE.md](ARCHITECTURE.md). It is ordered to stop
-false confidence and release failures before adding features.
+This plan implements [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md). It is
+ordered to stop false confidence and release failures before adding features.
+For the code as it stands today, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The cross-phase release, CLI, packaging, and promotion contract is tracked in
 [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).

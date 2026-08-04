@@ -290,7 +290,10 @@ The current implementation, target architecture, and verified compatibility
 results are tracked separately so proposed features are not mistaken for
 shipped behavior:
 
-- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture](docs/ARCHITECTURE.md) — what the code does today, module by module
+- [Roadmap](docs/ROADMAP.md) and [task list](docs/TASKS.md) — what ships in each version
+- [Target architecture](docs/TARGET_ARCHITECTURE.md) — the design being built toward
+- [Research plan](docs/RESEARCH_PLAN.md) — what to adopt from published MCP-security work
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Production-readiness and launch plan](docs/PRODUCTION_READINESS.md)
 - [Compatibility and live tests](docs/COMPATIBILITY.md)

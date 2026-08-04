@@ -36,7 +36,8 @@ a fix is available. These are targets, not a service-level agreement.
 ## Security boundaries
 
 The current security guarantees and known gaps are documented in
-[the architecture](docs/ARCHITECTURE.md) and
+[the architecture](docs/ARCHITECTURE.md),
+[the target architecture](docs/TARGET_ARCHITECTURE.md), and
 [compatibility notes](docs/COMPATIBILITY.md). In particular:
 
 - Docker is a required isolation boundary for dynamic MCP and skill execution.
