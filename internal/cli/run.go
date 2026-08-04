@@ -10,6 +10,8 @@ import (
 
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/fetch"
+	"github.com/m4vic/detonate/internal/scan"
+	"github.com/m4vic/detonate/internal/target"
 )
 
 // The primary CLI surface: `detonate <target>`.
@@ -127,25 +129,24 @@ func (a *App) runSkill(ctx context.Context, d Detected, opt scanOptions) int {
 	fmt.Fprintf(a.Stdout, "  target  %s\n", shorten(d.Dir))
 	fmt.Fprintf(a.Stdout, "  type    skill (%s)\n", d.Why)
 
-	args := []string{"--skill", d.Dir}
+	tgt, err := target.Skill(d.Dir)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "  %v\n", err)
+		return exitUsage
+	}
+
 	// Bundled scripts are the only DYNAMIC part of a skill scan: SKILL.md can
 	// only be read, but a script is a program an agent will actually execute.
 	// Skipping it by default would leave the most dangerous part unexamined.
 	runScripts := d.Scripts > 0 && !opt.quick && !opt.noScripts
 	if runScripts {
-		args = append(args, "--run-scripts")
 		fmt.Fprintf(a.Stdout, "  plan    analyse instructions, run %d script(s) in the sandbox\n", d.Scripts)
 	} else {
 		fmt.Fprintln(a.Stdout, "  plan    analyse instructions only")
 	}
-	if opt.noBaseline {
-		args = append(args, "--no-baseline")
-	}
-	if opt.failIncomplete {
-		args = append(args, "--fail-incomplete")
-	}
 	fmt.Fprintln(a.Stdout)
-	return a.scan(ctx, args)
+
+	return a.execute(ctx, tgt, "", scan.Stages{RunScripts: runScripts}, !opt.noBaseline)
 }
 
 func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
@@ -153,26 +154,16 @@ func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
 	fmt.Fprintf(a.Stdout, "  type    MCP server (%s)\n", d.Why)
 	fmt.Fprintf(a.Stdout, "  start   %s\n", d.Command)
 
-	args := []string{"--mcp", d.Command, "--dir", d.Dir}
-
 	install := d.NeedsInstall && !opt.quick && !opt.noInstall
 	probe := !opt.quick && !opt.noProbe
 
 	var plan []string
 	if install {
-		args = append(args, "--install")
 		plan = append(plan, "install deps (network on, target hooks may run)")
 	}
 	plan = append(plan, "launch sandboxed (network off)")
 	if probe {
-		args = append(args, "--probe")
 		plan = append(plan, "probe tools with hostile input")
-	}
-	if opt.noBaseline {
-		args = append(args, "--no-baseline")
-	}
-	if opt.failIncomplete {
-		args = append(args, "--fail-incomplete")
 	}
 
 	fmt.Fprintf(a.Stdout, "  plan    %s\n", strings.Join(plan, ", "))
@@ -182,7 +173,9 @@ func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
 		fmt.Fprintf(a.Stdout, "  note    skipping %s; the server may fail to import\n", d.Manifest)
 	}
 	fmt.Fprintln(a.Stdout)
-	return a.scan(ctx, args)
+
+	return a.execute(ctx, target.MCP(d.Command), d.Dir,
+		scan.Stages{Install: install, Probe: probe}, !opt.noBaseline)
 }
 
 // bindScanFlags defines the options shared by the positional form.

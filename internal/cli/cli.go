@@ -23,17 +23,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/baseline"
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/fetch"
-	"github.com/m4vic/detonate/internal/mcpdriver"
-	"github.com/m4vic/detonate/internal/monitor"
-	"github.com/m4vic/detonate/internal/probe"
 	"github.com/m4vic/detonate/internal/report"
 	"github.com/m4vic/detonate/internal/sandbox"
-	"github.com/m4vic/detonate/internal/scenario"
+	"github.com/m4vic/detonate/internal/scan"
 	"github.com/m4vic/detonate/internal/skill"
 	"github.com/m4vic/detonate/internal/target"
 	"github.com/m4vic/detonate/internal/toolinfo"
@@ -369,10 +365,35 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
-	// Pre-flight. The finished pipeline requires a sandbox before executing
-	// anything untrusted, so the gate is enforced from day one even though M1
-	// below does not route through a sandbox yet. Wiring it in later would
-	// mean shipping a version whose safety promise is aspirational.
+	return a.execute(ctx, tgt, dir, scan.Stages{
+		Install:    *install,
+		Probe:      *doProbe,
+		RunScripts: *runScripts,
+	}, !*noBaseline)
+}
+
+// execute runs a scan whose target and stages are already decided, then
+// reports it.
+//
+// Every path that scans something arrives here: the positional form, the
+// explicit `scan` subcommand, and the interactive wizard. They differ only in
+// how the user named the target, which is exactly the part that should not be
+// duplicated into three pipelines.
+//
+// The options arrive as typed arguments. They used to arrive as a synthesized
+// slice of command-line flags that this package handed back to its own flag
+// parser, which meant the compiler could not check them and nothing but a
+// terminal could start a scan.
+func (a *App) execute(
+	ctx context.Context,
+	tgt target.Target,
+	mountDir string,
+	stages scan.Stages,
+	useBaseline bool,
+) int {
+	// Pre-flight. Executing anything untrusted requires a sandbox, so the gate
+	// is enforced before the pipeline is entered rather than discovered inside
+	// it, where a partial scan would already have started.
 	status := a.CheckDocker(ctx)
 	if !status.Ready() {
 		return a.failScan("runtime", "runtime_unavailable",
@@ -389,23 +410,21 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		fmt.Fprintf(a.Stdout, "  cleaned up %d orphaned container(s) from a previous run\n", n)
 	}
 
-	tools, tr, scenarios, err := a.enumerate(ctx, tgt, dir, *install, *doProbe, *runScripts)
+	result, err := scan.Run(ctx, scan.Request{
+		Target:   tgt,
+		MountDir: mountDir,
+		Stages:   stages,
+	}, a.progress())
 	if err != nil {
-		var pipelineErr *pipelineError
-		if errors.As(err, &pipelineErr) {
-			return a.failScan(pipelineErr.Phase, pipelineErr.Code,
-				pipelineErr.Outcome, pipelineErr.Retryable,
-				pipelineErr.Err, exitFailure)
-		}
-		return a.failScan("execute", "scan_failed",
-			assessment.OutcomeHarnessError, false, err, exitFailure)
+		return a.failPipeline(err)
 	}
+	tools, tr, scenarios := result.Tools, result.Trace, result.Scenarios
 
 	// Compare against the last scan of this target. Every other check here is
 	// a snapshot, and a snapshot cannot detect a rug pull by definition — a
 	// server that serves clean descriptions during review and swaps them
 	// afterwards looks perfect every single time it is looked at once.
-	if !*noBaseline && len(tools) > 0 && tr != nil {
+	if useBaseline && len(tools) > 0 && tr != nil {
 		key := a.scanIdentity
 		if key == "" {
 			// The explicit `scan --mcp` form, which names a command directly.
@@ -740,24 +759,29 @@ func (a *App) failScan(
 	return exitCode
 }
 
-// pipelineError carries stable failure attribution through the execution
-// layers without forcing low-level packages to depend on report formatting.
-type pipelineError struct {
-	Phase     string
-	Code      string
-	Outcome   assessment.Outcome
-	Retryable bool
-	Err       error
+// progress routes pipeline milestones to the terminal.
+//
+// The pipeline announces each step but does not know where output goes, which
+// is what keeps it usable when the caller is a JSON stream, a test, or another
+// program rather than a person watching a scan run.
+func (a *App) progress() scan.Progress {
+	return func(msg string) { fmt.Fprintln(a.Stdout, msg) }
 }
 
-func (e *pipelineError) Error() string { return e.Err.Error() }
-func (e *pipelineError) Unwrap() error { return e.Err }
-
-func targetPipelineError(phase, code string, retryable bool, err error) error {
-	return &pipelineError{
-		Phase: phase, Code: code, Outcome: assessment.OutcomeTargetError,
-		Retryable: retryable, Err: err,
+// failPipeline turns a failed scan into the same structured report a
+// successful one produces.
+//
+// A scan that died in acquisition and a scan that found nothing must never
+// look alike, so the phase attribution the pipeline attached to the error is
+// carried through to the report rather than flattened into "it broke".
+func (a *App) failPipeline(err error) int {
+	var scanErr *scan.Error
+	if errors.As(err, &scanErr) {
+		return a.failScan(scanErr.Phase, scanErr.Code, scanErr.Outcome,
+			scanErr.Retryable, scanErr.Err, exitFailure)
 	}
+	return a.failScan("execute", "scan_failed",
+		assessment.OutcomeHarnessError, false, err, exitFailure)
 }
 
 // sarifURI is what a finding gets attached to in a code-scanning UI.
@@ -815,226 +839,6 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 	default:
 		return target.Target{}, errors.New("a target is required: pass --mcp <command> or --skill <path>")
 	}
-}
-
-func (a *App) enumerate(
-	ctx context.Context,
-	tgt target.Target,
-	mountDir string,
-	install, doProbe, runScripts bool,
-) ([]toolinfo.ToolInfo, *trace.Trace, []assessment.ScenarioResult, error) {
-	var scenarios []assessment.ScenarioResult
-	if tgt.Kind == target.KindMCP {
-		policy := sandbox.DefaultPolicy()
-
-		var mounts []sandbox.Mount
-		var absDir string
-		if mountDir != "" {
-			abs, err := filepath.Abs(mountDir)
-			if err != nil {
-				return nil, nil, scenarios, fmt.Errorf("resolving --dir: %w", err)
-			}
-			absDir = abs
-			// Read-only, always. A target that can rewrite its own source
-			// mid-scan makes the evidence disagree with the artifact, which
-			// defeats the point of collecting evidence at all.
-			mounts = append(mounts, sandbox.Mount{
-				HostPath: abs, ContainerPath: "/target", ReadOnly: true,
-			})
-		}
-
-		// Phase 1 runs the package manager with a network. Target-controlled
-		// lifecycle and build hooks may execute here; the separate container
-		// limits persistence but does not make acquisition inert.
-		var installed *acquire.Result
-		if install {
-			if absDir == "" {
-				return nil, nil, scenarios, errors.New("--install needs --dir: there is no target directory to read a manifest from")
-			}
-			m := acquire.Detect(absDir)
-			if m.Ecosystem == acquire.EcosystemNone {
-				fmt.Fprintln(a.Stdout, "  no dependency manifest found; skipping install")
-			} else {
-				fmt.Fprintf(a.Stdout, "  [1/2] installing %s deps from %s "+
-					"(separate container, network ON, hooks may execute)\n", m.Ecosystem, m.File)
-			}
-
-			res, err := acquire.Install(ctx, absDir, policy)
-			if err != nil {
-				return nil, nil, scenarios,
-					targetPipelineError("acquire", "acquisition_failed", true, err)
-			}
-			installed = res
-			defer func() { _ = installed.Cleanup(context.Background()) }()
-
-			mounts = append(mounts, installed.Mounts()...)
-			policy.Env = installed.Env
-
-			// Detonate on the runtime the dependencies were built for. A Node
-			// package installed into a volume is useless inside a Python
-			// image: the deps are present but `node` is not.
-			if installed.Image != "" {
-				policy.Image = installed.Image
-			}
-
-			// A project that had to be compiled now lives in the volume, not
-			// at /target. Detection ran before the build and could only name
-			// the entry point the package declares, which did not exist on
-			// disk yet.
-			if rewritten := installed.Command(tgt.Reference); rewritten != tgt.Reference {
-				fmt.Fprintf(a.Stdout, "  built   running from %s\n", installed.Root)
-				tgt.Reference = rewritten
-			}
-		}
-
-		// Always sandboxed. There is no host-execution path reachable from the
-		// CLI: the unsandboxed EnumerateTools still exists for our own tests,
-		// but shipping a flag that reaches it would recreate exactly the
-		// --dangerously-run-mcp-servers hole that justifies this tool.
-		phase := ""
-		if install {
-			phase = "[2/2] "
-		}
-		fmt.Fprintf(a.Stdout, "  %slaunching target inside a sandbox "+
-			"(network off, read-only root, no capabilities, non-root)\n", phase)
-
-		if !doProbe {
-			res, err := mcpdriver.EnumerateSandboxedWithTrace(ctx, tgt.Reference, policy, mounts)
-			if err != nil {
-				return nil, nil, scenarios,
-					targetPipelineError("inventory", "mcp_inventory_failed", false, err)
-			}
-			// Fold install-time behaviour into the same trace. A postinstall
-			// hook that phoned home is a finding about this target, and
-			// splitting it into a separate report would let it be overlooked.
-			if installed != nil && res.Trace != nil {
-				res.Trace.Events = append(installed.Events, res.Trace.Events...)
-			}
-			scenarios = append(scenarios, assessment.ScenarioResult{
-				ID: "mcp.inventory", Required: true, Outcome: assessment.OutcomePass,
-			})
-			for _, tool := range res.Tools {
-				scenarios = append(scenarios, assessment.ScenarioResult{
-					ID:       scenario.MCPToolID(tool.Name),
-					Required: true,
-					Outcome:  assessment.OutcomeSkipped,
-					Reason:   "dynamic probes were disabled",
-				})
-			}
-			return res.Tools, res.Trace, scenarios, nil
-		}
-
-		// Probing keeps the session open: a tool only reveals what it does
-		// when it is called, so the container has to outlive tools/list.
-		sess, err := mcpdriver.OpenSession(ctx, tgt.Reference, policy, mounts)
-		if err != nil {
-			return nil, nil, scenarios,
-				targetPipelineError("start", "mcp_start_failed", false, err)
-		}
-		defer sess.Close()
-
-		tools, err := sess.Tools(ctx)
-		if err != nil {
-			return nil, nil, scenarios,
-				targetPipelineError("inventory", "mcp_inventory_failed", false, err)
-		}
-		scenarios = append(scenarios, assessment.ScenarioResult{
-			ID: "mcp.inventory", Required: true, Outcome: assessment.OutcomePass,
-		})
-
-		tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
-		if installed != nil {
-			for _, ev := range installed.Events {
-				tr.Add(ev)
-			}
-		}
-
-		// Enumeration-phase behaviour: what the server did just from being
-		// launched and asked for its tool list, BEFORE any tool was called. A
-		// network attempt here is unprovoked — nobody invoked anything — so it
-		// is the real phone-home signal and stays a finding.
-		//
-		// Captured before probing on purpose. A tool that legitimately reaches
-		// its own API when we call it must not be confused with the server
-		// reaching out on its own; only the second is suspicious.
-		for _, ev := range monitor.Analyze(sess.Stderr(), "enumeration") {
-			tr.Add(ev)
-		}
-
-		fmt.Fprintf(a.Stdout, "  probing %d tool(s) with %d adversarial payload(s)...\n",
-			len(tools), len(probe.Payloads()))
-
-		// The engine attributes probe-phase behaviour to the specific payload
-		// and tool that provoked it, and skips tools that need the network
-		// (their egress is expected, not a finding). There is deliberately no
-		// aggregate re-scan of the whole stderr buffer afterwards: it re-flagged
-		// the expected, blocked network noise from every API-backed tool as a
-		// critical finding, which turned a clean Notion server into "dangerous".
-		probeResult := probe.RunWithResults(ctx, sess, tools, 0)
-		for _, ev := range probeResult.Events {
-			tr.Add(ev)
-		}
-		scenarios = append(scenarios, probeResult.Scenarios...)
-		return tools, tr, scenarios, nil
-	}
-
-	// A skill is mostly a large prompt: its SKILL.md body is text an agent
-	// reads and obeys, so the analysis is of the instructions rather than of
-	// running code. Reading it needs no container.
-	tools, err := skill.Load(tgt.Reference)
-	if err != nil {
-		return nil, nil, scenarios,
-			targetPipelineError("resolve", "skill_load_failed", false, err)
-	}
-
-	sk, err := skill.LoadSkill(tgt.Reference)
-	if err != nil {
-		return nil, nil, scenarios,
-			targetPipelineError("resolve", "skill_load_failed", false, err)
-	}
-
-	tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
-	staticEvents := skill.Analyze(sk)
-	for _, ev := range staticEvents {
-		tr.Add(ev)
-	}
-	staticOutcome := assessment.OutcomePass
-	for _, event := range staticEvents {
-		if event.Severity == trace.SeverityCritical ||
-			event.Severity == trace.SeverityNotable {
-			staticOutcome = assessment.OutcomeFinding
-			break
-		}
-	}
-	scenarios = append(scenarios, assessment.ScenarioResult{
-		ID: "skill.static", Required: true, Outcome: staticOutcome,
-	})
-
-	// The dynamic half of skill analysis. SKILL.md is a prompt and can only be
-	// read, but the bundled scripts are real programs an agent will execute on
-	// the user's machine — and until they run, a script that phones home is
-	// indistinguishable from one that formats a table.
-	if runScripts && len(sk.Scripts) > 0 {
-		fmt.Fprintf(a.Stdout, "  running %d bundled script(s) in the sandbox...\n",
-			len(sk.Scripts))
-		detonation := skill.DetonateScriptsWithResults(
-			ctx, tgt.Reference, sk, sandbox.DefaultPolicy(),
-		)
-		for _, ev := range detonation.Events {
-			tr.Add(ev)
-		}
-		scenarios = append(scenarios, detonation.Scenarios...)
-	} else {
-		for _, script := range sk.Scripts {
-			scenarios = append(scenarios, assessment.ScenarioResult{
-				ID:       scenario.SkillScriptID(script),
-				Required: true,
-				Outcome:  assessment.OutcomeSkipped,
-				Reason:   "dynamic script execution was disabled",
-			})
-		}
-	}
-	return tools, tr, scenarios, nil
 }
 
 func (a *App) printTools(tools []toolinfo.ToolInfo) {
