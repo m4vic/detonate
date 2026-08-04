@@ -13,6 +13,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
@@ -30,8 +31,9 @@ type sarifLog struct {
 }
 
 type sarifRun struct {
-	Tool    sarifTool     `json:"tool"`
-	Results []sarifResult `json:"results"`
+	Tool       sarifTool      `json:"tool"`
+	Results    []sarifResult  `json:"results"`
+	Properties map[string]any `json:"properties,omitempty"`
 }
 
 type sarifTool struct {
@@ -120,10 +122,17 @@ func ruleID(e trace.Event) string {
 // a path GitHub can resolve inside the repository; when detonate scanned
 // something outside the checkout there is nothing to point at, so the target
 // string is used and the annotation lands on the run rather than a line.
-func SARIF(w io.Writer, tr *trace.Trace, artifactURI, version string) error {
+func SARIF(
+	w io.Writer,
+	tr *trace.Trace,
+	scenarios []assessment.ScenarioResult,
+	artifactURI, version string,
+	failures ...Failure,
+) error {
 	if tr == nil {
 		tr = &trace.Trace{}
 	}
+	summary := assessment.Summarize(tr.Events, scenarios)
 
 	rules := map[string]sarifRule{}
 	var results []sarifResult
@@ -176,6 +185,13 @@ func SARIF(w io.Writer, tr *trace.Trace, artifactURI, version string) error {
 				Rules:          ordered,
 			}},
 			Results: results,
+			Properties: map[string]any{
+				"detonateSchema":       SchemaV1,
+				"detonateRisk":         summary.Risk,
+				"detonateCompleteness": summary.Completeness,
+				"detonateScenarios":    scenarios,
+				"detonateFailures":     failures,
+			},
 		}},
 	}
 

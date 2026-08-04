@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/fetch"
 )
 
@@ -30,13 +31,14 @@ import (
 
 // scanOptions are the knobs, all with useful defaults.
 type scanOptions struct {
-	command    string // override the detected start command
-	subPath    string // sub-directory inside a cloned repo
-	quick      bool   // skip install, probes and script execution
-	noBaseline bool
-	noProbe    bool
-	noInstall  bool
-	noScripts  bool
+	command        string // override the detected start command
+	subPath        string // sub-directory inside a cloned repo
+	quick          bool   // skip install, probes and script execution
+	noBaseline     bool
+	noProbe        bool
+	noInstall      bool
+	noScripts      bool
+	failIncomplete bool
 
 	// format is "text" (default), "json", or "sarif".
 	format string
@@ -56,6 +58,10 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 	}
 	a.format = opt.format
 	a.outFile = opt.out
+	a.failIncomplete = opt.failIncomplete
+	a.scanScenarios = nil
+	a.scanTools = nil
+	a.scanFailures = nil
 	a.scanTarget = target
 	a.scanIdentity = baselineIdentity(target, opt.subPath)
 
@@ -72,8 +78,8 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 	if fetch.IsURL(target) {
 		fetched, err := fetch.Git(ctx, target)
 		if err != nil {
-			fmt.Fprintf(a.Stderr, "  cannot clone: %v\n", err)
-			return exitFailure
+			return a.failScan("fetch", "fetch_failed",
+				assessment.OutcomeTargetError, true, err, exitFailure)
 		}
 		defer fetched.Cleanup()
 
@@ -135,6 +141,9 @@ func (a *App) runSkill(ctx context.Context, d Detected, opt scanOptions) int {
 	if opt.noBaseline {
 		args = append(args, "--no-baseline")
 	}
+	if opt.failIncomplete {
+		args = append(args, "--fail-incomplete")
+	}
 	fmt.Fprintln(a.Stdout)
 	return a.scan(ctx, args)
 }
@@ -152,7 +161,7 @@ func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
 	var plan []string
 	if install {
 		args = append(args, "--install")
-		plan = append(plan, "install deps (network on, target not run)")
+		plan = append(plan, "install deps (network on, target hooks may run)")
 	}
 	plan = append(plan, "launch sandboxed (network off)")
 	if probe {
@@ -161,6 +170,9 @@ func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
 	}
 	if opt.noBaseline {
 		args = append(args, "--no-baseline")
+	}
+	if opt.failIncomplete {
+		args = append(args, "--fail-incomplete")
 	}
 
 	fmt.Fprintf(a.Stdout, "  plan    %s\n", strings.Join(plan, ", "))
@@ -182,6 +194,7 @@ func bindScanFlags(fs *flag.FlagSet, opt *scanOptions) {
 	fs.BoolVar(&opt.noProbe, "no-probe", false, "Do not call tools with adversarial input.")
 	fs.BoolVar(&opt.noInstall, "no-install", false, "Do not install the target's dependencies.")
 	fs.BoolVar(&opt.noScripts, "no-scripts", false, "Do not run a skill's bundled scripts.")
+	fs.BoolVar(&opt.failIncomplete, "fail-incomplete", false, "Exit 4 when required coverage is incomplete.")
 	fs.StringVar(&opt.format, "format", "text", "Output format: text, json, or sarif.")
 	fs.StringVar(&opt.out, "out", "", "Write machine-readable output to this file.")
 }

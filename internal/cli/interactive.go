@@ -54,39 +54,44 @@ var entryPoints = []struct {
 
 // runInteractive drives the wizard and returns a process exit code.
 func (a *App) runInteractive(ctx context.Context) int {
-	in := bufio.NewReader(os.Stdin)
+	input := a.Stdin
+	if input == nil {
+		input = os.Stdin
+	}
+	in := bufio.NewReader(input)
 	fmt.Fprint(a.Stdout, banner)
+	fmt.Fprintln(a.Stdout, "  alpha: /static is safe by default; /dynamic is experimental.")
+	fmt.Fprintln(a.Stdout, "  Commands: /static <target>, /dynamic <target>, /combined <target>, /help, /exit")
+	fmt.Fprintln(a.Stdout, "  Paste a target without a slash to use /static.")
 
-	// Check the environment first. Being told "Docker is not running" after
-	// answering four questions is worse than being told before the first.
-	status := a.CheckDocker(ctx)
-	if !status.Ready() {
-		fmt.Fprintf(a.Stderr, "\n  Docker is not ready: %s\n", status.Detail)
-		fmt.Fprintln(a.Stderr, "  detonate needs Docker to sandbox untrusted code.")
-		fmt.Fprintln(a.Stderr, "  Install Docker Desktop, start it, and run detonate again.")
-		return exitUsage
+	line := strings.TrimSpace(a.ask(in, "\n  detonate> ", ""))
+	if line == "" || line == "/exit" || line == "/quit" {
+		return exitOK
 	}
-	fmt.Fprintf(a.Stdout, "\n  docker: %s\n", status.Detail)
-
-	// One question instead of four.
-	//
-	// The wizard used to ask what kind of thing it was, then where, then which
-	// command, then whether to install. Detection answers all but the first,
-	// and the first is the one a user is least equipped to answer: they have a
-	// folder someone sent them, not a taxonomy.
-	fmt.Fprintln(a.Stdout, "\n  Paste a folder, a file, or a repository URL.")
-	fmt.Fprintln(a.Stdout, "    a folder with SKILL.md   -> scanned as a skill")
-	fmt.Fprintln(a.Stdout, "    a folder with a server   -> run in the sandbox and probed")
-	fmt.Fprintln(a.Stdout, "    a .txt or .md file       -> analysed as a prompt")
-
-	target := strings.Trim(strings.TrimSpace(a.ask(in, "\n  Target: ", "")), `"'`)
-	if target == "" {
-		fmt.Fprintln(a.Stderr, "  Nothing given.")
-		return exitUsage
+	if line == "/help" {
+		fmt.Fprint(a.Stdout, modeUsage)
+		return exitOK
+	}
+	// A Unix absolute path also begins with '/'. Treat only a non-path slash
+	// prefix as a command so `/tmp/server` remains a usable target in Linux
+	// containers and CI, while Windows users still get the familiar commands.
+	if !strings.HasPrefix(line, "/") || filepath.IsAbs(line) {
+		return a.scanStatic(ctx, strings.Trim(line, `"'`))
 	}
 
-	fmt.Fprintln(a.Stdout)
-	return a.RunTarget(ctx, target, scanOptions{})
+	command := strings.Fields(line)[0]
+	target := interactiveTarget(line, command)
+	switch command {
+	case "/static":
+		return a.runStatic(ctx, []string{target})
+	case "/dynamic":
+		return a.runDynamic(ctx, []string{target})
+	case "/combined":
+		return a.runCombined([]string{target})
+	default:
+		fmt.Fprintf(a.Stderr, "unknown command %q; use /help\n", command)
+		return exitUsage
+	}
 }
 
 func (a *App) interactiveSkill(in *bufio.Reader, ctx context.Context) int {
@@ -138,7 +143,7 @@ func (a *App) interactiveMCP(in *bufio.Reader, ctx context.Context) int {
 	if m := acquire.Detect(dir); m.Ecosystem != acquire.EcosystemNone {
 		fmt.Fprintf(a.Stdout, "\n  Found %s (%s dependencies).\n", m.File, m.Ecosystem)
 		fmt.Fprintln(a.Stdout, "  These install in a separate container that has network access")
-		fmt.Fprintln(a.Stdout, "  but never runs the server. Without this the scan will fail.")
+		fmt.Fprintln(a.Stdout, "  and may execute dependency/build hooks as root. Without this the scan will fail.")
 		if ans := a.ask(in, "\n  Install dependencies? [Y/n]: ", "y"); !strings.HasPrefix(strings.ToLower(ans), "n") {
 			args = append(args, "--install")
 		}

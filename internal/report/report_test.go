@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/toolinfo"
 	"github.com/m4vic/detonate/internal/trace"
 )
@@ -37,7 +38,7 @@ func sampleTrace() *trace.Trace {
 }
 
 func TestBuildSeparatesFindingsFromObservations(t *testing.T) {
-	s := Build(sampleTrace(), nil, "./target", "v1")
+	s := Build(sampleTrace(), completedScenario(), nil, "./target", "v1")
 
 	if len(s.Findings) != 2 {
 		t.Errorf("got %d findings, want 2 (critical + notable)", len(s.Findings))
@@ -48,15 +49,15 @@ func TestBuildSeparatesFindingsFromObservations(t *testing.T) {
 	if len(s.Observations) != 1 {
 		t.Errorf("got %d observations, want 1 (the info event)", len(s.Observations))
 	}
-	if s.Verdict != "dangerous" {
-		t.Errorf("verdict = %q, want dangerous (a critical is present)", s.Verdict)
+	if s.Risk != assessment.RiskDangerous {
+		t.Errorf("risk = %q, want dangerous (a critical is present)", s.Risk)
 	}
 	if s.Counts.Critical != 1 || s.Counts.Notable != 1 || s.Counts.Info != 1 {
 		t.Errorf("counts = %+v", s.Counts)
 	}
 }
 
-func TestBuildVerdictLadder(t *testing.T) {
+func TestBuildRiskLadder(t *testing.T) {
 	cases := []struct {
 		name string
 		sev  trace.Severity
@@ -64,26 +65,47 @@ func TestBuildVerdictLadder(t *testing.T) {
 	}{
 		{"critical", trace.SeverityCritical, "dangerous"},
 		{"notable", trace.SeverityNotable, "suspicious"},
-		{"info only", trace.SeverityInfo, "clean"},
+		{"info only", trace.SeverityInfo, "no_findings"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			tr := &trace.Trace{Started: time.Now()}
 			tr.Add(trace.Event{Kind: trace.KindProtocol, Severity: c.sev, Summary: "x"})
-			if got := Build(tr, nil, "t", "v1").Verdict; got != c.want {
-				t.Errorf("verdict = %q, want %q", got, c.want)
+			if got := string(Build(tr, completedScenario(), nil, "t", "v1").Risk); got != c.want {
+				t.Errorf("risk = %q, want %q", got, c.want)
 			}
 		})
 	}
 
-	if got := Build(nil, nil, "t", "v1").Verdict; got != "clean" {
-		t.Errorf("nil trace verdict = %q, want clean", got)
+	if got := Build(nil, nil, nil, "t", "v1").Risk; got != assessment.RiskNotAssessed {
+		t.Errorf("nil trace risk = %q, want not_assessed", got)
+	}
+}
+
+func TestBuildPreservesPipelineFailures(t *testing.T) {
+	failure := Failure{
+		Phase: "start", Code: "mcp_start_failed",
+		Message: "server exited", Retryable: false,
+	}
+	s := Build(nil, []assessment.ScenarioResult{{
+		ID: "pipeline.start", Required: true,
+		Outcome: assessment.OutcomeTargetError,
+	}}, nil, "target", "v1", failure)
+
+	if len(s.Failures) != 1 || s.Failures[0] != failure {
+		t.Fatalf("Failures = %+v, want %+v", s.Failures, failure)
+	}
+	if s.Risk != assessment.RiskNotAssessed ||
+		s.Completeness != assessment.CompletenessInconclusive {
+		t.Fatalf("summary = %s/%s, want not_assessed/inconclusive",
+			s.Risk, s.Completeness)
 	}
 }
 
 func TestJSONIsValidAndFlattensDetail(t *testing.T) {
 	var buf bytes.Buffer
-	s := Build(sampleTrace(), []toolinfo.ToolInfo{{Name: "read_file"}}, "./target", "v1")
+	s := Build(sampleTrace(), completedScenario(),
+		[]toolinfo.ToolInfo{{Name: "read_file"}}, "./target", "v1")
 	if err := JSON(&buf, s); err != nil {
 		t.Fatalf("JSON: %v", err)
 	}
@@ -92,8 +114,9 @@ func TestJSONIsValidAndFlattensDetail(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &back); err != nil {
 		t.Fatalf("output is not valid JSON: %v", err)
 	}
-	if back.Verdict != "dangerous" {
-		t.Errorf("verdict round-trip = %q", back.Verdict)
+	if back.Schema != SchemaV1 || back.Risk != assessment.RiskDangerous ||
+		back.Completeness != assessment.CompletenessComplete {
+		t.Errorf("result fields did not round-trip: %+v", back)
 	}
 	// The Detail map is convenient internally and awkward for a consumer, so
 	// the fields that matter are lifted into named ones.
@@ -105,7 +128,7 @@ func TestJSONIsValidAndFlattensDetail(t *testing.T) {
 
 func TestSARIFStructure(t *testing.T) {
 	var buf bytes.Buffer
-	if err := SARIF(&buf, sampleTrace(), "server.py", "v1"); err != nil {
+	if err := SARIF(&buf, sampleTrace(), completedScenario(), "server.py", "v1"); err != nil {
 		t.Fatalf("SARIF: %v", err)
 	}
 
@@ -122,6 +145,11 @@ func TestSARIFStructure(t *testing.T) {
 
 	runs := log["runs"].([]any)
 	run := runs[0].(map[string]any)
+	properties := run["properties"].(map[string]any)
+	if properties["detonateRisk"] != "dangerous" ||
+		properties["detonateCompleteness"] != "complete" {
+		t.Errorf("SARIF properties disagree with JSON result: %+v", properties)
+	}
 	results := run["results"].([]any)
 	if len(results) != 3 {
 		t.Fatalf("got %d results, want 3 (info becomes a note, not dropped)", len(results))
@@ -179,11 +207,17 @@ func TestSARIFHandlesEmptyTrace(t *testing.T) {
 	// A clean scan still has to produce a valid document, or CI fails on the
 	// upload step precisely when there was nothing wrong.
 	var buf bytes.Buffer
-	if err := SARIF(&buf, nil, "x", "v1"); err != nil {
+	if err := SARIF(&buf, nil, nil, "x", "v1"); err != nil {
 		t.Fatalf("SARIF(nil): %v", err)
 	}
 	var log map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &log); err != nil {
 		t.Fatalf("empty trace produced invalid JSON: %v", err)
 	}
+}
+
+func completedScenario() []assessment.ScenarioResult {
+	return []assessment.ScenarioResult{{
+		ID: "test.static", Required: true, Outcome: assessment.OutcomePass,
+	}}
 }
