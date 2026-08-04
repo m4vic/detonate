@@ -76,13 +76,13 @@ func EnumerateTools(ctx context.Context, command string, timeout time.Duration) 
 	}
 	defer shutdown(session, cancel)
 
-	result, err := session.ListTools(ctx, &mcp.ListToolsParams{})
+	listed, err := listAllTools(ctx, session, defaultToolPagination)
 	if err != nil {
 		return nil, fmt.Errorf("listing tools from %q: %w", command, err)
 	}
 
-	tools := make([]toolinfo.ToolInfo, 0, len(result.Tools))
-	for _, t := range result.Tools {
+	tools := make([]toolinfo.ToolInfo, 0, len(listed))
+	for _, t := range listed {
 		schema, err := json.Marshal(t.InputSchema)
 		if err != nil {
 			// A schema we cannot re-encode is worth reporting later, but it is
