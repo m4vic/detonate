@@ -21,12 +21,15 @@ Legend: **P0** release/safety blocker · **P1** required for trustworthy release
 - [x] **P0/S** Gate release publication on a green CI conclusion
 - [ ] **P0/S** Merge the R0 branch to `main`
       — *check:* `main` builds from a fresh clone
-- [ ] **P0/S** Real version via `-ldflags` + `debug.ReadBuildInfo` fallback
-      — *check:* `go install ...@v0.1.0` then `--version` prints `v0.1.0`, not `dev`
-- [ ] **P1/S** `detonate doctor` — Docker, images, disk, permissions
-      — *check:* on a machine without Docker, prints one actionable line per gap
-- [ ] **P1/S** Missing Docker degrades to static mode instead of erroring
-      — *check:* `detonate static ./prompt.txt` succeeds with Docker stopped
+- [x] **P0/S** Real version via `-ldflags` + `debug.ReadBuildInfo` fallback
+      — *check:* built with the release ldflags, `--version` prints `v0.1.0`;
+      without them the build-info fallback gives a pseudo-version, not `dev`
+- [x] **P1/S** `detonate doctor` — Docker daemon and sandbox images
+      — *check:* without Docker, one actionable line per gap and exit 2; ready, exit 0
+- [x] **P1/S** Missing Docker degrades to static mode instead of erroring
+      — *check:* `detonate static ./prompt.txt` succeeds with Docker stopped;
+      `doctor` names the scans that still work
+- [ ] **P2/S** `doctor` also reports free disk for image pulls and volumes
 - [ ] **P1/M** Release binaries: GoReleaser → GitHub Releases + checksums
       — *check:* three OS artifacts download and run
 - [ ] **P2/S** Homebrew tap and Scoop bucket

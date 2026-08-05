@@ -135,6 +135,7 @@ actually do, not what their manifest claims.
 Usage:
   detonate <target>     Scan a folder, a file, or a repository URL
   detonate              Guided scan
+  detonate doctor       Check whether this machine can run a scan
   detonate static <target>   Static-only inspection (alpha)
   detonate dynamic <target>  Sandboxed execution (experimental)
 
@@ -205,6 +206,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		a.scanFailures = nil
 		a.scanTarget = ""
 		return a.scan(ctx, args[1:])
+	case "doctor":
+		return a.doctor(ctx)
 	case "scenario":
 		return a.runScenario(args[1:])
 	case "static":
