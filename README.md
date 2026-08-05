@@ -37,41 +37,84 @@ That is the real content of `/etc/passwd`, returned by the tool, because
 detonate asked it for `../../../../etc/passwd`. The manifest said "Read the
 contents of a file." A static scanner reports it clean.
 
-## Install (not available from a clean checkout yet)
+## Why not just use a static scanner
 
-There is no working public release yet. The worktree now exposes
-`cmd/detonate/main.go`, but that entrypoint is still untracked, so
-`go install ...@latest` and a clean source build remain unavailable until the
-changes are committed and the release gates pass. Do not publish or recommend
-the commands below until the Phase 0 release blocker in the
-[implementation plan](docs/IMPLEMENTATION_PLAN.md) is fixed.
+Most MCP scanners read the manifest, pattern-match the source, and ask a model
+what it thinks. Detonate does that too — and then runs the thing.
 
-Intended installation after that gate:
+| | Reads manifests and source | Executes the target and probes its tools |
+|---|---|---|
+| Static and LLM-based scanners | yes | no |
+| **detonate** | yes | **yes** |
 
-```text
+The distinction is not academic. Published measurement of static MCP analysis
+found it scored **100% on Python and 0% on JavaScript**, while dynamic analysis
+of the same corpus scored 100% across every language
+([arXiv:2603.21641](https://arxiv.org/abs/2603.21641)). Detonate speaks to a
+running server over the MCP protocol and never parses target source, so its
+coverage does not depend on which language the target happens to be written in.
+
+It also means a finding is a fact rather than a suspicion. `/etc/passwd` came
+back or it did not.
+
+**No LLM is involved in any verdict.** Findings come from deterministic rules
+over static artifacts and collected runtime evidence. A scanner whose output
+changes between runs cannot gate a CI pipeline.
+
+## Install
+
+Detonate is a single static binary with no runtime to install — no Python
+environment, no Node, no API key, and it never calls out to a service.
+
+```bash
 # With Go installed
 go install github.com/m4vic/detonate/cmd/detonate@latest
+```
 
-# Or from source
+Or download a prebuilt binary for Linux, macOS, or Windows from the
+[releases page](https://github.com/m4vic/detonate/releases), extract it, and put
+`detonate` on your PATH. Verify the download against `checksums.txt`.
+
+From source:
+
+```bash
 git clone https://github.com/m4vic/detonate
 cd detonate
 go build -o detonate ./cmd/detonate
 ```
 
-Dynamic MCP/skill scans require Docker; prompt-only and future static-only
-profiles do not.
+Then check the machine is ready:
+
+```bash
+detonate doctor
+```
+
+```text
+detonate v0.1.0  linux/amd64
+
+  [ok]   docker            docker ready
+  [ok]   image             python:3.12-slim
+  [ok]   image             node:22-slim
+
+  Ready. Try:  detonate ./some-mcp-server
+```
+
+**Docker is needed to execute a target, not to use detonate.** Prompt and skill
+analysis read text rather than run it, so they work on a machine with no
+container runtime at all. `doctor` says which scans are available when Docker
+is missing.
 
 ## Use
 
-The alpha CLI has three explicit modes:
-
 ```text
-detonate static <target>    available: does not execute target code
-detonate dynamic <target>   experimental: runs the current Docker sandbox path
+detonate doctor             check whether this machine can run a scan
+detonate static <target>    inspect without executing target code
+detonate dynamic <target>   experimental: runs the Docker sandbox path
 detonate combined <target>  intentionally unavailable in alpha
 ```
 
-Use static mode first for a file, folder, or Git URL:
+Start with static mode on a file, folder, or Git URL. It needs no Docker and
+returns in seconds:
 
 ```bash
 detonate static ./skills/pdf-extractor
@@ -79,11 +122,21 @@ detonate static ./system-prompt.txt
 detonate static github.com/owner/repo
 ```
 
-Static prompt and skill analysis need no Docker. Static MCP mode currently
-records only source/manifest inventory and reports incomplete coverage; it does
-not claim an MCP security verdict until source analysis is implemented.
+Static prompt and skill analysis are the mature paths. Static **MCP** mode
+currently records only source and manifest inventory and reports incomplete
+coverage on purpose — it does not claim an MCP security verdict until source
+analysis is implemented, because reporting one it cannot support is the failure
+this tool exists to avoid.
 
-Dynamic mode is explicit because it can execute untrusted code inside Docker:
+Every mode takes the same options, so a CI job without Docker can still emit
+SARIF:
+
+```bash
+detonate static ./skills/pdf-extractor --format sarif --out detonate.sarif
+```
+
+Dynamic mode is a separate verb because it can execute untrusted code inside
+Docker:
 
 ```bash
 detonate dynamic ./my-server           # MCP server
@@ -273,16 +326,24 @@ the latter is currently incomplete and must be reflected in coverage.
 
 ## Status
 
-Prototype, not release-ready. The CLI entrypoint is no longer hidden by
-`.gitignore`, but remains untracked until these worktree changes are committed.
-The worktree now also contains clean-archive CI for Linux, macOS, and Windows
-and a release verification dependency; neither protects the public repository
-until it is reviewed and committed.
-Successful scan reports now expose risk, completeness, and scenario coverage;
-common early pipeline failures now preserve that contract, while validation,
-cancellation, teardown, and several runtime evidence gaps remain. See the
-reviewed architecture, implementation plan, and compatibility record below.
-Interfaces may still change.
+Alpha. It installs, it runs, and it finds real things — but it is `0.x`, and
+flags and report fields may still change within a minor version. Breaking
+changes are named in the [changelog](CHANGELOG.md).
+
+What is solid: a clean checkout builds on Linux, macOS, and Windows and CI
+proves it from `git archive` rather than from a working tree. Successful scans
+report risk, completeness, and per-scenario coverage, and common pipeline
+failures preserve that same contract instead of collapsing into a false clean
+result.
+
+What is not: acquisition can still execute target-controlled hooks as root with
+network access, resource budgets are incomplete, cancellation and teardown do
+not yet have equal failure coverage, and runtime observation leans on
+target-controlled output. Each is tracked in the [roadmap](docs/ROADMAP.md)
+with the version that closes it.
+
+Interfaces stabilize at `1.0`, which means the report schema and exit codes are
+frozen and acquisition is safe — not that every feature is built.
 
 ## Design and roadmap
 
