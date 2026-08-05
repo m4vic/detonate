@@ -117,10 +117,7 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 		return a.runMCP(ctx, d, opt)
 
 	default:
-		fmt.Fprintf(a.Stderr, "  cannot tell what %s is: %s\n", shorten(d.Dir), d.Why)
-		fmt.Fprintln(a.Stderr, "\n  If it is an MCP server, give the command that starts it:")
-		fmt.Fprintln(a.Stderr, "    detonate <folder> --cmd \"python /target/server.py\"")
-		fmt.Fprintln(a.Stderr, "  Inside the sandbox the folder is mounted at /target.")
+		a.explainUnclassified(shorten(d.Dir), d)
 		return exitUsage
 	}
 }

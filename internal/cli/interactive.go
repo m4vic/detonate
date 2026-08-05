@@ -76,7 +76,10 @@ func (a *App) runInteractive(ctx context.Context) int {
 	// prefix as a command so `/tmp/server` remains a usable target in Linux
 	// containers and CI, while Windows users still get the familiar commands.
 	if !strings.HasPrefix(line, "/") || filepath.IsAbs(line) {
-		return a.scanStatic(ctx, strings.Trim(line, `"'`))
+		// No --path here: the wizard takes a bare target. A monorepo is
+		// reported with the exact commands that reach its packages, which is
+		// the answer the user needs anyway.
+		return a.scanStatic(ctx, strings.Trim(line, `"'`), "")
 	}
 
 	command := strings.Fields(line)[0]

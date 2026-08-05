@@ -104,6 +104,66 @@ analysis read text rather than run it, so they work on a machine with no
 container runtime at all. `doctor` says which scans are available when Docker
 is missing.
 
+## What you need
+
+| You want to scan | You need |
+|---|---|
+| A prompt or instruction file | **nothing but detonate** |
+| An Agent Skill's instructions | **nothing but detonate** |
+| An MCP server, or a skill's bundled scripts | **Docker** |
+
+Go is only needed if you install with `go install`. A downloaded binary has no
+runtime dependency at all — detonate is statically linked, calls no service,
+and needs no API key.
+
+Run `detonate doctor` and it will tell you which of the rows above apply to
+your machine.
+
+## The flow
+
+```text
+  you paste a target                  detonate ./my-server
+  ┌──────────────────┐                detonate github.com/owner/repo
+  │ path · URL · file│                detonate ./system-prompt.txt
+  └────────┬─────────┘
+           ▼
+   clone, if it is a URL               read-only; nothing runs yet
+           ▼
+   work out what it is                 SKILL.md → skill
+                                       entry point → MCP server
+                                       .txt / .md → prompt
+           ▼
+   static analysis                     no Docker, seconds
+           ▼
+   ── dynamic only, and only for servers and scripts ──
+           ▼
+   install dependencies                separate container, network ON
+           ▼
+   launch in the sandbox               network OFF, read-only root,
+                                       non-root, all capabilities dropped
+           ▼
+   call every tool with hostile input  compared against a benign baseline
+           ▼
+   report                              text · JSON · SARIF
+                                       exit 0 clean · 3 findings
+```
+
+You never tell detonate what the target is. A folder with a `SKILL.md` is a
+skill, a folder with an entry point is an MCP server, a `.txt` or `.md` is a
+prompt.
+
+If you paste a repository that holds many servers rather than being one,
+detonate lists the packages inside it and the exact command for each:
+
+```text
+$ detonate static github.com/modelcontextprotocol/servers
+
+  This looks like a repository of packages. Scan one with --path:
+    detonate static github.com/modelcontextprotocol/servers --path src/everything
+    detonate static github.com/modelcontextprotocol/servers --path src/memory
+    ...
+```
+
 ## Use
 
 ```text

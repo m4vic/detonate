@@ -56,6 +56,12 @@ type Detected struct {
 	// Why explains the decision, printed so a user can correct a wrong guess
 	// rather than wondering what the tool decided about their folder.
 	Why string
+
+	// Packages names scannable sub-directories found when the folder itself
+	// could not be classified. A monorepo is the common case and the most
+	// likely thing a person pastes: github.com/modelcontextprotocol/servers
+	// holds every reference server and is not itself one.
+	Packages []string
 }
 
 // promptExtensions are files we treat as instruction text.
@@ -141,16 +147,22 @@ func detectDir(dir string) (Detected, error) {
 	}
 
 	if cmd == "" {
+		// Before giving up, look one level down. A repository that holds many
+		// servers rather than being one is the likeliest thing a person pastes,
+		// and "no recognisable entry point" is a dead end for a folder whose
+		// contents are perfectly scannable one directory deeper.
+		packages := findPackages(dir)
+
 		if m.Ecosystem == acquire.EcosystemNone {
 			return Detected{
-				Kind: KindUnknown, Dir: dir,
+				Kind: KindUnknown, Dir: dir, Packages: packages,
 				Why: "no SKILL.md, no recognisable entry point, no dependency manifest",
 			}, nil
 		}
 		// A manifest with no obvious entry point is a real project whose start
 		// command we simply cannot guess, which is a question, not a failure.
 		return Detected{
-			Kind: KindUnknown, Dir: dir,
+			Kind: KindUnknown, Dir: dir, Packages: packages,
 			NeedsInstall: true, Manifest: m.File,
 			Why: fmt.Sprintf("found %s but no recognisable entry point", m.File),
 		}, nil
@@ -165,6 +177,54 @@ func detectDir(dir string) (Detected, error) {
 		d.Why = "entry point detected, no dependencies to install"
 	}
 	return d, nil
+}
+
+// packageParents are the directories a monorepo keeps its packages in.
+//
+// Deliberately a fixed list rather than a full tree walk. Recursing an
+// arbitrary repository is slow and finds node_modules, test fixtures and
+// vendored copies — suggestions that waste the reader's attention. These four
+// cover the conventions in practice, including `src/`, which is where the MCP
+// reference servers live.
+var packageParents = []string{"src", "packages", "servers", "skills"}
+
+// maxSuggestedPackages bounds the list. A repository with sixty packages
+// should print a usable sample and say there are more, not a wall of paths
+// nobody reads.
+const maxSuggestedPackages = 8
+
+// findPackages looks one level down for directories that are themselves
+// scannable, so an unclassifiable folder can name what IS scannable inside it.
+//
+// One level only, and only under known parents. The point is to answer "what
+// did you mean?" cheaply, not to enumerate a repository.
+func findPackages(dir string) []string {
+	var found []string
+
+	for _, parent := range packageParents {
+		entries, err := os.ReadDir(filepath.Join(dir, parent))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			child := filepath.Join(dir, parent, entry.Name())
+			// Reuse real detection rather than guessing from filenames. A
+			// suggestion that turns out not to be scannable is worse than no
+			// suggestion: the user follows it and gets the same dead end.
+			d, err := detectDir(child)
+			if err != nil || d.Kind == KindUnknown {
+				continue
+			}
+			found = append(found, filepath.ToSlash(filepath.Join(parent, entry.Name())))
+			if len(found) >= maxSuggestedPackages {
+				return found
+			}
+		}
+	}
+	return found
 }
 
 // countScripts reports how many bundled scripts a skill would detonate.
