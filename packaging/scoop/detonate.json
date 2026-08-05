@@ -1,0 +1,31 @@
+{
+    "version": "0.1.0",
+    "description": "Run untrusted MCP servers and Agent Skills in a sandbox and report what they actually do",
+    "homepage": "https://github.com/m4vic/detonate",
+    "license": "Apache-2.0",
+    "notes": [
+        "Docker is required to execute a target.",
+        "Prompt and skill analysis work without it.",
+        "Run 'detonate doctor' to check this machine."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/m4vic/detonate/releases/download/v0.1.0/detonate-v0.1.0-windows-amd64.zip",
+            "hash": "REPLACE_WITH_SHA256_FROM_checksums.txt"
+        }
+    },
+    "bin": "detonate.exe",
+    "checkver": {
+        "github": "https://github.com/m4vic/detonate"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/m4vic/detonate/releases/download/v$version/detonate-v$version-windows-amd64.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/m4vic/detonate/releases/download/v$version/checksums.txt"
+        }
+    }
+}

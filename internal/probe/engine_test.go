@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/toolcall"
 	"github.com/m4vic/detonate/internal/toolinfo"
 	"github.com/m4vic/detonate/internal/trace"
 )
@@ -16,6 +18,7 @@ import (
 // transport is faked.
 type fakeCaller struct {
 	respond func(tool string, args map[string]any) string
+	result  func(tool string, args map[string]any) toolcall.Result
 	// fail, when set, returns an error for every call — the shape of a tool
 	// that cannot run in the sandbox, e.g. one that needs network egress.
 	fail   error
@@ -23,15 +26,24 @@ type fakeCaller struct {
 	calls  []string
 }
 
-func (f *fakeCaller) Call(_ context.Context, tool string, args map[string]any) (string, error) {
+func (f *fakeCaller) Call(_ context.Context, tool string, args map[string]any) (toolcall.Result, error) {
 	f.calls = append(f.calls, tool)
 	if f.fail != nil {
-		return "", f.fail
+		return toolcall.Result{}, f.fail
+	}
+	if f.result != nil {
+		return f.result(tool, args), nil
 	}
 	if f.respond == nil {
-		return "", nil
+		return toolcall.Result{}, nil
 	}
-	return f.respond(tool, args), nil
+	raw, _ := json.Marshal(map[string]any{
+		"type": "text",
+		"text": f.respond(tool, args),
+	})
+	return toolcall.Result{Content: []toolcall.ContentBlock{{
+		Type: "text", Raw: raw,
+	}}}, nil
 }
 
 func (f *fakeCaller) Stderr() string { return f.stderr }
@@ -183,6 +195,72 @@ func TestRunReportsToolsItCannotProbe(t *testing.T) {
 	}
 	if len(events) != 1 || !strings.Contains(events[0].Summary, "not probed") {
 		t.Errorf("expected an explicit not-probed note, got %v", events)
+	}
+}
+
+func TestRunWithResultsRecordsPerToolCoverage(t *testing.T) {
+	c := &fakeCaller{}
+	tools := []toolinfo.ToolInfo{
+		{Name: "reachable", InputSchema: schema("text")},
+		{Name: "no_strings", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+
+	result := RunWithResults(context.Background(), c, tools, 0)
+	if len(result.Scenarios) != 2 {
+		t.Fatalf("got %d scenarios, want 2", len(result.Scenarios))
+	}
+	if result.Scenarios[0].Outcome != assessment.OutcomePass {
+		t.Errorf("reachable outcome = %q, want pass", result.Scenarios[0].Outcome)
+	}
+	if result.Scenarios[1].Outcome != assessment.OutcomeUnsupported {
+		t.Errorf("no_strings outcome = %q, want unsupported", result.Scenarios[1].Outcome)
+	}
+}
+
+func TestRunWithResultsDoesNotCallNetworkBlockedToolComplete(t *testing.T) {
+	c := &fakeCaller{fail: errors.New("getaddrinfo ENOTFOUND api.example.com")}
+	result := RunWithResults(context.Background(), c,
+		[]toolinfo.ToolInfo{{Name: "remote", InputSchema: schema("id")}}, 0)
+
+	if got := result.Scenarios[0].Outcome; got != assessment.OutcomeUnsupported {
+		t.Fatalf("outcome = %q, want unsupported", got)
+	}
+}
+
+func TestRunWithResultsTreatsBenignIsErrorAsTargetOutcome(t *testing.T) {
+	c := &fakeCaller{result: func(_ string, _ map[string]any) toolcall.Result {
+		return toolcall.Result{IsError: true, Content: []toolcall.ContentBlock{{
+			Type: "text", Raw: json.RawMessage(`{"type":"text","text":"database unavailable"}`),
+		}}}
+	}}
+	result := RunWithResults(context.Background(), c,
+		[]toolinfo.ToolInfo{{Name: "query", InputSchema: schema("sql")}}, 0)
+
+	if got := result.Scenarios[0].Outcome; got != assessment.OutcomeTargetError {
+		t.Fatalf("outcome = %q, want target_error", got)
+	}
+	if !strings.Contains(result.Scenarios[0].Reason, "isError") {
+		t.Errorf("scenario does not explain isError: %+v", result.Scenarios[0])
+	}
+}
+
+func TestRunSearchesStructuredContentForEvidence(t *testing.T) {
+	c := &fakeCaller{result: func(_ string, args map[string]any) toolcall.Result {
+		value, _ := args["path"].(string)
+		if strings.Contains(value, "etc/passwd") {
+			return toolcall.Result{
+				StructuredContent: json.RawMessage(`{"file":"root:x:0:0:root:/root:/bin/bash"}`),
+			}
+		}
+		return toolcall.Result{
+			StructuredContent: json.RawMessage(`{"status":"ok"}`),
+		}
+	}}
+	result := RunWithResults(context.Background(), c,
+		[]toolinfo.ToolInfo{{Name: "read", InputSchema: schema("path")}}, 0)
+
+	if result.Scenarios[0].Outcome != assessment.OutcomeFinding {
+		t.Fatalf("structured leak was not a finding: %+v", result.Scenarios[0])
 	}
 }
 

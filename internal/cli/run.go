@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/fetch"
+	"github.com/m4vic/detonate/internal/scan"
+	"github.com/m4vic/detonate/internal/target"
 )
 
 // The primary CLI surface: `detonate <target>`.
@@ -30,13 +33,14 @@ import (
 
 // scanOptions are the knobs, all with useful defaults.
 type scanOptions struct {
-	command    string // override the detected start command
-	subPath    string // sub-directory inside a cloned repo
-	quick      bool   // skip install, probes and script execution
-	noBaseline bool
-	noProbe    bool
-	noInstall  bool
-	noScripts  bool
+	command        string // override the detected start command
+	subPath        string // sub-directory inside a cloned repo
+	quick          bool   // skip install, probes and script execution
+	noBaseline     bool
+	noProbe        bool
+	noInstall      bool
+	noScripts      bool
+	failIncomplete bool
 
 	// format is "text" (default), "json", or "sarif".
 	format string
@@ -56,6 +60,10 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 	}
 	a.format = opt.format
 	a.outFile = opt.out
+	a.failIncomplete = opt.failIncomplete
+	a.scanScenarios = nil
+	a.scanTools = nil
+	a.scanFailures = nil
 	a.scanTarget = target
 	a.scanIdentity = baselineIdentity(target, opt.subPath)
 
@@ -72,8 +80,8 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 	if fetch.IsURL(target) {
 		fetched, err := fetch.Git(ctx, target)
 		if err != nil {
-			fmt.Fprintf(a.Stderr, "  cannot clone: %v\n", err)
-			return exitFailure
+			return a.failScan("fetch", "fetch_failed",
+				assessment.OutcomeTargetError, true, err, exitFailure)
 		}
 		defer fetched.Cleanup()
 
@@ -109,10 +117,7 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 		return a.runMCP(ctx, d, opt)
 
 	default:
-		fmt.Fprintf(a.Stderr, "  cannot tell what %s is: %s\n", shorten(d.Dir), d.Why)
-		fmt.Fprintln(a.Stderr, "\n  If it is an MCP server, give the command that starts it:")
-		fmt.Fprintln(a.Stderr, "    detonate <folder> --cmd \"python /target/server.py\"")
-		fmt.Fprintln(a.Stderr, "  Inside the sandbox the folder is mounted at /target.")
+		a.explainUnclassified(shorten(d.Dir), d)
 		return exitUsage
 	}
 }
@@ -121,22 +126,24 @@ func (a *App) runSkill(ctx context.Context, d Detected, opt scanOptions) int {
 	fmt.Fprintf(a.Stdout, "  target  %s\n", shorten(d.Dir))
 	fmt.Fprintf(a.Stdout, "  type    skill (%s)\n", d.Why)
 
-	args := []string{"--skill", d.Dir}
+	tgt, err := target.Skill(d.Dir)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "  %v\n", err)
+		return exitUsage
+	}
+
 	// Bundled scripts are the only DYNAMIC part of a skill scan: SKILL.md can
 	// only be read, but a script is a program an agent will actually execute.
 	// Skipping it by default would leave the most dangerous part unexamined.
 	runScripts := d.Scripts > 0 && !opt.quick && !opt.noScripts
 	if runScripts {
-		args = append(args, "--run-scripts")
 		fmt.Fprintf(a.Stdout, "  plan    analyse instructions, run %d script(s) in the sandbox\n", d.Scripts)
 	} else {
 		fmt.Fprintln(a.Stdout, "  plan    analyse instructions only")
 	}
-	if opt.noBaseline {
-		args = append(args, "--no-baseline")
-	}
 	fmt.Fprintln(a.Stdout)
-	return a.scan(ctx, args)
+
+	return a.execute(ctx, tgt, "", scan.Stages{RunScripts: runScripts}, !opt.noBaseline)
 }
 
 func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
@@ -144,23 +151,16 @@ func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
 	fmt.Fprintf(a.Stdout, "  type    MCP server (%s)\n", d.Why)
 	fmt.Fprintf(a.Stdout, "  start   %s\n", d.Command)
 
-	args := []string{"--mcp", d.Command, "--dir", d.Dir}
-
 	install := d.NeedsInstall && !opt.quick && !opt.noInstall
 	probe := !opt.quick && !opt.noProbe
 
 	var plan []string
 	if install {
-		args = append(args, "--install")
-		plan = append(plan, "install deps (network on, target not run)")
+		plan = append(plan, "install deps (network on, target hooks may run)")
 	}
 	plan = append(plan, "launch sandboxed (network off)")
 	if probe {
-		args = append(args, "--probe")
 		plan = append(plan, "probe tools with hostile input")
-	}
-	if opt.noBaseline {
-		args = append(args, "--no-baseline")
 	}
 
 	fmt.Fprintf(a.Stdout, "  plan    %s\n", strings.Join(plan, ", "))
@@ -170,7 +170,9 @@ func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
 		fmt.Fprintf(a.Stdout, "  note    skipping %s; the server may fail to import\n", d.Manifest)
 	}
 	fmt.Fprintln(a.Stdout)
-	return a.scan(ctx, args)
+
+	return a.execute(ctx, target.MCP(d.Command), d.Dir,
+		scan.Stages{Install: install, Probe: probe}, !opt.noBaseline)
 }
 
 // bindScanFlags defines the options shared by the positional form.
@@ -182,6 +184,7 @@ func bindScanFlags(fs *flag.FlagSet, opt *scanOptions) {
 	fs.BoolVar(&opt.noProbe, "no-probe", false, "Do not call tools with adversarial input.")
 	fs.BoolVar(&opt.noInstall, "no-install", false, "Do not install the target's dependencies.")
 	fs.BoolVar(&opt.noScripts, "no-scripts", false, "Do not run a skill's bundled scripts.")
+	fs.BoolVar(&opt.failIncomplete, "fail-incomplete", false, "Exit 4 when required coverage is incomplete.")
 	fs.StringVar(&opt.format, "format", "text", "Output format: text, json, or sarif.")
 	fs.StringVar(&opt.out, "out", "", "Write machine-readable output to this file.")
 }

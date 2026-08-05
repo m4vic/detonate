@@ -5,9 +5,12 @@ import (
 	"io"
 	"time"
 
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/toolinfo"
 	"github.com/m4vic/detonate/internal/trace"
 )
+
+const SchemaV1 = "detonate.report/v1"
 
 // Scan is the complete machine-readable result of one scan.
 //
@@ -16,24 +19,42 @@ import (
 // else that wants the data — a dashboard, a diff between two scans, a script
 // deciding whether to proceed with an install.
 type Scan struct {
+	Schema  string    `json:"schema"`
 	Tool    string    `json:"tool"`
 	Version string    `json:"version"`
 	Target  string    `json:"target"`
 	Started time.Time `json:"started"`
 
-	// Verdict is the same word the terminal prints, so the two never disagree.
-	Verdict string `json:"verdict"`
+	// Risk and Completeness are independent. A consumer must never interpret
+	// no_findings + partial as proof that the target is safe.
+	Risk         assessment.Risk             `json:"risk"`
+	Completeness assessment.Completeness     `json:"completeness"`
+	Scenarios    []assessment.ScenarioResult `json:"scenarios"`
 
 	// Counts save every consumer from recomputing the thing they all want.
 	Counts Counts `json:"counts"`
 
 	Tools    []toolinfo.ToolInfo `json:"tools"`
 	Findings []Finding           `json:"findings"`
+	Failures []Failure           `json:"failures,omitempty"`
 
 	// Observations are context that deliberately did not affect the verdict.
 	// Included rather than dropped so a consumer can show what a target
 	// reaches for without that changing whether it passed.
 	Observations []Finding `json:"observations,omitempty"`
+}
+
+// Failure records why a scan could not reach a trustworthy result.
+//
+// Findings describe the target's observed security behavior. Failures describe
+// the scanner pipeline itself or a target that could not be started/tested.
+// Keeping them separate prevents "the server crashed" from being presented as
+// either a security finding or a clean scan.
+type Failure struct {
+	Phase     string `json:"phase"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
 }
 
 type Counts struct {
@@ -59,10 +80,23 @@ type Finding struct {
 }
 
 // Build assembles a Scan from a trace.
-func Build(tr *trace.Trace, tools []toolinfo.ToolInfo, target, version string) Scan {
+func Build(
+	tr *trace.Trace,
+	scenarios []assessment.ScenarioResult,
+	tools []toolinfo.ToolInfo,
+	target, version string,
+	failures ...Failure,
+) Scan {
+	var events []trace.Event
+	if tr != nil {
+		events = tr.Events
+	}
+	summary := assessment.Summarize(events, scenarios)
 	s := Scan{
-		Tool: "detonate", Version: version,
-		Target: target, Tools: tools, Verdict: "clean",
+		Schema: SchemaV1, Tool: "detonate", Version: version,
+		Target: target, Tools: tools, Scenarios: scenarios,
+		Risk: summary.Risk, Completeness: summary.Completeness,
+		Failures: failures,
 	}
 	if tr == nil {
 		return s
@@ -84,12 +118,6 @@ func Build(tr *trace.Trace, tools []toolinfo.ToolInfo, target, version string) S
 		}
 	}
 
-	switch {
-	case s.Counts.Critical > 0:
-		s.Verdict = "dangerous"
-	case s.Counts.Notable > 0:
-		s.Verdict = "suspicious"
-	}
 	return s
 }
 

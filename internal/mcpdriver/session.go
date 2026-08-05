@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/m4vic/detonate/internal/sandbox"
+	"github.com/m4vic/detonate/internal/toolcall"
 	"github.com/m4vic/detonate/internal/toolinfo"
 )
 
@@ -78,13 +79,13 @@ func OpenSession(
 
 // Tools lists what the target offers.
 func (s *Session) Tools(ctx context.Context) ([]toolinfo.ToolInfo, error) {
-	result, err := s.session.ListTools(ctx, &mcp.ListToolsParams{})
+	listed, err := listAllTools(ctx, s.session, defaultToolPagination)
 	if err != nil {
 		return nil, s.enumerationError("listing tools", err)
 	}
 
-	tools := make([]toolinfo.ToolInfo, 0, len(result.Tools))
-	for _, t := range result.Tools {
+	tools := make([]toolinfo.ToolInfo, 0, len(listed))
+	for _, t := range listed {
 		schema, err := json.Marshal(t.InputSchema)
 		if err != nil {
 			schema = nil
@@ -132,10 +133,10 @@ func (s *Session) enumerationError(action string, err error) error {
 // timeout has to be short enough to record it and keep going.
 const callTimeout = 15 * time.Second
 
-// Call invokes a tool and returns its response as text.
+// Call invokes a tool and preserves every MCP content surface.
 //
 // Implements probe.Caller.
-func (s *Session) Call(ctx context.Context, tool string, args map[string]any) (string, error) {
+func (s *Session) Call(ctx context.Context, tool string, args map[string]any) (toolcall.Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 
@@ -144,20 +145,39 @@ func (s *Session) Call(ctx context.Context, tool string, args map[string]any) (s
 		Arguments: args,
 	})
 	if err != nil {
-		return "", err
+		return toolcall.Result{}, err
 	}
+	return normalizeToolResult(res)
+}
 
-	// Flatten the response to text. An error result is NOT an error here: a
-	// tool reporting "invalid path" is behaving correctly, and its message is
-	// exactly the content that must still be searched for leaked data.
-	var b strings.Builder
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcp.TextContent); ok {
-			b.WriteString(tc.Text)
-			b.WriteString("\n")
-		}
+func normalizeToolResult(res *mcp.CallToolResult) (toolcall.Result, error) {
+	if res == nil {
+		return toolcall.Result{}, fmt.Errorf("tool returned a nil result")
 	}
-	return b.String(), nil
+	out := toolcall.Result{IsError: res.IsError}
+	for i, content := range res.Content {
+		raw, err := json.Marshal(content)
+		if err != nil {
+			return toolcall.Result{}, fmt.Errorf("encoding tool content block %d: %w", i, err)
+		}
+		var header struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &header); err != nil {
+			return toolcall.Result{}, fmt.Errorf("reading tool content block %d type: %w", i, err)
+		}
+		out.Content = append(out.Content, toolcall.ContentBlock{
+			Type: header.Type, Raw: raw,
+		})
+	}
+	if res.StructuredContent != nil {
+		raw, err := json.Marshal(res.StructuredContent)
+		if err != nil {
+			return toolcall.Result{}, fmt.Errorf("encoding structured tool content: %w", err)
+		}
+		out.StructuredContent = raw
+	}
+	return out, nil
 }
 
 // Stderr returns what the target has written so far. Implements probe.Caller.

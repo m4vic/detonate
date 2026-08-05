@@ -19,29 +19,43 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
-	"github.com/m4vic/detonate/internal/acquire"
+	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/baseline"
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/fetch"
-	"github.com/m4vic/detonate/internal/mcpdriver"
-	"github.com/m4vic/detonate/internal/monitor"
-	"github.com/m4vic/detonate/internal/probe"
 	"github.com/m4vic/detonate/internal/report"
 	"github.com/m4vic/detonate/internal/sandbox"
+	"github.com/m4vic/detonate/internal/scan"
 	"github.com/m4vic/detonate/internal/skill"
 	"github.com/m4vic/detonate/internal/target"
 	"github.com/m4vic/detonate/internal/toolinfo"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
-// Version is overwritten at build time by the release workflow's ldflags, so
-// a downloaded binary reports the tag it was cut from rather than whatever
-// string happened to be committed. A var, not a const: the linker cannot
-// rewrite a constant.
+// Version is overwritten at build time by release linker flags. For binaries
+// installed with `go install`, the initialization fallback uses Go's module build
+// metadata so the binary does not report the unhelpful "dev" value.
 var Version = "dev"
+
+func init() {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		Version = versionFromBuildInfo(Version, info.Main.Version)
+	}
+}
+
+func versionFromBuildInfo(linkerVersion, moduleVersion string) string {
+	if linkerVersion != "dev" {
+		return linkerVersion
+	}
+	if moduleVersion != "" && moduleVersion != "(devel)" {
+		return moduleVersion
+	}
+	return linkerVersion
+}
 
 // Exit codes. Separating "your environment is wrong" from "the scan failed"
 // matters for CI: one means fix the runner, the other means look at the tool
@@ -55,13 +69,15 @@ const (
 	// exitFailure because "the tool broke" and "the tool caught something" call
 	// for opposite responses in CI, and a single non-zero code makes a pipeline
 	// treat a crashed scanner as a security finding (or worse, the reverse).
-	exitFindings = 3
+	exitFindings   = 3
+	exitIncomplete = 4
 )
 
 // App holds the CLI's dependencies so they can be substituted in tests.
 type App struct {
 	Stdout io.Writer
 	Stderr io.Writer
+	Stdin  io.Reader
 
 	// CheckDocker is injected so tests can exercise the enumeration path on a
 	// machine without Docker. Production always gets the real check.
@@ -71,8 +87,9 @@ type App struct {
 	// to reporting. Fields rather than parameters because report() is called
 	// from several paths (prompt, skill, MCP) and threading two more arguments
 	// through each of them would obscure what those functions are for.
-	format  string
-	outFile string
+	format         string
+	outFile        string
+	failIncomplete bool
 
 	// docOut is where the JSON or SARIF document goes once progress output has
 	// been silenced. Without it the document would be written to the same
@@ -81,8 +98,10 @@ type App struct {
 
 	// scanTarget and scanTools describe the current scan, needed to build a
 	// complete document rather than just a list of findings.
-	scanTarget string
-	scanTools  []toolinfo.ToolInfo
+	scanTarget    string
+	scanTools     []toolinfo.ToolInfo
+	scanScenarios []assessment.ScenarioResult
+	scanFailures  []report.Failure
 
 	// scanIdentity names the thing being scanned, for baseline purposes only.
 	//
@@ -103,6 +122,7 @@ func New() *App {
 	return &App{
 		Stdout:      os.Stdout,
 		Stderr:      os.Stderr,
+		Stdin:       os.Stdin,
 		CheckDocker: environment.CheckDocker,
 	}
 }
@@ -115,13 +135,16 @@ actually do, not what their manifest claims.
 Usage:
   detonate <target>     Scan a folder, a file, or a repository URL
   detonate              Guided scan
+  detonate doctor       Check whether this machine can run a scan
+  detonate static <target>   Static-only inspection (alpha)
+  detonate dynamic <target>  Sandboxed execution (experimental)
 
 detonate works out what the target is: a folder with SKILL.md is a skill, a
 folder with an entry point is an MCP server, a .txt or .md file is a prompt.
 
-Scans are thorough by default. Dependencies are installed in a separate
-container that never runs the target, tools are called with adversarial
-input, and a skill's bundled scripts are executed in the sandbox.
+Scans attempt dynamic checks by default. Dependency and build hooks may execute
+target-controlled code in the networked acquisition container; schema-reachable
+tools are called with adversarial input, and skill scripts run in the sandbox.
 
 Options:
   --cmd <command>    Command that starts the server, if detection got it wrong
@@ -131,6 +154,9 @@ Options:
   --no-install       Do not install dependencies
   --no-scripts       Do not run a skill's bundled scripts
   --no-baseline      Do not compare against the previous scan
+  --fail-incomplete  Exit 4 when required coverage is incomplete
+  --format <format>  Output format: text, json, or sarif
+  --out <file>       Write machine-readable output to a file
 
 Examples:
   detonate ./my-server
@@ -147,8 +173,9 @@ A lone - reads a prompt from stdin, so a prompt can be piped in without
 saving a file first.
 
 Exit codes:
-  0  clean    2  bad usage or environment
-  1  error    3  findings
+  0  completed without gated findings or coverage failure
+  1  error    2  bad usage or environment
+  3  findings 4  incomplete coverage (when --fail-incomplete is set)
 `
 
 // Run executes one CLI invocation and returns a process exit code. It never
@@ -174,15 +201,24 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	case "scan":
 		// The explicit form, kept working. Anyone who scripted against it
 		// should not have their pipeline broken by a UX improvement.
+		a.scanScenarios = nil
+		a.scanTools = nil
+		a.scanFailures = nil
+		a.scanTarget = ""
 		return a.scan(ctx, args[1:])
-	case "-":
-		// A lone dash is the Unix convention for "read from stdin". Lets a
-		// user check a prompt they were just sent without saving a file:
-		// `echo "..." | detonate -` or `detonate - < prompt.txt`.
-		return a.scanStdinPrompt()
+	case "doctor":
+		return a.doctor(ctx)
+	case "scenario":
+		return a.runScenario(args[1:])
+	case "static":
+		return a.runStatic(ctx, args[1:])
+	case "dynamic":
+		return a.runDynamic(ctx, args[1:])
+	case "combined":
+		return a.runCombined(args[1:])
 	}
 
-	if strings.HasPrefix(args[0], "-") {
+	if args[0] != "-" && strings.HasPrefix(args[0], "-") {
 		fmt.Fprintf(a.Stderr, "detonate: unknown option %q\n\n", args[0])
 		a.printUsage()
 		return exitUsage
@@ -197,6 +233,14 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitUsage
 	}
+	if args[0] == "-" {
+		switch opt.format {
+		case "", "text", "json", "sarif":
+		default:
+			fmt.Fprintf(a.Stderr, "  unknown format %q; use text, json, or sarif\n", opt.format)
+			return exitUsage
+		}
+	}
 
 	// The banner is decoration, and decoration on stdout corrupts a JSON or
 	// SARIF stream. Printed before RunTarget can silence output, so the check
@@ -204,6 +248,19 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if opt.format == "" || opt.format == "text" {
 		fmt.Fprint(a.Stdout, banner)
 		fmt.Fprintln(a.Stdout)
+	}
+	if args[0] == "-" {
+		// A lone dash is the Unix convention for "read from stdin". It still
+		// goes through normal option parsing so --format/--out work in CI.
+		a.format = opt.format
+		a.outFile = opt.out
+		a.failIncomplete = opt.failIncomplete
+		a.scanTarget = "stdin"
+		if (a.format == "json" || a.format == "sarif") && a.outFile == "" {
+			a.docOut = a.Stdout
+			a.Stdout = io.Discard
+		}
+		return a.scanStdinPrompt()
 	}
 	return a.RunTarget(ctx, args[0], opt)
 }
@@ -233,9 +290,43 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	doProbe := fs.Bool("probe", false, "Call each discovered tool with adversarial arguments and watch what it does.")
 	runScripts := fs.Bool("run-scripts", false, "Run a skill's bundled scripts in the sandbox and watch them.")
 	noBaseline := fs.Bool("no-baseline", false, "Skip comparing against the previous scan of this target.")
+	failIncomplete := fs.Bool("fail-incomplete", false, "Exit 4 when required coverage is partial or inconclusive.")
+	defaultFormat := a.format
+	if defaultFormat == "" {
+		defaultFormat = "text"
+	}
+	outputFormat := fs.String("format", defaultFormat, "Output format: text, json, or sarif.")
+	outputFile := fs.String("out", a.outFile, "Write machine-readable output to this file.")
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
+	}
+	switch *outputFormat {
+	case "", "text", "json", "sarif":
+	default:
+		fmt.Fprintf(a.Stderr, "detonate: unknown format %q; use text, json, or sarif\n",
+			*outputFormat)
+		return exitUsage
+	}
+	a.format = *outputFormat
+	a.outFile = *outputFile
+	a.failIncomplete = *failIncomplete || a.failIncomplete
+	if a.scanTarget == "" {
+		switch {
+		case *gitURL != "":
+			a.scanTarget = *gitURL
+		case *skillPath != "":
+			a.scanTarget = *skillPath
+		case *promptPath != "":
+			a.scanTarget = *promptPath
+		case *mcpCmd != "":
+			a.scanTarget = *mcpCmd
+		}
+	}
+	if (a.format == "json" || a.format == "sarif") &&
+		a.outFile == "" && a.docOut == nil {
+		a.docOut = a.Stdout
+		a.Stdout = io.Discard
 	}
 
 	// --prompt needs no Docker and no target: a prompt is inert text, and the
@@ -252,8 +343,8 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	if *gitURL != "" {
 		fetched, err := fetch.Git(ctx, *gitURL)
 		if err != nil {
-			fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
-			return exitFailure
+			return a.failScan("fetch", "fetch_failed",
+				assessment.OutcomeTargetError, true, err, exitFailure)
 		}
 		defer fetched.Cleanup()
 
@@ -277,16 +368,41 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
-	// Pre-flight. The finished pipeline requires a sandbox before executing
-	// anything untrusted, so the gate is enforced from day one even though M1
-	// below does not route through a sandbox yet. Wiring it in later would
-	// mean shipping a version whose safety promise is aspirational.
+	return a.execute(ctx, tgt, dir, scan.Stages{
+		Install:    *install,
+		Probe:      *doProbe,
+		RunScripts: *runScripts,
+	}, !*noBaseline)
+}
+
+// execute runs a scan whose target and stages are already decided, then
+// reports it.
+//
+// Every path that scans something arrives here: the positional form, the
+// explicit `scan` subcommand, and the interactive wizard. They differ only in
+// how the user named the target, which is exactly the part that should not be
+// duplicated into three pipelines.
+//
+// The options arrive as typed arguments. They used to arrive as a synthesized
+// slice of command-line flags that this package handed back to its own flag
+// parser, which meant the compiler could not check them and nothing but a
+// terminal could start a scan.
+func (a *App) execute(
+	ctx context.Context,
+	tgt target.Target,
+	mountDir string,
+	stages scan.Stages,
+	useBaseline bool,
+) int {
+	// Pre-flight. Executing anything untrusted requires a sandbox, so the gate
+	// is enforced before the pipeline is entered rather than discovered inside
+	// it, where a partial scan would already have started.
 	status := a.CheckDocker(ctx)
 	if !status.Ready() {
-		fmt.Fprintf(a.Stderr, "detonate: cannot scan: %s\n", status.Detail)
-		fmt.Fprintln(a.Stderr, "detonate: detonate requires Docker to sandbox untrusted code. "+
-			"Install Docker and make sure the daemon is running.")
-		return exitUsage
+		return a.failScan("runtime", "runtime_unavailable",
+			assessment.OutcomeHarnessError, true,
+			fmt.Errorf("%s; Docker is required to sandbox untrusted code",
+				status.Detail), exitUsage)
 	}
 
 	// Clear anything a previous run leaked. A scan that died hard (SIGKILL,
@@ -297,17 +413,21 @@ func (a *App) scan(ctx context.Context, args []string) int {
 		fmt.Fprintf(a.Stdout, "  cleaned up %d orphaned container(s) from a previous run\n", n)
 	}
 
-	tools, tr, err := a.enumerate(ctx, tgt, dir, *install, *doProbe, *runScripts)
+	result, err := scan.Run(ctx, scan.Request{
+		Target:   tgt,
+		MountDir: mountDir,
+		Stages:   stages,
+	}, a.progress())
 	if err != nil {
-		fmt.Fprintf(a.Stderr, "detonate: enumeration failed: %v\n", err)
-		return exitFailure
+		return a.failPipeline(err)
 	}
+	tools, tr, scenarios := result.Tools, result.Trace, result.Scenarios
 
 	// Compare against the last scan of this target. Every other check here is
 	// a snapshot, and a snapshot cannot detect a rug pull by definition — a
 	// server that serves clean descriptions during review and swaps them
 	// afterwards looks perfect every single time it is looked at once.
-	if !*noBaseline && len(tools) > 0 && tr != nil {
+	if useBaseline && len(tools) > 0 && tr != nil {
 		key := a.scanIdentity
 		if key == "" {
 			// The explicit `scan --mcp` form, which names a command directly.
@@ -317,6 +437,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	}
 
 	a.scanTools = tools
+	a.scanScenarios = scenarios
 	if a.scanTarget == "" {
 		a.scanTarget = tgt.Reference
 	}
@@ -349,6 +470,13 @@ func (a *App) scanPromptText(text, label string) int {
 	for _, ev := range skill.AnalyzePrompt(text) {
 		tr.Add(ev)
 	}
+	outcome := assessment.OutcomePass
+	if tr.HasSeverity(trace.SeverityNotable) {
+		outcome = assessment.OutcomeFinding
+	}
+	a.scanScenarios = []assessment.ScenarioResult{{
+		ID: "prompt.static", Required: true, Outcome: outcome,
+	}}
 	return a.report(tr)
 }
 
@@ -409,6 +537,11 @@ func (a *App) diffBaseline(target string, tools []toolinfo.ToolInfo, tr *trace.T
 // exits 0 while reporting an exfiltration attempt is a scanner that gets
 // ignored by the automation it was bought for.
 func (a *App) report(tr *trace.Trace) int {
+	if err := assessment.Validate(a.scanScenarios); err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: invalid scenario results: %v\n", err)
+		return exitFailure
+	}
+
 	// Machine-readable output replaces the terminal report rather than adding
 	// to it: a caller asking for JSON is piping it somewhere, and decorative
 	// text mixed into the stream would break that.
@@ -421,6 +554,7 @@ func (a *App) report(tr *trace.Trace) int {
 			"(this target kind is not executed yet)")
 		return exitOK
 	}
+	summary := assessment.Summarize(tr.Events, a.scanScenarios)
 
 	// Findings drive the verdict. Observations are context printed alongside
 	// them and never change the outcome.
@@ -446,16 +580,18 @@ func (a *App) report(tr *trace.Trace) int {
 
 	if len(findings) == 0 {
 		fmt.Fprintf(a.Stdout, "\n%s\n", rule)
-		fmt.Fprintln(a.Stdout, "  VERDICT: clean")
-		fmt.Fprintln(a.Stdout, "  No suspicious behaviour observed while enumerating this target.")
+		fmt.Fprintf(a.Stdout, "  RISK: %s\n", summary.Risk)
+		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", summary.Completeness)
+		fmt.Fprintln(a.Stdout, "  No findings were observed in the scenarios that completed.")
 		fmt.Fprintf(a.Stdout, "%s\n", rule)
+		a.printCoverage()
 		a.printObservations(observations)
 		// Say the limit out loud. A scanner that lets "we found nothing" be
 		// read as "this is safe" is worse than no scanner, because it converts
 		// ignorance into false confidence.
-		fmt.Fprintln(a.Stdout, "  Note: this is not proof of safety. Only startup behaviour was")
-		fmt.Fprintln(a.Stdout, "  observed, and a target that hides its errors leaves no trace.")
-		return exitOK
+		fmt.Fprintln(a.Stdout, "  Note: no findings is not proof of safety; inspect completeness")
+		fmt.Fprintln(a.Stdout, "  and the scenario outcomes before trusting this result.")
+		return a.exitForSummary(summary)
 	}
 
 	verdict := "suspicious"
@@ -464,8 +600,10 @@ func (a *App) report(tr *trace.Trace) int {
 	}
 
 	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
-	fmt.Fprintf(a.Stdout, "  VERDICT: %s  (%d finding(s))\n", verdict, len(findings))
+	fmt.Fprintf(a.Stdout, "  RISK: %s  (%d finding(s))\n", verdict, len(findings))
+	fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", summary.Completeness)
 	fmt.Fprintf(a.Stdout, "%s\n", rule)
+	a.printCoverage()
 
 	for i, e := range findings {
 		fmt.Fprintf(a.Stdout, "\n  %d. [%s] %s\n", i+1, strings.ToUpper(string(e.Severity)), e.Summary)
@@ -480,6 +618,39 @@ func (a *App) report(tr *trace.Trace) int {
 	return exitFindings
 }
 
+func (a *App) printCoverage() {
+	var completed int
+	for _, scenario := range a.scanScenarios {
+		if scenario.Outcome == assessment.OutcomePass ||
+			scenario.Outcome == assessment.OutcomeFinding {
+			completed++
+		}
+	}
+	fmt.Fprintf(a.Stdout, "  Coverage: %d/%d scenario(s) completed\n",
+		completed, len(a.scanScenarios))
+	for _, scenario := range a.scanScenarios {
+		if scenario.Outcome == assessment.OutcomePass ||
+			scenario.Outcome == assessment.OutcomeFinding {
+			continue
+		}
+		fmt.Fprintf(a.Stdout, "    - %s: %s", scenario.ID, scenario.Outcome)
+		if scenario.Reason != "" {
+			fmt.Fprintf(a.Stdout, " (%s)", scenario.Reason)
+		}
+		fmt.Fprintln(a.Stdout)
+	}
+}
+
+func (a *App) exitForSummary(summary assessment.Summary) int {
+	if summary.Completeness == assessment.CompletenessFailed {
+		return exitFailure
+	}
+	if a.failIncomplete && summary.Completeness != assessment.CompletenessComplete {
+		return exitIncomplete
+	}
+	return exitOK
+}
+
 // reportMachine writes JSON or SARIF and returns the same exit code the
 // terminal report would have.
 //
@@ -487,7 +658,8 @@ func (a *App) report(tr *trace.Trace) int {
 // pipeline that switches to --format sarif for annotations must not also
 // change whether the build passes.
 func (a *App) reportMachine(tr *trace.Trace) int {
-	s := report.Build(tr, a.scanTools, a.scanTarget, Version)
+	s := report.Build(tr, a.scanScenarios, a.scanTools, a.scanTarget, Version,
+		a.scanFailures...)
 
 	// docOut, not Stdout: when progress output was silenced to keep the stream
 	// clean, Stdout is io.Discard and writing the document there would throw
@@ -508,7 +680,8 @@ func (a *App) reportMachine(tr *trace.Trace) int {
 
 	var err error
 	if a.format == "sarif" {
-		err = report.SARIF(w, tr, a.sarifURI(), Version)
+		err = report.SARIF(w, tr, a.scanScenarios, a.sarifURI(), Version,
+			a.scanFailures...)
 	} else {
 		err = report.JSON(w, s)
 	}
@@ -524,7 +697,94 @@ func (a *App) reportMachine(tr *trace.Trace) int {
 	if s.Counts.Critical > 0 || s.Counts.Notable > 0 {
 		return exitFindings
 	}
-	return exitOK
+	return a.exitForSummary(assessment.Summary{
+		Risk: s.Risk, Completeness: s.Completeness,
+	})
+}
+
+const maxFailureMessageBytes = 4096
+const failureTruncationMarker = "...[truncated]"
+
+// failScan finishes an interrupted pipeline with the same machine-readable
+// contract as a successful scan. It always returns the caller-selected
+// non-zero code, even when an inconclusive target failure would not normally
+// trip --fail-incomplete.
+func (a *App) failScan(
+	phase, code string,
+	outcome assessment.Outcome,
+	retryable bool,
+	err error,
+	exitCode int,
+) int {
+	message := "unknown failure"
+	if err != nil {
+		message = err.Error()
+	}
+	// Error text can contain target-controlled stderr. Keep it on one line so
+	// it cannot forge terminal log records, and repair invalid UTF-8 before
+	// serializing it into JSON/SARIF.
+	message = strings.Join(strings.Fields(strings.ToValidUTF8(message, "?")), " ")
+	if len(message) > maxFailureMessageBytes {
+		message = strings.ToValidUTF8(
+			message[:maxFailureMessageBytes-len(failureTruncationMarker)], "",
+		) + failureTruncationMarker
+	}
+	if a.scanTarget == "" {
+		a.scanTarget = "unknown"
+	}
+	a.scanScenarios = append(a.scanScenarios, assessment.ScenarioResult{
+		ID:       "pipeline." + phase,
+		Required: true,
+		Outcome:  outcome,
+		Reason:   message,
+	})
+	a.scanFailures = append(a.scanFailures, report.Failure{
+		Phase: phase, Code: code, Message: message, Retryable: retryable,
+	})
+
+	fmt.Fprintf(a.Stderr, "detonate: %s failed [%s]: %s\n", phase, code, message)
+	if a.format == "json" || a.format == "sarif" {
+		if code := a.reportMachine(nil); code == exitFailure {
+			// reportMachine returning failure can mean either that it correctly
+			// summarized a harness failure or that serialization failed. The
+			// externally visible result is still the requested failure code.
+		}
+	} else {
+		summary := assessment.Summarize(nil, a.scanScenarios)
+		const rule = "  ----------------------------------------------------------------"
+		fmt.Fprintf(a.Stdout, "\n%s\n", rule)
+		fmt.Fprintf(a.Stdout, "  RISK: %s\n", summary.Risk)
+		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", summary.Completeness)
+		fmt.Fprintf(a.Stdout, "  FAILURE: %s/%s\n", phase, code)
+		fmt.Fprintf(a.Stdout, "%s\n", rule)
+		a.printCoverage()
+	}
+	return exitCode
+}
+
+// progress routes pipeline milestones to the terminal.
+//
+// The pipeline announces each step but does not know where output goes, which
+// is what keeps it usable when the caller is a JSON stream, a test, or another
+// program rather than a person watching a scan run.
+func (a *App) progress() scan.Progress {
+	return func(msg string) { fmt.Fprintln(a.Stdout, msg) }
+}
+
+// failPipeline turns a failed scan into the same structured report a
+// successful one produces.
+//
+// A scan that died in acquisition and a scan that found nothing must never
+// look alike, so the phase attribution the pipeline attached to the error is
+// carried through to the report rather than flattened into "it broke".
+func (a *App) failPipeline(err error) int {
+	var scanErr *scan.Error
+	if errors.As(err, &scanErr) {
+		return a.failScan(scanErr.Phase, scanErr.Code, scanErr.Outcome,
+			scanErr.Retryable, scanErr.Err, exitFailure)
+	}
+	return a.failScan("execute", "scan_failed",
+		assessment.OutcomeHarnessError, false, err, exitFailure)
 }
 
 // sarifURI is what a finding gets attached to in a code-scanning UI.
@@ -582,172 +842,6 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 	default:
 		return target.Target{}, errors.New("a target is required: pass --mcp <command> or --skill <path>")
 	}
-}
-
-func (a *App) enumerate(ctx context.Context, tgt target.Target, mountDir string, install, doProbe, runScripts bool) ([]toolinfo.ToolInfo, *trace.Trace, error) {
-	if tgt.Kind == target.KindMCP {
-		policy := sandbox.DefaultPolicy()
-
-		var mounts []sandbox.Mount
-		var absDir string
-		if mountDir != "" {
-			abs, err := filepath.Abs(mountDir)
-			if err != nil {
-				return nil, nil, fmt.Errorf("resolving --dir: %w", err)
-			}
-			absDir = abs
-			// Read-only, always. A target that can rewrite its own source
-			// mid-scan makes the evidence disagree with the artifact, which
-			// defeats the point of collecting evidence at all.
-			mounts = append(mounts, sandbox.Mount{
-				HostPath: abs, ContainerPath: "/target", ReadOnly: true,
-			})
-		}
-
-		// Phase 1. Runs the PACKAGE MANAGER with a network, never the target.
-		// The target's own code only ever executes in phase 2, network off.
-		var installed *acquire.Result
-		if install {
-			if absDir == "" {
-				return nil, nil, errors.New("--install needs --dir: there is no target directory to read a manifest from")
-			}
-			m := acquire.Detect(absDir)
-			if m.Ecosystem == acquire.EcosystemNone {
-				fmt.Fprintln(a.Stdout, "  no dependency manifest found; skipping install")
-			} else {
-				fmt.Fprintf(a.Stdout, "  [1/2] installing %s deps from %s "+
-					"(separate container, network ON, target NOT executed)\n", m.Ecosystem, m.File)
-			}
-
-			res, err := acquire.Install(ctx, absDir, policy)
-			if err != nil {
-				return nil, nil, err
-			}
-			installed = res
-			defer func() { _ = installed.Cleanup(context.Background()) }()
-
-			mounts = append(mounts, installed.Mounts()...)
-			policy.Env = installed.Env
-
-			// Detonate on the runtime the dependencies were built for. A Node
-			// package installed into a volume is useless inside a Python
-			// image: the deps are present but `node` is not.
-			if installed.Image != "" {
-				policy.Image = installed.Image
-			}
-
-			// A project that had to be compiled now lives in the volume, not
-			// at /target. Detection ran before the build and could only name
-			// the entry point the package declares, which did not exist on
-			// disk yet.
-			if rewritten := installed.Command(tgt.Reference); rewritten != tgt.Reference {
-				fmt.Fprintf(a.Stdout, "  built   running from %s\n", installed.Root)
-				tgt.Reference = rewritten
-			}
-		}
-
-		// Always sandboxed. There is no host-execution path reachable from the
-		// CLI: the unsandboxed EnumerateTools still exists for our own tests,
-		// but shipping a flag that reaches it would recreate exactly the
-		// --dangerously-run-mcp-servers hole that justifies this tool.
-		phase := ""
-		if install {
-			phase = "[2/2] "
-		}
-		fmt.Fprintf(a.Stdout, "  %slaunching target inside a sandbox "+
-			"(network off, read-only root, no capabilities, non-root)\n", phase)
-
-		if !doProbe {
-			res, err := mcpdriver.EnumerateSandboxedWithTrace(ctx, tgt.Reference, policy, mounts)
-			if err != nil {
-				return nil, nil, err
-			}
-			// Fold install-time behaviour into the same trace. A postinstall
-			// hook that phoned home is a finding about this target, and
-			// splitting it into a separate report would let it be overlooked.
-			if installed != nil && res.Trace != nil {
-				res.Trace.Events = append(installed.Events, res.Trace.Events...)
-			}
-			return res.Tools, res.Trace, nil
-		}
-
-		// Probing keeps the session open: a tool only reveals what it does
-		// when it is called, so the container has to outlive tools/list.
-		sess, err := mcpdriver.OpenSession(ctx, tgt.Reference, policy, mounts)
-		if err != nil {
-			return nil, nil, err
-		}
-		defer sess.Close()
-
-		tools, err := sess.Tools(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
-		if installed != nil {
-			for _, ev := range installed.Events {
-				tr.Add(ev)
-			}
-		}
-
-		// Enumeration-phase behaviour: what the server did just from being
-		// launched and asked for its tool list, BEFORE any tool was called. A
-		// network attempt here is unprovoked — nobody invoked anything — so it
-		// is the real phone-home signal and stays a finding.
-		//
-		// Captured before probing on purpose. A tool that legitimately reaches
-		// its own API when we call it must not be confused with the server
-		// reaching out on its own; only the second is suspicious.
-		for _, ev := range monitor.Analyze(sess.Stderr(), "enumeration") {
-			tr.Add(ev)
-		}
-
-		fmt.Fprintf(a.Stdout, "  probing %d tool(s) with %d adversarial payload(s)...\n",
-			len(tools), len(probe.Payloads()))
-
-		// The engine attributes probe-phase behaviour to the specific payload
-		// and tool that provoked it, and skips tools that need the network
-		// (their egress is expected, not a finding). There is deliberately no
-		// aggregate re-scan of the whole stderr buffer afterwards: it re-flagged
-		// the expected, blocked network noise from every API-backed tool as a
-		// critical finding, which turned a clean Notion server into "dangerous".
-		for _, ev := range probe.Run(ctx, sess, tools, 0) {
-			tr.Add(ev)
-		}
-		return tools, tr, nil
-	}
-
-	// A skill is mostly a large prompt: its SKILL.md body is text an agent
-	// reads and obeys, so the analysis is of the instructions rather than of
-	// running code. Reading it needs no container.
-	tools, err := skill.Load(tgt.Reference)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	sk, err := skill.LoadSkill(tgt.Reference)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	tr := &trace.Trace{Target: tgt.Reference, Started: time.Now()}
-	for _, ev := range skill.Analyze(sk) {
-		tr.Add(ev)
-	}
-
-	// The dynamic half of skill analysis. SKILL.md is a prompt and can only be
-	// read, but the bundled scripts are real programs an agent will execute on
-	// the user's machine — and until they run, a script that phones home is
-	// indistinguishable from one that formats a table.
-	if runScripts && len(sk.Scripts) > 0 {
-		fmt.Fprintf(a.Stdout, "  running %d bundled script(s) in the sandbox...\n",
-			len(sk.Scripts))
-		for _, ev := range skill.DetonateScripts(ctx, tgt.Reference, sk, sandbox.DefaultPolicy()) {
-			tr.Add(ev)
-		}
-	}
-	return tools, tr, nil
 }
 
 func (a *App) printTools(tools []toolinfo.ToolInfo) {

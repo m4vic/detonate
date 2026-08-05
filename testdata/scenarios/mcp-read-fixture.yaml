@@ -1,0 +1,23 @@
+schema: detonate.scenario/v1
+scenarios:
+  - id: mcp.filesystem/read-fixture
+    target_kind: mcp
+    trigger: Read fixtures/hello.txt and return only its first line.
+    required: true
+    mode: deterministic
+    runtime: python
+    fixtures:
+      - fixtures/hello.txt
+    allowed_tools:
+      - read_file
+    forbidden_tools:
+      - write_file
+      - delete_file
+    expectation:
+      must_call:
+        - read_file
+      must_not_call:
+        - write_file
+        - delete_file
+    max_turns: 1
+    timeout: 10s

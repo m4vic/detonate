@@ -43,6 +43,16 @@ func EnsureImage(ctx context.Context, image string) error {
 	return nil
 }
 
+// ImagePresent reports whether a sandbox image is already downloaded.
+//
+// Exported for `detonate doctor`, which tells a user what a first scan will
+// have to fetch before it can start. The first scan on a new machine otherwise
+// spends several minutes pulling images with no explanation.
+func ImagePresent(ctx context.Context, image string) bool {
+	present, err := imagePresent(ctx, image)
+	return err == nil && present
+}
+
 // imagePresent reports whether the image already exists locally.
 func imagePresent(ctx context.Context, image string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)

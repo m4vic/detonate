@@ -147,6 +147,13 @@ func (r *Result) SubDir(rel string) (string, error) {
 // CLI can accept a URL where it accepts a path without a separate flag.
 func IsURL(s string) bool {
 	s = strings.TrimSpace(s)
+	// A relative path can contain two slashes and a dot in its first segment
+	// (`./skills/example`), which otherwise looks like host/owner/repository.
+	// Prefer the local interpretation whenever the user supplied a path marker.
+	if s == "" || filepath.IsAbs(s) || strings.HasPrefix(s, ".") ||
+		strings.HasPrefix(s, `\\`) || filepath.VolumeName(s) != "" {
+		return false
+	}
 	if strings.HasPrefix(s, "git@") {
 		return true
 	}

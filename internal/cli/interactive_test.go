@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"os"
@@ -59,19 +60,26 @@ func TestWizardAsksOnceAndDetects(t *testing.T) {
 	}
 
 	app, out, _ := wizardApp(true)
-	withStdin(t, dir+"\n", func() {
-		app.runInteractive(context.Background())
-	})
+	app.Stdin = strings.NewReader(dir + "\n")
+	app.runInteractive(context.Background())
 
 	s := out.String()
 	for _, want := range []string{
-		"Target:",                  // the single question
-		"MCP server",               // it worked out the kind
-		"python /target/server.py", // and the start command
+		"detonate>",  // the single command prompt
+		"MCP server", // it worked out the kind without executing it
+		"static MCP inventory completed",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("wizard output missing %q\n---\n%s", want, s)
 		}
+	}
+}
+
+func TestAskReadsConfiguredInput(t *testing.T) {
+	app, _, _ := wizardApp(true)
+	app.Stdin = strings.NewReader("hello\n")
+	if got := app.ask(bufio.NewReader(app.Stdin), "", ""); got != "hello" {
+		t.Fatalf("ask() = %q, want hello", got)
 	}
 }
 
@@ -83,39 +91,36 @@ func TestWizardDetectsSkill(t *testing.T) {
 	}
 
 	app, out, _ := wizardApp(true)
-	withStdin(t, dir+"\n", func() {
-		app.runInteractive(context.Background())
-	})
+	app.Stdin = strings.NewReader(dir + "\n")
+	app.runInteractive(context.Background())
 	if !strings.Contains(out.String(), "skill") {
 		t.Errorf("SKILL.md folder not detected as a skill:\n%s", out.String())
 	}
 }
 
-func TestWizardChecksDockerBeforeAsking(t *testing.T) {
-	// Being told "Docker is not running" after answering a question is worse
-	// than being told before it.
+func TestWizardStaticModeDoesNotNeedDocker(t *testing.T) {
+	// Static inspection is the safe alpha default and must remain useful on a
+	// machine where Docker is unavailable.
 	app, out, errb := wizardApp(false)
-	withStdin(t, "", func() {
-		if code := app.runInteractive(context.Background()); code != exitUsage {
-			t.Errorf("exit = %d, want %d", code, exitUsage)
-		}
-	})
+	app.Stdin = strings.NewReader("")
+	if code := app.runInteractive(context.Background()); code != exitOK {
+		t.Errorf("exit = %d, want %d", code, exitOK)
+	}
 
-	if !strings.Contains(errb.String(), "Docker is not ready") {
+	if errb.Len() != 0 {
 		t.Errorf("stderr = %q", errb.String())
 	}
-	if strings.Contains(out.String(), "Target:") {
-		t.Error("wizard asked for a target despite Docker being unavailable")
+	if !strings.Contains(out.String(), "/static") {
+		t.Error("interactive help did not describe static mode")
 	}
 }
 
 func TestWizardRejectsMissingPath(t *testing.T) {
 	app, _, errb := wizardApp(true)
-	withStdin(t, "Z:\\definitely\\not\\here\n", func() {
-		if code := app.runInteractive(context.Background()); code != exitUsage {
-			t.Errorf("exit = %d, want %d", code, exitUsage)
-		}
-	})
+	app.Stdin = strings.NewReader("Z:\\definitely\\not\\here\n")
+	if code := app.runInteractive(context.Background()); code != exitUsage {
+		t.Errorf("exit = %d, want %d", code, exitUsage)
+	}
 	if !strings.Contains(errb.String(), "does not exist") {
 		t.Errorf("stderr = %q", errb.String())
 	}
@@ -130,9 +135,8 @@ func TestWizardStripsQuotesFromPaths(t *testing.T) {
 	}
 
 	app, out, _ := wizardApp(true)
-	withStdin(t, "\""+dir+"\"\n", func() {
-		app.runInteractive(context.Background())
-	})
+	app.Stdin = strings.NewReader("\"" + dir + "\"\n")
+	app.runInteractive(context.Background())
 	if !strings.Contains(out.String(), "MCP server") {
 		t.Errorf("quoted path was not accepted\n---\n%s", out.String())
 	}

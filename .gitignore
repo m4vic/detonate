@@ -1,6 +1,6 @@
 # Go build output
-detonate
-detonate.exe
+/detonate
+/detonate.exe
 *.exe
 *.test
 coverage.out
@@ -27,6 +27,10 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# one-context local mirror. This repo is public; the mirror can carry
+# cross-session working notes, so it must never be committed here.
+.ctx/
 
 # OS / editor
 .DS_Store

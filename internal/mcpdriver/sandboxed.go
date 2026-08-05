@@ -125,7 +125,7 @@ func EnumerateSandboxedWithTrace(
 	listCtx, cancel := context.WithTimeout(ctx, policy.Timeout)
 	defer cancel()
 
-	result, err := session.ListTools(listCtx, &mcp.ListToolsParams{})
+	listed, err := listAllTools(listCtx, session, defaultToolPagination)
 	if err != nil {
 		// A crash between the handshake and this call surfaces as a bare EOF.
 		// The reason is in the container's output — a missing env var, a
@@ -142,8 +142,8 @@ func EnumerateSandboxedWithTrace(
 		return nil, fmt.Errorf("listing tools from sandboxed %q: %w", command, err)
 	}
 
-	tools := make([]toolinfo.ToolInfo, 0, len(result.Tools))
-	for _, t := range result.Tools {
+	tools := make([]toolinfo.ToolInfo, 0, len(listed))
+	for _, t := range listed {
 		schema, err := json.Marshal(t.InputSchema)
 		if err != nil {
 			schema = nil

@@ -1,7 +1,11 @@
 # detonate
 
- **This project is constantly evolving and is currently not production-grade.**
-Detonate can have bugs, false positives, and false negatives. A `no_findings` result is not a security
+> **This project is constantly evolving and is currently not production-grade.**
+> Detonate can have bugs, false
+> positives, and false negatives. A `no_findings` result is not a security
+> certification. Use disposable test targets, never provide real secrets, and
+> read the full [disclaimer](DISCLAIMER.md) before running dynamic scans.
+
 **Run untrusted AI tools in a sandbox and report what they actually do, not what
 their manifest claims.**
 
@@ -9,17 +13,19 @@ You install an MCP server from GitHub. It runs on your machine, with your
 permissions, and your AI assistant calls its tools automatically. Nobody reads
 the code first.
 
-Every other scanner *reads* the manifest. detonate *runs* the thing in a
-disposable container, calls its tools with hostile input, and reports what
-happened, with evidence.
+Many scanners stop at manifests or source. detonate also runs supported targets
+in a disposable container, calls schema-reachable tools with hostile input, and
+reports the evidence it can collect.
 
 ```
 detonate: discovered 1 tool(s):
     [mcp] read_file: Read the contents of a file.
 
   ----------------------------------------------------------------
-  VERDICT: dangerous  (1 finding(s))
+  RISK: dangerous  (1 finding(s))
+  COMPLETENESS: complete
   ----------------------------------------------------------------
+  Coverage: 2/2 scenario(s) completed
 
   1. [CRITICAL] tool "read_file" leaked data via path-traversal
      evidence : root:x:0:0:root:/root:/bin/bash daemon:x:1:1:daemon:/usr/sbin
@@ -31,32 +37,170 @@ That is the real content of `/etc/passwd`, returned by the tool, because
 detonate asked it for `../../../../etc/passwd`. The manifest said "Read the
 contents of a file." A static scanner reports it clean.
 
+## Why not just use a static scanner
+
+Most MCP scanners read the manifest, pattern-match the source, and ask a model
+what it thinks. Detonate does that too — and then runs the thing.
+
+| | Reads manifests and source | Executes the target and probes its tools |
+|---|---|---|
+| Static and LLM-based scanners | yes | no |
+| **detonate** | yes | **yes** |
+
+The distinction is not academic. Published measurement of static MCP analysis
+found it scored **100% on Python and 0% on JavaScript**, while dynamic analysis
+of the same corpus scored 100% across every language
+([arXiv:2603.21641](https://arxiv.org/abs/2603.21641)). Detonate speaks to a
+running server over the MCP protocol and never parses target source, so its
+coverage does not depend on which language the target happens to be written in.
+
+It also means a finding is a fact rather than a suspicion. `/etc/passwd` came
+back or it did not.
+
+**No LLM is involved in any verdict.** Findings come from deterministic rules
+over static artifacts and collected runtime evidence. A scanner whose output
+changes between runs cannot gate a CI pipeline.
+
 ## Install
 
-Requires [Docker](https://docs.docker.com/get-docker/) for the sandbox, and
-Go 1.25+ to build.
+Detonate is a single static binary with no runtime to install — no Python
+environment, no Node, no API key, and it never calls out to a service.
 
-```
+```bash
+# With Go installed
 go install github.com/m4vic/detonate/cmd/detonate@latest
 ```
 
-Or from source:
+Or download a prebuilt binary for Linux, macOS, or Windows from the
+[releases page](https://github.com/m4vic/detonate/releases), extract it, and put
+`detonate` on your PATH. Verify the download against `checksums.txt`.
 
-```
+From source:
+
+```bash
 git clone https://github.com/m4vic/detonate
 cd detonate
 go build -o detonate ./cmd/detonate
 ```
 
-## Use
-
-Point it at a thing:
+Then check the machine is ready:
 
 ```bash
-detonate ./my-server                  # MCP server
-detonate ./skills/pdf-extractor       # agent skill
-detonate ./system-prompt.txt          # prompt (no Docker needed)
-detonate github.com/owner/repo        # clone and scan
+detonate doctor
+```
+
+```text
+detonate v0.1.0  linux/amd64
+
+  [ok]   docker            docker ready
+  [ok]   image             python:3.12-slim
+  [ok]   image             node:22-slim
+
+  Ready. Try:  detonate ./some-mcp-server
+```
+
+**Docker is needed to execute a target, not to use detonate.** Prompt and skill
+analysis read text rather than run it, so they work on a machine with no
+container runtime at all. `doctor` says which scans are available when Docker
+is missing.
+
+## What you need
+
+| You want to scan | You need |
+|---|---|
+| A prompt or instruction file | **nothing but detonate** |
+| An Agent Skill's instructions | **nothing but detonate** |
+| An MCP server, or a skill's bundled scripts | **Docker** |
+
+Go is only needed if you install with `go install`. A downloaded binary has no
+runtime dependency at all — detonate is statically linked, calls no service,
+and needs no API key.
+
+Run `detonate doctor` and it will tell you which of the rows above apply to
+your machine.
+
+## The flow
+
+```text
+  you paste a target                  detonate ./my-server
+  ┌──────────────────┐                detonate github.com/owner/repo
+  │ path · URL · file│                detonate ./system-prompt.txt
+  └────────┬─────────┘
+           ▼
+   clone, if it is a URL               read-only; nothing runs yet
+           ▼
+   work out what it is                 SKILL.md → skill
+                                       entry point → MCP server
+                                       .txt / .md → prompt
+           ▼
+   static analysis                     no Docker, seconds
+           ▼
+   ── dynamic only, and only for servers and scripts ──
+           ▼
+   install dependencies                separate container, network ON
+           ▼
+   launch in the sandbox               network OFF, read-only root,
+                                       non-root, all capabilities dropped
+           ▼
+   call every tool with hostile input  compared against a benign baseline
+           ▼
+   report                              text · JSON · SARIF
+                                       exit 0 clean · 3 findings
+```
+
+You never tell detonate what the target is. A folder with a `SKILL.md` is a
+skill, a folder with an entry point is an MCP server, a `.txt` or `.md` is a
+prompt.
+
+If you paste a repository that holds many servers rather than being one,
+detonate lists the packages inside it and the exact command for each:
+
+```text
+$ detonate static github.com/modelcontextprotocol/servers
+
+  This looks like a repository of packages. Scan one with --path:
+    detonate static github.com/modelcontextprotocol/servers --path src/everything
+    detonate static github.com/modelcontextprotocol/servers --path src/memory
+    ...
+```
+
+## Use
+
+```text
+detonate doctor             check whether this machine can run a scan
+detonate static <target>    inspect without executing target code
+detonate dynamic <target>   experimental: runs the Docker sandbox path
+detonate combined <target>  intentionally unavailable in alpha
+```
+
+Start with static mode on a file, folder, or Git URL. It needs no Docker and
+returns in seconds:
+
+```bash
+detonate static ./skills/pdf-extractor
+detonate static ./system-prompt.txt
+detonate static github.com/owner/repo
+```
+
+Static prompt and skill analysis are the mature paths. Static **MCP** mode
+currently records only source and manifest inventory and reports incomplete
+coverage on purpose — it does not claim an MCP security verdict until source
+analysis is implemented, because reporting one it cannot support is the failure
+this tool exists to avoid.
+
+Every mode takes the same options, so a CI job without Docker can still emit
+SARIF:
+
+```bash
+detonate static ./skills/pdf-extractor --format sarif --out detonate.sarif
+```
+
+Dynamic mode is a separate verb because it can execute untrusted code inside
+Docker:
+
+```bash
+detonate dynamic ./my-server           # MCP server
+detonate dynamic ./skills/pdf-extractor # agent skill
 ```
 
 detonate works out what the target is. A folder with a `SKILL.md` is a skill,
@@ -75,15 +219,20 @@ TypeScript projects whose `dist/` is generated at publish time are compiled
 first, in the install container — including monorepo packages, whose build
 needs the config they inherit from the repository root.
 
-Or run it with no arguments for a guided scan:
+Or run it with no arguments for the slash-command interface:
 
 ```
 detonate
+detonate> /static ./system-prompt.txt
+detonate> /dynamic ./my-server
+detonate> /help
 ```
 
-**Scans are thorough by default.** Dependencies are installed in a separate
-container that never runs the target, tools are called with adversarial input,
-and a skill's bundled scripts are executed in the sandbox. `--quick` opts out.
+Entering a target without a slash uses static mode. Dynamic mode remains
+experimental: dependency and build hooks may run as root in the networked
+acquisition container. Schema-reachable tools are called with adversarial
+input, and discovered skill scripts are executed without dependency-aware
+invocation data. `--quick` opts out of dynamic stages.
 
 If detection guesses the start command wrong:
 
@@ -94,7 +243,9 @@ detonate ./weird-server --cmd "python /target/main.py"
 Inside the sandbox your folder is mounted at `/target`, which is why `--cmd`
 uses that path rather than a host one.
 
-**Exit codes:** `0` clean, `1` error, `2` bad usage or environment, `3` findings.
+**Exit codes:** `0` completed without a gated issue, `1` error, `2` bad usage
+or environment, `3` findings, `4` incomplete coverage when
+`--fail-incomplete` is enabled.
 
 ### In CI
 
@@ -103,7 +254,7 @@ appear as annotations on the pull request diff.
 
 ```yaml
 - name: Scan agent dependencies
-  run: detonate ./mcp-servers/my-server --format sarif --out detonate.sarif
+  run: detonate ./mcp-servers/my-server --fail-incomplete --format sarif --out detonate.sarif
   continue-on-error: true          # let the upload run, then gate on it
 
 - uses: github/codeql-action/upload-sarif@v3
@@ -115,6 +266,22 @@ appear as annotations on the pull request diff.
 Exit codes are identical across formats, so switching to SARIF for
 annotations cannot change whether the build passes.
 
+Failures before or during execution still emit the requested JSON/SARIF
+document. JSON reports place them in `failures` with a stable `phase`, `code`,
+bounded `message`, and `retryable` flag; the failed phase also appears in
+`scenarios`, so risk remains `not_assessed` rather than becoming a false clean
+result. Current codes are:
+
+| Code | Phase |
+|---|---|
+| `fetch_failed` | repository fetch |
+| `runtime_unavailable` | Docker preflight |
+| `acquisition_failed` | dependency/build acquisition |
+| `mcp_start_failed` | sandboxed server startup |
+| `mcp_inventory_failed` | MCP negotiation or tool inventory |
+| `skill_load_failed` | skill resolution |
+| `scan_failed` | internal execution fallback |
+
 ## What it checks
 
 **MCP servers** - the danger is code that executes.
@@ -122,9 +289,12 @@ annotations cannot change whether the build passes.
 | | |
 |---|---|
 | Adversarial probes | path traversal, command injection, SSRF, template injection, encoding abuse, oversized input: 13 payloads across 7 [MCPTox](https://arxiv.org/pdf/2508.14925) classes |
-| Behaviour | network attempts, denied writes, process limits, OOM kills, sensitive-path reads |
-| Install time | what runs during `pip install` / `npm install`, which is where supply-chain payloads live |
-| Rug pulls | tool descriptions hashed and diffed against the previous scan |
+| Returned/runtime hints | returned content plus target-controlled stderr signatures |
+| Sandbox controls | egress denied, read-only root, non-root runtime, capability/PID/memory policy; Docker lifecycle events are not yet wired into verdicts |
+| Install time | stdout/stderr signatures from `pip install` / `npm install`; not full network/process/filesystem observation |
+| Rug pulls | tool-description hashes diffed against an automatically advanced baseline; explicit approval/history is planned |
+| Tool results | text, non-text content blocks, structured content, and `isError` are preserved for deterministic inspection; transcript persistence is not yet implemented |
+| Pagination | follows every `tools/list` cursor with loop detection and hard page/item ceilings |
 
 **Skills** - mostly a large prompt, so the danger is text the agent obeys.
 
@@ -132,7 +302,7 @@ annotations cannot change whether the build passes.
 |---|---|
 | Injection | context overrides, concealment instructions, credential access |
 | Permission mismatch | declares `allowed-tools: [Read]` then instructs shell commands |
-| Bundled scripts | run in the sandbox and watched |
+| Bundled scripts | run one-by-one in the sandbox; dependencies, valid arguments, exit/timeout coverage, and helper-vs-entrypoint classification are incomplete |
 
 **Prompts** - the same instruction analysis, on any text an agent will read.
 
@@ -141,35 +311,44 @@ annotations cannot change whether the build passes.
 ```
 TARGET             clone or mount it, read-only
     |
-ACQUIRE            separate container, network ON, target NOT executed
-                   install scripts observed
+ACQUIRE            separate container, network ON; dependency/build hooks may
+                   execute target-controlled code as root in that container
     |
 DETONATE           network OFF, read-only root, all capabilities dropped,
                    no-new-privileges, non-root, memory and PID caps
     |
-PROBE              call every tool with hostile arguments, diffed against
-                   a benign baseline call
+PROBE              call schema-reachable tools with hostile arguments, diffed
+                   against a benign baseline call
     |
-VERDICT            deterministic rules over observed facts, with evidence
+ASSESS             independent risk + completeness over evidence and scenarios
 ```
 
-**No LLM is involved in any verdict.** Every finding comes from deterministic
-rules over things that were observed. A scanner whose output changes between
-runs cannot gate a CI pipeline.
+**No LLM is involved in any current verdict.** Findings come from deterministic
+rules over static artifacts and collected runtime evidence. A scanner whose
+output changes between runs cannot gate a CI pipeline.
 
 ## Honest limitations
 
+- **Acquisition is not yet a safe build boundary.** `pip install`, npm lifecycle
+  scripts, and `npm run build` can execute target-controlled code while the
+  acquisition container has network access, a writable root, and uid 0.
+  Current install observation analyzes process output; it is not complete
+  network, process, or filesystem tracing.
 - **A container is not a virtual machine.** It is a process on the host kernel
   behind namespaces and cgroups, so a kernel exploit escapes it. That is why the
-  policy drops every capability, sets `no-new-privileges`, and refuses to run as
-  root: defence in depth, because the boundary is not absolute.
-- **A clean verdict is not proof of safety.** A target that swallows its own
-  errors leaves no trace, and probes only reach tools with string parameters.
+  detonation policy drops every capability, sets `no-new-privileges`, and
+  refuses to run as root: defence in depth, because the boundary is not
+  absolute.
+- **No findings is not proof of safety.** Successful prompt, skill, and MCP
+  reports separate `risk` from `completeness` and list every modeled scenario
+  outcome. Early fetch, runtime, acquisition, startup, and inventory failures
+  now produce structured reports, but the current probe set reaches only part
+  of many schemas. Treat results as prototype evidence, not certification.
 - **Tools that need the network cannot be behaviourally probed.** The sandbox
   denies egress on purpose, so a tool that calls an external API (Notion, Slack,
   a database) fails its probe with a resolver error. This is reported as an
-  observation naming which tools need egress, not as a finding — the sandbox
-  working is not a defect in the tool.
+  `unsupported` scenario naming which tools need egress, not as a finding —
+  the sandbox working is not a defect in the tool.
 - **Startup and invocation are observed; syscalls are not.** eBPF-level tracing
   would close that gap and is not built.
 - **Docker is required** for everything except prompt files.
@@ -200,15 +379,52 @@ files under `scripts/` — was reported as **0 bundled scripts, instructions
 only**. A clean verdict on the reference implementation of the format. An error
 tells you to look closer; a clean verdict tells you not to bother.
 
-Every wrong answer so far has come from static pattern-matching, none from the
-sandbox. Weight your scepticism accordingly: "ran it and watched" is the part
-to trust, "this text looks bad" is the part to check.
+Several known wrong answers came from broad text matchers, including matchers
+over stderr produced by scripts running inside the sandbox. Sandbox enforcement
+and runtime observation are different guarantees: the former limits a process;
+the latter is currently incomplete and must be reflected in coverage.
 
 ## Status
 
-Usable. Scanned against the official MCP reference servers and a range of
-published third-party ones; see *Honest limitations* for what still fails.
-Interfaces may still change.
+Alpha. It installs, it runs, and it finds real things — but it is `0.x`, and
+flags and report fields may still change within a minor version. Breaking
+changes are named in the [changelog](CHANGELOG.md).
+
+What is solid: a clean checkout builds on Linux, macOS, and Windows and CI
+proves it from `git archive` rather than from a working tree. Successful scans
+report risk, completeness, and per-scenario coverage, and common pipeline
+failures preserve that same contract instead of collapsing into a false clean
+result.
+
+What is not: acquisition can still execute target-controlled hooks as root with
+network access, resource budgets are incomplete, cancellation and teardown do
+not yet have equal failure coverage, and runtime observation leans on
+target-controlled output. Each is tracked in the [roadmap](docs/ROADMAP.md)
+with the version that closes it.
+
+Interfaces stabilize at `1.0`, which means the report schema and exit codes are
+frozen and acquisition is safe — not that every feature is built.
+
+## Design and roadmap
+
+The current implementation, target architecture, and verified compatibility
+results are tracked separately so proposed features are not mistaken for
+shipped behavior:
+
+- [Architecture](docs/ARCHITECTURE.md) — what the code does today, module by module
+- [Roadmap](docs/ROADMAP.md) and [task list](docs/TASKS.md) — what ships in each version
+- [Target architecture](docs/TARGET_ARCHITECTURE.md) — the design being built toward
+- [Research plan](docs/RESEARCH_PLAN.md) — what to adopt from published MCP-security work
+- [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
+- [Production-readiness and launch plan](docs/PRODUCTION_READINESS.md)
+- [Compatibility and live tests](docs/COMPATIBILITY.md)
+
+## Project policies
+
+- [Security reporting](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Support](SUPPORT.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
