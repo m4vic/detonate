@@ -1,0 +1,12 @@
+{
+  "name": "benign-file-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Safe MCP file server. The false-positive control for vulnerable-file-server.",
+  "bin": {
+    "benign-file-server": "index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

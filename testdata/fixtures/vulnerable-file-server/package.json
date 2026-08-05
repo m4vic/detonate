@@ -1,0 +1,12 @@
+{
+  "name": "vulnerable-file-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deliberately vulnerable MCP server used to demonstrate detonate. Not for any other use.",
+  "bin": {
+    "vulnerable-file-server": "index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

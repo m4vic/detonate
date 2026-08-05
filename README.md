@@ -104,6 +104,21 @@ analysis read text rather than run it, so they work on a machine with no
 container runtime at all. `doctor` says which scans are available when Docker
 is missing.
 
+## See it work
+
+Two fixtures ship with the repository: the same tool, the same description, and
+opposite verdicts.
+
+```bash
+detonate dynamic ./testdata/fixtures/vulnerable-file-server   # dangerous, exit 3
+detonate dynamic ./testdata/fixtures/benign-file-server       # no findings, exit 0
+```
+
+The first is the scan at the top of this page. The second reads the filesystem
+too, and is safe — it is there because catching a flaw only means something if
+the tool does not also flag the code that does the same job correctly. See
+[testdata/fixtures](testdata/fixtures/).
+
 ## What you need
 
 | You want to scan | You need |
