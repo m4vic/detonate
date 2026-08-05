@@ -32,9 +32,14 @@ Legend: **P0** release/safety blocker · **P1** required for trustworthy release
 - [ ] **P2/S** `doctor` also reports free disk for image pulls and volumes
 - [ ] **P1/M** Release binaries: GoReleaser → GitHub Releases + checksums
       — *check:* three OS artifacts download and run
-- [ ] **P2/S** Homebrew tap and Scoop bucket
-- [ ] **P2/S** README quickstart rewritten around the evidence line, with a
+- [x] **P2/S** Homebrew formula and Scoop manifest written
+      — *check:* names match the release workflow's artifacts exactly; JSON parses
+- [ ] **P2/S** Create `m4vic/homebrew-tap` and `m4vic/scoop-bucket`, fill in the
+      SHA-256 placeholders from `checksums.txt`, then advertise both in the README
+      — *check:* `brew install m4vic/tap/detonate` works on a clean machine
+- [x] **P2/S** README quickstart rewritten around the evidence line, with a
       comparison table naming which scanners execute the target and which do not
+      — *check:* every command in the README was run against the built binary
 - [ ] **P1/S** Tag `v0.1.0`
       — *check:* fresh machine, install → first real result, under five minutes
 
