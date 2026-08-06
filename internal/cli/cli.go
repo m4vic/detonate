@@ -27,6 +27,7 @@ import (
 	"github.com/m4vic/detonate/internal/baseline"
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/fetch"
+	"github.com/m4vic/detonate/internal/quality"
 	"github.com/m4vic/detonate/internal/report"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/scan"
@@ -446,7 +447,16 @@ func (a *App) execute(
 	if a.format != "json" && a.format != "sarif" {
 		a.printTools(tools)
 	}
-	return a.report(tr)
+	code := a.report(tr)
+
+	// Design and cost come after the verdict and never change it. Printed
+	// only for a human: a machine-readable run is a security gate, and
+	// interleaving advisory notes into that stream would let a style note be
+	// mistaken for a finding.
+	if a.format != "json" && a.format != "sarif" && len(tools) > 0 {
+		a.printQuality(quality.AnalyzeMCP(tools))
+	}
+	return code
 }
 
 // scanPrompt analyses a prompt or instruction file.

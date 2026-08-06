@@ -11,6 +11,7 @@ import (
 
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/fetch"
+	"github.com/m4vic/detonate/internal/quality"
 	"github.com/m4vic/detonate/internal/skill"
 	"github.com/m4vic/detonate/internal/trace"
 )
@@ -194,7 +195,18 @@ func (a *App) scanStaticSkill(detected Detected) int {
 	a.scanScenarios = []assessment.ScenarioResult{{
 		ID: "skill.static", Required: true, Outcome: outcome,
 	}}
-	return a.report(tr)
+	code := a.report(tr)
+
+	if a.format != "json" && a.format != "sarif" {
+		a.printQuality(quality.AnalyzeSkill(quality.SkillInput{
+			Name:         sk.Name,
+			Description:  sk.Description,
+			AllowedTools: sk.AllowedTools,
+			Body:         sk.Body,
+			Scripts:      sk.Scripts,
+		}))
+	}
+	return code
 }
 
 func (a *App) scanStaticMCP(detected Detected) int {
