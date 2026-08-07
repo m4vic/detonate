@@ -1,3 +1,4 @@
+# detonate
 <p align="center">
   <img src="docs/assets/demo.gif" width="820" alt="Detonate demo — dynamic sandbox running against a malicious MCP server">
 </p>
@@ -9,7 +10,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/m4vic/detonate?style=for-the-badge&color=00c6ff" alt="License"></a>
 </p>
 
-# detonate
 
 > **This project is constantly evolving and is currently not production-grade.**
 > Detonate can have bugs, false
