@@ -95,7 +95,7 @@ func (a *App) runInteractive(ctx context.Context) int {
 		}
 
 		rl, err := readline.NewEx(&readline.Config{
-			Prompt:          "\n  detonate> ",
+			Prompt:          "  detonate> ",
 			Stdin:           stdinCloser,
 			Stdout:          output,
 			Stderr:          a.Stderr,
@@ -105,6 +105,7 @@ func (a *App) runInteractive(ctx context.Context) int {
 		if err == nil {
 			defer rl.Close()
 			var lastCode int = exitOK
+			fmt.Fprintln(output)
 			for {
 				line, err := rl.Readline()
 				if err != nil {
@@ -119,9 +120,11 @@ func (a *App) runInteractive(ctx context.Context) int {
 				}
 				if line == "/help" {
 					fmt.Fprint(output, modeUsage)
+					fmt.Fprintln(output)
 					continue
 				}
 				lastCode = a.dispatchInteractiveLine(ctx, line)
+				fmt.Fprintln(output)
 			}
 			return lastCode
 		}
@@ -133,17 +136,20 @@ func (a *App) runInteractive(ctx context.Context) int {
 func (a *App) runInteractiveFallback(ctx context.Context, input io.Reader, output io.Writer) int {
 	in := bufio.NewReader(input)
 	var lastCode int = exitOK
+	fmt.Fprintln(output)
 	for {
-		line := a.ask(in, "\n  detonate> ", "")
+		line := a.ask(in, "  detonate> ", "")
 		line = strings.TrimSpace(line)
 		if line == "" || line == "/exit" || line == "/quit" {
 			break
 		}
 		if line == "/help" {
 			fmt.Fprint(output, modeUsage)
+			fmt.Fprintln(output)
 			continue
 		}
 		lastCode = a.dispatchInteractiveLine(ctx, line)
+		fmt.Fprintln(output)
 	}
 	return lastCode
 }
