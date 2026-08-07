@@ -4,10 +4,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/m4vic/detonate/stargazers"><img src="https://img.shields.io/github/stars/m4vic/detonate?style=for-the-badge&color=00f2fe" alt="Stars"></a>
-  <a href="https://github.com/m4vic/detonate/network/members"><img src="https://img.shields.io/github/forks/m4vic/detonate?style=for-the-badge&color=4facfe" alt="Forks"></a>
-  <a href="https://github.com/m4vic/detonate/releases"><img src="https://img.shields.io/github/v/release/m4vic/detonate?style=for-the-badge&color=7f00ff" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/m4vic/detonate?style=for-the-badge&color=00c6ff" alt="License"></a>
+  <img src="https://img.shields.io/github/license/m4vic/detonate" alt="License">
+  <a href="https://github.com/m4vic/detonate/stargazers"><img src="https://img.shields.io/github/stars/m4vic/detonate" alt="Stars"></a>
+  <a href="https://github.com/m4vic/detonate/network/members"><img src="https://img.shields.io/github/forks/m4vic/detonate" alt="Forks"></a>
+  <img src="https://img.shields.io/github/last-commit/m4vic/detonate" alt="Last Commit">
+  <img src="https://img.shields.io/github/v/tag/m4vic/detonate" alt="Version">
 </p>
 
 
