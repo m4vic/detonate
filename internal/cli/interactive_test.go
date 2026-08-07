@@ -165,3 +165,24 @@ func TestGuessCommand(t *testing.T) {
 		t.Errorf("guessCommand(empty dir) = %q, want empty so the user is asked", got)
 	}
 }
+
+func TestREPLMultipleCommands(t *testing.T) {
+	dir1 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir1, "SKILL.md"), []byte("---\nname: s1\ndescription: d1\n---\nBody1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir2, "SKILL.md"), []byte("---\nname: s2\ndescription: d2\n---\nBody2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, out, _ := wizardApp(true)
+	// Send two scans in sequence, then exit
+	app.Stdin = strings.NewReader(dir1 + "\n" + dir2 + "\n/exit\n")
+	app.runInteractive(context.Background())
+
+	output := out.String()
+	if count := strings.Count(output, "Coverage: 1/1 scenario(s) completed"); count != 2 {
+		t.Errorf("REPL failed to process both commands sequentially (scanned %d times):\n%s", count, output)
+	}
+}

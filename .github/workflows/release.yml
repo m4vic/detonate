@@ -1,121 +1,32 @@
 name: Release
 
-# Tagging is the trigger, so cutting a release is `git tag v0.1.0 && git push
-# --tags`. Nothing manual, and the binaries always match the tagged commit.
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
 
 permissions:
-  contents: write # needed to create the release and upload assets
+  contents: write
 
 jobs:
-  verify:
+  goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          cache: true
 
-      - name: Verify release inputs are tracked
-        run: git ls-files --error-unmatch cmd/detonate/main.go
-
-      - name: Format
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needed on:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -race -count=1 -timeout 25m ./...
-
-      - name: Confirm Docker was available
-        run: docker version
-
-  build:
-    needs: verify
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
-          go-version: '1.25'
-          cache: true
-
-      # One Go toolchain cross-compiles every target. No Docker images, no
-      # per-platform runners, no C dependencies to reconcile — this is the
-      # concrete payoff for the language choice.
-      - name: Build all platforms
-        run: |
-          mkdir -p dist
-          VERSION="${GITHUB_REF_NAME}"
-          LDFLAGS="-s -w -X github.com/m4vic/detonate/internal/cli.Version=${VERSION}"
-
-          build() {
-            local os=$1 arch=$2 ext=$3
-            local name="detonate-${VERSION}-${os}-${arch}"
-            echo "building ${name}"
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
-              go build -trimpath -ldflags "$LDFLAGS" -o "dist/detonate${ext}" ./cmd/detonate
-            # tar for Unix, zip for Windows: each platform's users should get
-            # the archive their tools open without extra software.
-            if [ "$ext" = ".exe" ]; then
-              (cd dist && zip -q "${name}.zip" detonate.exe && rm detonate.exe)
-            else
-              (cd dist && tar -czf "${name}.tar.gz" detonate && rm detonate)
-            fi
-          }
-
-          build linux   amd64 ""
-          build linux   arm64 ""
-          build darwin  amd64 ""
-          build darwin  arm64 ""
-          build windows amd64 ".exe"
-
-          # Checksums so a download can be verified. A security tool that
-          # cannot be checked for tampering is asking for trust it has not
-          # earned.
-          (cd dist && sha256sum * > checksums.txt)
-          ls -la dist
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-          body: |
-            ## Install
-
-            Download the archive for your platform below, extract it, and put
-            `detonate` on your PATH.
-
-            **Linux / macOS**
-            ```bash
-            tar -xzf detonate-*-linux-amd64.tar.gz
-            sudo mv detonate /usr/local/bin/
-            detonate --version
-            ```
-
-            **Windows** — extract the `.zip` and place `detonate.exe` anywhere
-            on your PATH.
-
-            **With Go installed**
-            ```bash
-            go install github.com/m4vic/detonate/cmd/detonate@${{ github.ref_name }}
-            ```
-
-            Verify your download against `checksums.txt`.
-
-            ## Requirements
-
-            Docker, for the sandbox. Everything except `--prompt` needs it.
+          distribution: goreleaser
+          version: '~> 2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

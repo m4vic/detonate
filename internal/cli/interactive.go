@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/chzyer/readline"
 	"github.com/m4vic/detonate/internal/acquire"
 )
 
@@ -26,13 +28,16 @@ import (
 // rather than reread the docs.
 
 const banner = `
-  ____      _                   _
- |  _ \  ___| |_ ___  _ __   __ _| |_ ___
- | | | |/ _ \ __/ _ \| '_ \ / _' | __/ _ \
- | |_| |  __/ || (_) | | | | (_| | ||  __/
- |____/ \___|\__\___/|_| |_|\__,_|\__\___|
-
- Run untrusted AI tools in a sandbox. Report what they actually do.
+ +----------------------------------------------------------------------------+
+ |                                                                            |
+ |   ___  ____ _____ ___  _   _    _  _____ _____                             |
+ |  |  _ \| ____|_   _/ _ \| \ | |  / \|_   _| ____|                            |
+ |  | | | |  _|   | || | | |  \| | / _ \ | | |  _|                              |
+ |  | |_| | |___  | || |_| | |\  |/ ___ \| | | |___                             |
+ |  |____/|_____| |_| \___/|_| \_/_/   \_\_| |_____|                            |
+ |                                                                            |
+ |  Dynamic Sandbox for Untrusted AI Tools & MCP Servers | v0.2.0-alpha       |
+ +----------------------------------------------------------------------------+
 `
 
 // entryPoints are the filenames an MCP server's entry point usually has,
@@ -52,49 +57,130 @@ var entryPoints = []struct {
 	{"build/index.js", "node /target/build/index.js"},
 }
 
-// runInteractive drives the wizard and returns a process exit code.
+// runInteractive drives the REPL wizard and returns a process exit code.
 func (a *App) runInteractive(ctx context.Context) int {
 	input := a.Stdin
 	if input == nil {
 		input = os.Stdin
 	}
+	output := a.Stdout
+	if output == nil {
+		output = os.Stdout
+	}
+
+	fmt.Fprint(output, banner)
+	fmt.Fprintln(output, "  alpha: /static is safe by default; /dynamic is experimental.")
+	fmt.Fprintln(output, "  Commands: /static <target>, /dynamic <target>, /combined <target>, /help, /exit")
+	fmt.Fprintln(output, "  Paste a target without a slash to use /static.")
+
+	var stdinCloser io.ReadCloser
+	if rc, ok := input.(io.ReadCloser); ok {
+		stdinCloser = rc
+	} else {
+		stdinCloser = io.NopCloser(input)
+	}
+
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "\n  detonate> ",
+		Stdin:           stdinCloser,
+		Stdout:          output,
+		Stderr:          a.Stderr,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		// Fallback to simple bufio if readline fails to initialize (e.g. invalid terminal)
+		return a.runInteractiveFallback(ctx, input, output)
+	}
+	defer rl.Close()
+
+	var lastCode int = exitOK
+
+	for {
+		line, err := rl.Readline()
+		if err != nil { // io.EOF or readline.ErrInterrupt
+			break
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == "/exit" || line == "/quit" {
+			return exitOK
+		}
+		if line == "/help" {
+			fmt.Fprint(output, modeUsage)
+			continue
+		}
+
+		lastCode = a.dispatchInteractiveLine(ctx, line)
+	}
+
+	return lastCode
+}
+
+func (a *App) runInteractiveFallback(ctx context.Context, input io.Reader, output io.Writer) int {
 	in := bufio.NewReader(input)
-	fmt.Fprint(a.Stdout, banner)
-	fmt.Fprintln(a.Stdout, "  alpha: /static is safe by default; /dynamic is experimental.")
-	fmt.Fprintln(a.Stdout, "  Commands: /static <target>, /dynamic <target>, /combined <target>, /help, /exit")
-	fmt.Fprintln(a.Stdout, "  Paste a target without a slash to use /static.")
+	var lastCode int = exitOK
+	for {
+		line := a.ask(in, "\n  detonate> ", "")
+		line = strings.TrimSpace(line)
+		if line == "" || line == "/exit" || line == "/quit" {
+			break
+		}
+		if line == "/help" {
+			fmt.Fprint(output, modeUsage)
+			continue
+		}
+		lastCode = a.dispatchInteractiveLine(ctx, line)
+	}
+	return lastCode
+}
 
-	line := strings.TrimSpace(a.ask(in, "\n  detonate> ", ""))
-	if line == "" || line == "/exit" || line == "/quit" {
+func (a *App) dispatchInteractiveLine(ctx context.Context, line string) int {
+	// Strip optional "detonate" or "detonate.exe" prefix if typed in REPL
+	line = strings.TrimPrefix(line, "detonate.exe ")
+	line = strings.TrimPrefix(line, "detonate ")
+	line = strings.TrimSpace(line)
+
+	if line == "" {
 		return exitOK
 	}
-	if line == "/help" {
-		fmt.Fprint(a.Stdout, modeUsage)
+
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
 		return exitOK
 	}
-	// A Unix absolute path also begins with '/'. Treat only a non-path slash
-	// prefix as a command so `/tmp/server` remains a usable target in Linux
-	// containers and CI, while Windows users still get the familiar commands.
-	if !strings.HasPrefix(line, "/") || filepath.IsAbs(line) {
-		// No --path here: the wizard takes a bare target. A monorepo is
-		// reported with the exact commands that reach its packages, which is
-		// the answer the user needs anyway.
-		return a.scanStatic(ctx, strings.Trim(line, `"'`), "")
+
+	cmd := fields[0]
+
+	// Handle slash or word subcommands (/static, static, /dynamic, dynamic, /combined, combined)
+	switch cmd {
+	case "/static", "static":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.Stderr, "usage: /static <target> [options]")
+			return exitUsage
+		}
+		return a.runStatic(ctx, fields[1:])
+	case "/dynamic", "dynamic":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.Stderr, "usage: /dynamic <target> [options]")
+			return exitUsage
+		}
+		return a.runDynamic(ctx, fields[1:])
+	case "/combined", "combined":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.Stderr, "usage: /combined <target> [options]")
+			return exitUsage
+		}
+		return a.runCombined(fields[1:])
+	case "doctor":
+		return a.doctor(ctx)
 	}
 
-	command := strings.Fields(line)[0]
-	target := interactiveTarget(line, command)
-	switch command {
-	case "/static":
-		return a.runStatic(ctx, []string{target})
-	case "/dynamic":
-		return a.runDynamic(ctx, []string{target})
-	case "/combined":
-		return a.runCombined([]string{target})
-	default:
-		fmt.Fprintf(a.Stderr, "unknown command %q; use /help\n", command)
-		return exitUsage
-	}
+	// If no subcommand was specified, default to static mode with all args passed
+	return a.runStatic(ctx, fields)
 }
 
 func (a *App) interactiveSkill(in *bufio.Reader, ctx context.Context) int {

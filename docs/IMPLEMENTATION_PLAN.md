@@ -1,6 +1,11 @@
 # Detonate implementation plan
 
-Status: implementation in progress, 2026-07-30.
+Status: implementation in progress, 2026-07-30. **Superseded for current
+state and near-term priorities by [STATUS.md](../STATUS.md) and
+[PRODUCTION_GRADE.md](../PRODUCTION_GRADE.md) at the repository root** —
+those are checked against the running binary as of 2026-08-05; `v0.1.0` is
+tagged and this document's "not release-ready" framing below is stale.
+This file remains the record of the longer-horizon architectural phases.
 
 This plan implements [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md). It is
 ordered to stop false confidence and release failures before adding features.
@@ -13,7 +18,7 @@ The focused scenario contract for activating and testing MCP tools, Agent
 Skills, prompts, and optional LLM replays is in
 [TEST_SCENARIO_PLAN.md](TEST_SCENARIO_PLAN.md).
 
-## 1. Current evidence
+## 1. Current evidence (historical — see STATUS.md for current)
 
 The repository is a useful prototype with meaningful sandbox and protocol test
 coverage, but it is not release-ready.

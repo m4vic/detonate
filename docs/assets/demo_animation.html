@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Detonate Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  .terminal {
+    width: 900px;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.08);
+    background: #0d1117;
+  }
+  .titlebar {
+    background: #161b22;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid #30363d;
+  }
+  .dot { width: 13px; height: 13px; border-radius: 50%; }
+  .red   { background: #ff5f57; }
+  .yellow{ background: #ffbd2e; }
+  .green { background: #28c941; }
+  .title-label {
+    margin-left: 12px;
+    color: #8b949e;
+    font-size: 13px;
+  }
+  .screen {
+    padding: 20px 24px 28px;
+    min-height: 480px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: #c9d1d9;
+    overflow: hidden;
+  }
+  .line { display: block; white-space: pre; opacity: 0; }
+  .prompt { color: #58a6ff; }
+  .cmd    { color: #e6edf3; }
+  .path   { color: #ffa657; }
+  .comment{ color: #8b949e; }
+  .ok     { color: #56d364; }
+  .bad    { color: #f85149; }
+  .warn   { color: #e3b341; }
+  .muted  { color: #8b949e; }
+  .bold   { font-weight: 700; color: #e6edf3; }
+  .cyan   { color: #79c0ff; }
+  .rule   { color: #30363d; }
+
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes cursorBlink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+  .cursor {
+    display: inline-block;
+    width: 9px; height: 14px;
+    background: #58a6ff;
+    vertical-align: text-bottom;
+    animation: cursorBlink 1s infinite;
+    margin-left: 2px;
+  }
+</style>
+</head>
+<body>
+<div class="terminal">
+  <div class="titlebar">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+    <span class="title-label">detonate — Dynamic Sandbox for AI Tools</span>
+  </div>
+  <div class="screen" id="screen"></div>
+</div>
+
+<script>
+const lines = [
+  { text: '$ detonate dynamic github.com/my-org/my-mcp-server', cls: 'prompt', delay: 600 },
+  { text: '', delay: 200 },
+  { text: ' +------------------------------------------------------------------------+', cls: 'rule', delay: 100 },
+  { text: ' |   ___  ____ _____ ___  _   _    _  _____ _____                        |', cls: 'cyan', delay: 40 },
+  { text: ' |  |  _ \\| ____|_   _/ _ \\| \\ | |  / \\|_   _| ____|                   |', cls: 'cyan', delay: 40 },
+  { text: ' |  | | | |  _|   | || | | |  \\| | / _ \\ | | |  _|                     |', cls: 'cyan', delay: 40 },
+  { text: ' |  | |_| | |___  | || |_| | |\\  |/ ___ \\| | | |___                    |', cls: 'cyan', delay: 40 },
+  { text: ' |  |____/|_____| |_| \\___/|_| \\_/_/   \\_\\_| |_____|                   |', cls: 'cyan', delay: 40 },
+  { text: ' |                                                                        |', cls: 'rule', delay: 40 },
+  { text: ' |  Dynamic Sandbox for Untrusted AI Tools & MCP Servers | v0.2.0-alpha  |', cls: 'muted', delay: 40 },
+  { text: ' +------------------------------------------------------------------------+', cls: 'rule', delay: 100 },
+  { text: '', delay: 300 },
+  { text: '  cloned  https://github.com/my-org/my-mcp-server', cls: 'ok', delay: 100 },
+  { text: '  target  ./my-mcp-server', cls: 'muted', delay: 80 },
+  { text: '  type    MCP server (package.json detected)', cls: 'muted', delay: 80 },
+  { text: '  start   node /target/dist/index.js', cls: 'muted', delay: 80 },
+  { text: '', delay: 200 },
+  { text: '  [1/2] installing node deps (network ON, isolated container)...', cls: 'warn', delay: 100 },
+  { text: '  built   running from /deps/app', cls: 'ok', delay: 600 },
+  { text: '  [2/2] launching in sandbox (network OFF, read-only root, no capabilities)...', cls: 'warn', delay: 100 },
+  { text: '  probing 3 tool(s) with 13 adversarial payload(s)...', cls: 'muted', delay: 800 },
+  { text: '', delay: 100 },
+  { text: '  discovered 3 tool(s):', cls: 'bold', delay: 100 },
+  { text: '    [mcp] read_file:    Read the contents of a file.', cls: 'muted', delay: 150 },
+  { text: '    [mcp] write_file:   Write content to a file at a given path.', cls: 'muted', delay: 150 },
+  { text: '    [mcp] run_command:  Execute a shell command and return its output.', cls: 'muted', delay: 150 },
+  { text: '', delay: 300 },
+  { text: '  ----------------------------------------------------------------', cls: 'rule', delay: 50 },
+  { text: '  RISK: dangerous  (2 finding(s))', cls: 'bad', delay: 100 },
+  { text: '  COMPLETENESS: complete', cls: 'ok', delay: 80 },
+  { text: '  ----------------------------------------------------------------', cls: 'rule', delay: 80 },
+  { text: '  Coverage: 8/8 scenario(s) completed', cls: 'ok', delay: 100 },
+  { text: '', delay: 150 },
+  { text: '  1. [CRITICAL] tool "read_file" leaked data via path-traversal', cls: 'bad', delay: 100 },
+  { text: '     evidence : root:x:0:0:root:/root:/bin/bash daemon:x:1:1:...', cls: 'muted', delay: 80 },
+  { text: '     observed : +2ms during probe:path-traversal on read_file', cls: 'muted', delay: 80 },
+  { text: '     source   : probe-response', cls: 'muted', delay: 80 },
+  { text: '', delay: 100 },
+  { text: '  2. [CRITICAL] tool "run_command" executed injected shell command', cls: 'bad', delay: 100 },
+  { text: '     evidence : uid=0(root) gid=0(root) groups=0(root)', cls: 'muted', delay: 80 },
+  { text: '     observed : +5ms during probe:command-injection on run_command', cls: 'muted', delay: 80 },
+  { text: '     source   : probe-response', cls: 'muted', delay: 80 },
+  { text: '', delay: 150 },
+  { text: '  ----------------------------------------------------------------', cls: 'rule', delay: 50 },
+  { text: '', delay: 400 },
+  { text: '$ ', cls: 'prompt', delay: 0, cursor: true },
+];
+
+const screen = document.getElementById('screen');
+let totalDelay = 800;
+
+lines.forEach((item) => {
+  const span = document.createElement('span');
+  span.className = 'line ' + (item.cls || '');
+  if (item.cursor) {
+    span.innerHTML = item.text + '<span class="cursor"></span>';
+  } else {
+    span.textContent = item.text;
+  }
+  screen.appendChild(span);
+
+  totalDelay += item.delay;
+  const d = totalDelay;
+  setTimeout(() => {
+    span.style.animation = 'fadeIn 0.15s ease forwards';
+    span.style.opacity = '1';
+  }, d);
+});
+</script>
+</body>
+</html>
