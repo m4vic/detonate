@@ -73,51 +73,61 @@ func (a *App) runInteractive(ctx context.Context) int {
 	fmt.Fprintln(output, "  Commands: /static <target>, /dynamic <target>, /combined <target>, /help, /exit")
 	fmt.Fprintln(output, "  Paste a target without a slash to use /static.")
 
-	var stdinCloser io.ReadCloser
-	if rc, ok := input.(io.ReadCloser); ok {
-		stdinCloser = rc
-	} else {
-		stdinCloser = io.NopCloser(input)
+	// Only use readline (with its internal goroutines and terminal raw-mode) when
+	// stdin really is a terminal. In CI, during tests, or when input is piped the
+	// reader will be a *strings.Reader or *os.File (non-TTY); in those cases
+	// readline's goroutines can touch fd state that the race detector flags.
+	// The bufio fallback is functionally identical for non-interactive callers.
+	isRealTerminal := false
+	if f, ok := input.(*os.File); ok {
+		info, err := f.Stat()
+		if err == nil {
+			isRealTerminal = info.Mode()&os.ModeCharDevice != 0
+		}
 	}
 
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "\n  detonate> ",
-		Stdin:           stdinCloser,
-		Stdout:          output,
-		Stderr:          a.Stderr,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-	})
-	if err != nil {
-		// Fallback to simple bufio if readline fails to initialize (e.g. invalid terminal)
-		return a.runInteractiveFallback(ctx, input, output)
+	if isRealTerminal {
+		var stdinCloser io.ReadCloser
+		if rc, ok := input.(io.ReadCloser); ok {
+			stdinCloser = rc
+		} else {
+			stdinCloser = io.NopCloser(input)
+		}
+
+		rl, err := readline.NewEx(&readline.Config{
+			Prompt:          "\n  detonate> ",
+			Stdin:           stdinCloser,
+			Stdout:          output,
+			Stderr:          a.Stderr,
+			InterruptPrompt: "^C",
+			EOFPrompt:       "exit",
+		})
+		if err == nil {
+			defer rl.Close()
+			var lastCode int = exitOK
+			for {
+				line, err := rl.Readline()
+				if err != nil {
+					break
+				}
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				if line == "/exit" || line == "/quit" {
+					return exitOK
+				}
+				if line == "/help" {
+					fmt.Fprint(output, modeUsage)
+					continue
+				}
+				lastCode = a.dispatchInteractiveLine(ctx, line)
+			}
+			return lastCode
+		}
 	}
-	defer rl.Close()
 
-	var lastCode int = exitOK
-
-	for {
-		line, err := rl.Readline()
-		if err != nil { // io.EOF or readline.ErrInterrupt
-			break
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if line == "/exit" || line == "/quit" {
-			return exitOK
-		}
-		if line == "/help" {
-			fmt.Fprint(output, modeUsage)
-			continue
-		}
-
-		lastCode = a.dispatchInteractiveLine(ctx, line)
-	}
-
-	return lastCode
+	return a.runInteractiveFallback(ctx, input, output)
 }
 
 func (a *App) runInteractiveFallback(ctx context.Context, input io.Reader, output io.Writer) int {
