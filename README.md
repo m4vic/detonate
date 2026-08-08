@@ -18,16 +18,16 @@
 > certification. Use disposable test targets, never provide real secrets, and
 > read the full [disclaimer](DISCLAIMER.md) before running dynamic scans.
 
-**Run untrusted AI tools in a sandbox and report what they actually do, not what
-their manifest claims.**
+## Why Detonate Exists: The Problem First
 
-You install an MCP server from GitHub. It runs on your machine, with your
-permissions, and your AI assistant calls its tools automatically. Nobody reads
-the code first.
+Today, thousands of developers install Model Context Protocol (MCP) servers and AI Agent Skills from GitHub directly onto their local systems. They run with **your local user permissions**, and your AI assistant invokes their tools automatically behind the scenes. 
 
-Many scanners stop at manifests or source. detonate also runs supported targets
-in a disposable container, calls schema-reachable tools with hostile input, and
-reports the evidence it can collect.
+Most people install these tools without considering the consequences:
+- **Nobody reads the code first.**
+- **Unbounded execution:** An MCP server running locally has access to your local filesystem, environment variables, and network.
+- **Manifests can lie:** Static scanners check manifests and source code to see what a tool *claims* to do. They cannot show what happens when the tool receives unexpected or hostile inputs.
+
+**Detonate was built to solve this problem first:** instead of trusting claims, Detonate launches untrusted MCP servers and skills in a disposable, air-gapped sandbox (no network, read-only root, dropped capabilities) and actively probes their tools with adversarial payloads to prove what they *actually* do before you run them on your system.
 
 ```
 detonate: discovered 1 tool(s):
