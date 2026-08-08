@@ -28,6 +28,7 @@ type Session struct {
 	session   *mcp.ClientSession
 	cancel    context.CancelFunc
 	command   string
+	mounts    []sandbox.Mount
 }
 
 // OpenSession launches a target in the sandbox and keeps the session open.
@@ -74,7 +75,17 @@ func OpenSession(
 		return nil, err
 	}
 
-	return &Session{container: c, session: sess, cancel: cancel, command: command}, nil
+	return &Session{container: c, session: sess, cancel: cancel, command: command, mounts: mounts}, nil
+}
+
+// TargetDir returns the host target directory path mounted to /target.
+func (s *Session) TargetDir() string {
+	for _, m := range s.mounts {
+		if m.ContainerPath == "/target" {
+			return m.HostPath
+		}
+	}
+	return ""
 }
 
 // Tools lists what the target offers.

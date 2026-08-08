@@ -48,11 +48,81 @@ type Result struct {
 	Scenarios []assessment.ScenarioResult
 }
 
+// Probe defines a security scanner check targeting a tool.
+type Probe interface {
+	Name() string
+	Category() Category
+	Payloads() []Payload
+	Evaluate(ctx context.Context, tool string, p Payload, result toolcall.Result, callErr error, beforeStderr, afterStderr, baselineStderr string) []trace.Event
+}
+
+// GenericProbe is a default implementation of the Probe interface.
+type GenericProbe struct {
+	category Category
+	list     []Payload
+}
+
+func (g *GenericProbe) Name() string        { return string(g.category) }
+func (g *GenericProbe) Category() Category  { return g.category }
+func (g *GenericProbe) Payloads() []Payload { return g.list }
+
+func (g *GenericProbe) Evaluate(ctx context.Context, tool string, p Payload, result toolcall.Result, callErr error, beforeStderr, afterStderr, baselineStderr string) []trace.Event {
+	var events []trace.Event
+	during := fmt.Sprintf("probe:%s on %s", p.Category, tool)
+
+	// 1. Did the RESPONSE prove the payload worked?
+	if ev := checkResponse(tool, p, result.SearchableText(), during); ev != nil {
+		events = append(events, *ev)
+	}
+
+	// 2. Did the target BEHAVE differently than on the benign call?
+	if delta := strings.TrimPrefix(afterStderr, beforeStderr); delta != "" && !containedIn(delta, baselineStderr) {
+		for _, ev := range monitor.Analyze(delta, during) {
+			ev.Detail = withPayload(ev.Detail, p, tool)
+			events = append(events, ev)
+		}
+	}
+
+	// 3. A crash under hostile input is itself a result.
+	if callErr != nil && isCrash(callErr) {
+		events = append(events, trace.Event{
+			Kind: trace.KindProtocol, Severity: trace.SeverityNotable, At: time.Now(),
+			Summary: fmt.Sprintf("tool %q crashed on %s input", tool, p.Category),
+			During:  during, Source: "probe-engine",
+			Detail: map[string]any{
+				"evidence": clip(callErr.Error(), 200),
+				"payload":  clip(p.Value, 80),
+				"why":      p.Why,
+			},
+		})
+	}
+
+	return events
+}
+
+// GetDefaultProbes returns the standard set of security probes grouped by category.
+func GetDefaultProbes() []Probe {
+	grouped := make(map[Category][]Payload)
+	for _, p := range payloads {
+		grouped[p.Category] = append(grouped[p.Category], p)
+	}
+
+	var list []Probe
+	for cat, listPayloads := range grouped {
+		list = append(list, &GenericProbe{
+			category: cat,
+			list:     listPayloads,
+		})
+	}
+	return list
+}
+
 // RunWithResults probes every tool and records one terminal scenario result
 // per tool, including tools that cannot be reached by the current payload set.
 func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration) Result {
 	var events []trace.Event
 	var scenarios []assessment.ScenarioResult
+	probes := GetDefaultProbes()
 
 	for i, tool := range tools {
 		scenario := assessment.ScenarioResult{
@@ -129,66 +199,39 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 		baseline = c.Stderr() // after the benign call: this is "normal"
 
-		for _, p := range payloads {
-			select {
-			case <-ctx.Done():
-				scenario.Outcome = assessment.OutcomeTimeout
-				scenario.Reason = ctx.Err().Error()
-				scenarios = append(scenarios, scenario)
-				for _, pending := range tools[i+1:] {
-					scenarios = append(scenarios, assessment.ScenarioResult{
-						ID:       scenariodef.MCPToolID(pending.Name),
-						Required: true,
-						Outcome:  assessment.OutcomeSkipped,
-						Reason:   "scan cancelled before scenario started",
-					})
+		for _, pr := range probes {
+			for _, p := range pr.Payloads() {
+				select {
+				case <-ctx.Done():
+					scenario.Outcome = assessment.OutcomeTimeout
+					scenario.Reason = ctx.Err().Error()
+					scenarios = append(scenarios, scenario)
+					for _, pending := range tools[i+1:] {
+						scenarios = append(scenarios, assessment.ScenarioResult{
+							ID:       scenariodef.MCPToolID(pending.Name),
+							Required: true,
+							Outcome:  assessment.OutcomeSkipped,
+							Reason:   "scan cancelled before scenario started",
+						})
+					}
+					return Result{Events: events, Scenarios: scenarios}
+				default:
 				}
-				return Result{Events: events, Scenarios: scenarios}
-			default:
-			}
 
-			before := c.Stderr()
-			result, err := c.Call(ctx, tool.Name, argsFor(params, p.Value))
-			after := c.Stderr()
+				before := c.Stderr()
+				result, err := c.Call(ctx, tool.Name, argsFor(params, p.Value))
+				after := c.Stderr()
 
-			during := fmt.Sprintf("probe:%s on %s", p.Category, tool.Name)
+				probeEvents := pr.Evaluate(ctx, tool.Name, p, result, err, before, after, baseline)
+				events = append(events, probeEvents...)
 
-			// 1. Did the RESPONSE prove the payload worked?
-			if ev := checkResponse(
-				tool.Name, p, result.SearchableText(), during,
-			); ev != nil {
-				events = append(events, *ev)
-			}
-
-			// 2. Did the target BEHAVE differently than on the benign call?
-			//
-			// Diffing against the baseline is what keeps this honest: a
-			// server that always writes the same warning produces no finding,
-			// while one that reaches for the network only under a traversal
-			// path produces a very specific one.
-			if delta := strings.TrimPrefix(after, before); delta != "" && !containedIn(delta, baseline) {
-				for _, ev := range monitor.Analyze(delta, during) {
-					ev.Detail = withPayload(ev.Detail, p, tool.Name)
-					events = append(events, ev)
+				if ctx.Err() != nil {
+					scenario.Outcome = assessment.OutcomeTimeout
+					scenario.Reason = ctx.Err().Error()
+					break
 				}
 			}
-
-			// 3. A crash under hostile input is itself a result.
-			if err != nil && isCrash(err) {
-				events = append(events, trace.Event{
-					Kind: trace.KindProtocol, Severity: trace.SeverityNotable, At: time.Now(),
-					Summary: fmt.Sprintf("tool %q crashed on %s input", tool.Name, p.Category),
-					During:  during, Source: "probe-engine",
-					Detail: map[string]any{
-						"evidence": clip(err.Error(), 200),
-						"payload":  clip(p.Value, 80),
-						"why":      p.Why,
-					},
-				})
-			}
-			if ctx.Err() != nil {
-				scenario.Outcome = assessment.OutcomeTimeout
-				scenario.Reason = ctx.Err().Error()
+			if scenario.Outcome == assessment.OutcomeTimeout {
 				break
 			}
 		}
