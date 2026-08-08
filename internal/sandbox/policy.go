@@ -76,6 +76,16 @@ type Policy struct {
 	// here: the target reads its own environment, so anything placed in it is
 	// handed directly to untrusted code.
 	Env map[string]string
+
+	// NetworkProxy, when set, routes the container's traffic through an
+	// intercepting proxy rather than applying --network none. This allows
+	// MCP servers that require network access to run while still monitoring
+	// outbound requests for data exfiltration (e.g. canary tokens leaking
+	// to an external host). Empty means strict network-off (default).
+	//
+	// Not yet implemented: this field is a configuration placeholder for the
+	// v1.0.0 intercepting-proxy feature.
+	NetworkProxy string
 }
 
 // DefaultPolicy is the posture every scan gets unless deliberately relaxed.
