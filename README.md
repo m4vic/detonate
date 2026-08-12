@@ -74,7 +74,6 @@ over static artifacts and collected runtime evidence. A scanner whose output
 changes between runs cannot gate a CI pipeline.
 
 ## Install
-
 Detonate is a single static binary with no runtime to install — no Python
 environment, no Node, no API key, and it never calls out to a service.
 
