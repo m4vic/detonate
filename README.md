@@ -18,7 +18,7 @@
 > certification. Use disposable test targets, never provide real secrets, and
 > read the full [disclaimer](DISCLAIMER.md) before running dynamic scans.
 
-## Why Detonate Exists: 
+## Why Detonate:
 
 Today, thousands of developers install Model Context Protocol (MCP) servers and AI Agent Skills from GitHub directly onto their local systems. They run with **your local user permissions**, and your AI assistant invokes their tools automatically behind the scenes. 
 
