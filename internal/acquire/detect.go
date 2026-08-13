@@ -408,7 +408,10 @@ func (m Manifest) fetchCommand(depsDir, sub string) []string {
 			"mkdir -p " + app,
 			"mkdir -p " + depsDir + "/cache/npm",
 			"export npm_config_cache=" + depsDir + "/cache/npm",
-			"cp -a /target/. " + app + "/",
+			// The fetch container runs as non-root. Preserve modes and timestamps,
+			// but not ownership from the read-only host mount: GNU cp's archive mode
+			// attempts chown(2) and fails on Linux runners.
+			"cp -R --preserve=mode,timestamps --no-preserve=ownership /target/. " + app + "/",
 			"rm -rf " + app + "/node_modules " + app + "/.git",
 			`cd "$1"`,
 			install,

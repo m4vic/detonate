@@ -235,7 +235,7 @@ func TestBuildAcquisitionCommands(t *testing.T) {
 
 	// The whole project must move into the volume: a build writes next to the
 	// source, and /target is a read-only host mount.
-	if !strings.Contains(fetch, "cp -a /target/. /deps/app/") {
+	if !strings.Contains(fetch, "cp -R --preserve=mode,timestamps --no-preserve=ownership /target/. /deps/app/") {
 		t.Errorf("fetch must copy the project into the volume: %q", fetch)
 	}
 	if strings.Contains(fetch, "npm run build") {
@@ -311,7 +311,7 @@ func TestBuildContextClimbsToTheInheritedConfig(t *testing.T) {
 			fetchCommand, offlineCommand)
 	}
 	// The copy still starts at the root so the inherited config comes along.
-	if !strings.Contains(fetch, "cp -a /target/. /deps/app/") {
+	if !strings.Contains(fetch, "cp -R --preserve=mode,timestamps --no-preserve=ownership /target/. /deps/app/") {
 		t.Errorf("copy must start at the build root: %q", fetch)
 	}
 }
