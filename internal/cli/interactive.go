@@ -36,9 +36,14 @@ const banner = `
  |  | |_| | |___  | || |_| | |\  |/ ___ \| | | |___                             |
  |  |____/|_____| |_| \___/|_| \_/_/   \_\_| |_____|                            |
  |                                                                            |
- |  Dynamic Sandbox for Untrusted AI Tools & MCP Servers | v0.2.0-alpha       |
+ |  Dynamic Sandbox for Untrusted AI Tools & MCP Servers |{{VERSION_LINE}}|
  +----------------------------------------------------------------------------+
 `
+
+func bannerText() string {
+	versionLine := fmt.Sprintf(" %-17s", Version)
+	return strings.Replace(banner, "{{VERSION_LINE}}", versionLine, 1)
+}
 
 // entryPoints are the filenames an MCP server's entry point usually has,
 // in the order we guess. Ordering matters: a project with both server.py and
@@ -69,7 +74,7 @@ func (a *App) runInteractive(ctx context.Context) int {
 	}
 	_ = a.configureColor(colorAuto, "text")
 
-	fmt.Fprint(output, a.heading(banner))
+	fmt.Fprint(output, a.heading(bannerText()))
 	fmt.Fprintln(output, a.warning("  ALPHA")+"  /static reads artifacts; /dynamic executes only inside Docker.")
 	fmt.Fprintln(output, a.heading("  COMMANDS")+"  /static <target>  /dynamic <target>  /report <dir>  /help  /exit")
 	fmt.Fprintln(output, a.muted("  Paste a target without a slash to use /static."))

@@ -290,7 +290,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	// SARIF stream. Printed before RunTarget can silence output, so the check
 	// has to happen here.
 	if opt.format == "" || opt.format == "text" {
-		fmt.Fprint(a.Stdout, banner)
+		fmt.Fprint(a.Stdout, bannerText())
 		fmt.Fprintln(a.Stdout)
 	}
 	if args[0] == "-" {
