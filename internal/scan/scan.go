@@ -29,9 +29,9 @@ import (
 // execution, never more — which is the right direction for a package whose job
 // is running untrusted code.
 type Stages struct {
-	// Install runs the target's package manager first, in a separate
-	// container that has network access. Target-controlled lifecycle and
-	// build hooks may execute there.
+	// Install fetches dependencies in a separate networked container with
+	// scripts disabled, then runs target-controlled lifecycle/build hooks in an
+	// offline non-root container.
 	Install bool
 
 	// Probe calls every schema-reachable tool with adversarial arguments.
@@ -68,11 +68,23 @@ type Report struct {
 	Tools     []toolinfo.ToolInfo
 	Trace     *trace.Trace
 	Scenarios []assessment.ScenarioResult
+	Failures  []Failure
 
 	// Reference is the start command actually used. Acquisition can rewrite
 	// it: a TypeScript project's entry point does not exist on disk until its
 	// build has run, so what finally launched is not always what was detected.
 	Reference string
+}
+
+// Failure is a structured pipeline failure that occurred after enough of the
+// scan completed to return a report. Keeping it beside the scenarios lets the
+// CLI serialize teardown failures without turning them into findings or
+// discarding the evidence already collected.
+type Failure struct {
+	Phase     string
+	Code      string
+	Message   string
+	Retryable bool
 }
 
 // Progress reports pipeline milestones as they happen.
@@ -114,6 +126,13 @@ func (e *Error) Unwrap() error { return e.Err }
 func targetError(phase, code string, retryable bool, err error) error {
 	return &Error{
 		Phase: phase, Code: code, Outcome: assessment.OutcomeTargetError,
+		Retryable: retryable, Err: err,
+	}
+}
+
+func harnessError(phase, code string, retryable bool, err error) error {
+	return &Error{
+		Phase: phase, Code: code, Outcome: assessment.OutcomeHarnessError,
 		Retryable: retryable, Err: err,
 	}
 }

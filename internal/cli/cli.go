@@ -23,8 +23,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/baseline"
+	"github.com/m4vic/detonate/internal/bundle"
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/fetch"
 	"github.com/m4vic/detonate/internal/report"
@@ -39,11 +41,25 @@ import (
 // Version is overwritten at build time by release linker flags. For binaries
 // installed with `go install`, the initialization fallback uses Go's module build
 // metadata so the binary does not report the unhelpful "dev" value.
-var Version = "dev"
+var (
+	Version       = "dev"
+	Commit        = "unknown"
+	BuildModified bool
+)
 
 func init() {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		Version = versionFromBuildInfo(Version, info.Main.Version)
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if Commit == "unknown" && setting.Value != "" {
+					Commit = setting.Value
+				}
+			case "vcs.modified":
+				BuildModified = setting.Value == "true"
+			}
+		}
 	}
 }
 
@@ -90,6 +106,11 @@ type App struct {
 	format         string
 	outFile        string
 	failIncomplete bool
+	colorMode      string
+	colorEnabled   bool
+	saveRequested  bool
+	saveDir        string
+	saveFinalized  bool
 
 	// docOut is where the JSON or SARIF document goes once progress output has
 	// been silenced. Without it the document would be written to the same
@@ -102,6 +123,14 @@ type App struct {
 	scanTools     []toolinfo.ToolInfo
 	scanScenarios []assessment.ScenarioResult
 	scanFailures  []report.Failure
+
+	// Provenance is persisted only in opt-in bundles. A URL and subpath name
+	// what the user requested; the revision and image name the immutable code
+	// and runtime that actually produced the evidence.
+	scanRepositoryURL string
+	scanSubpath       string
+	scanRevision      string
+	scanSandboxImage  string
 
 	// scanIdentity names the thing being scanned, for baseline purposes only.
 	//
@@ -136,15 +165,17 @@ Usage:
   detonate <target>     Scan a folder, a file, or a repository URL
   detonate              Guided scan
   detonate doctor       Check whether this machine can run a scan
+  detonate report <dir> Render a saved report without rescanning
   detonate static <target>   Static-only inspection (alpha)
   detonate dynamic <target>  Sandboxed execution (experimental)
 
 detonate works out what the target is: a folder with SKILL.md is a skill, a
 folder with an entry point is an MCP server, a .txt or .md file is a prompt.
 
-Scans attempt dynamic checks by default. Dependency and build hooks may execute
-target-controlled code in the networked acquisition container; schema-reachable
-tools are called with adversarial input, and skill scripts run in the sandbox.
+Scans attempt dynamic checks by default. Dependencies fetch with scripts
+disabled; target-controlled install/build hooks run offline and non-root.
+Schema-reachable tools receive adversarial input, and skill scripts run in the
+sandbox.
 
 Options:
   --cmd <command>    Command that starts the server, if detection got it wrong
@@ -157,6 +188,9 @@ Options:
   --fail-incomplete  Exit 4 when required coverage is incomplete
   --format <format>  Output format: text, json, or sarif
   --out <file>       Write machine-readable output to a file
+  --color <mode>     Terminal color: auto, always, or never
+  --save             Save a bounded report bundle after the scan
+  --save-dir <dir>   Save the bundle at this directory (implies --save)
 
 Examples:
   detonate ./my-server
@@ -205,9 +239,15 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		a.scanTools = nil
 		a.scanFailures = nil
 		a.scanTarget = ""
+		a.scanRepositoryURL = ""
+		a.scanSubpath = ""
+		a.scanRevision = ""
+		a.scanSandboxImage = ""
 		return a.scan(ctx, args[1:])
 	case "doctor":
 		return a.doctor(ctx)
+	case "report":
+		return a.runSavedReport(args[1:])
 	case "scenario":
 		return a.runScenario(args[1:])
 	case "static":
@@ -233,6 +273,10 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitUsage
 	}
+	if err := a.configureColor(opt.color, opt.format); err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
+		return exitUsage
+	}
 	if args[0] == "-" {
 		switch opt.format {
 		case "", "text", "json", "sarif":
@@ -256,6 +300,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		a.outFile = opt.out
 		a.failIncomplete = opt.failIncomplete
 		a.scanTarget = "stdin"
+		a.configureSave(opt.save, opt.saveDir)
 		if (a.format == "json" || a.format == "sarif") && a.outFile == "" {
 			a.docOut = a.Stdout
 			a.Stdout = io.Discard
@@ -263,6 +308,23 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.scanStdinPrompt()
 	}
 	return a.RunTarget(ctx, args[0], opt)
+}
+
+func (a *App) runSavedReport(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Stderr, "detonate: report requires one saved bundle directory")
+		return exitUsage
+	}
+	_, scan, err := bundle.Load(args[0])
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: cannot load report: %s\n", terminalSafe(err.Error()))
+		return exitFailure
+	}
+	fmt.Fprint(a.Stdout, bundle.Text(scan))
+	// Replay the stored scan's semantic exit — the same computation the live
+	// report uses — so a saved report with findings or failed completeness never
+	// replays as a clean exit 0 that a CI gate would accept.
+	return a.exitForScan(scan)
 }
 
 func (a *App) printUsage() {
@@ -286,7 +348,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	gitURL := fs.String("git", "", "Clone a repository and scan it (e.g. github.com/owner/repo).")
 	subPath := fs.String("path", "", "Sub-directory inside the cloned repo to scan.")
 	mountDir := fs.String("dir", "", "Host directory holding the MCP server, mounted read-only at /target in the sandbox.")
-	install := fs.Bool("install", false, "Install the target's dependencies first, in a separate network-enabled container.")
+	install := fs.Bool("install", false, "Fetch dependencies inertly, then install/build them offline and non-root.")
 	doProbe := fs.Bool("probe", false, "Call each discovered tool with adversarial arguments and watch what it does.")
 	runScripts := fs.Bool("run-scripts", false, "Run a skill's bundled scripts in the sandbox and watch them.")
 	noBaseline := fs.Bool("no-baseline", false, "Skip comparing against the previous scan of this target.")
@@ -297,8 +359,15 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	}
 	outputFormat := fs.String("format", defaultFormat, "Output format: text, json, or sarif.")
 	outputFile := fs.String("out", a.outFile, "Write machine-readable output to this file.")
+	colorMode := fs.String("color", colorAuto, "Terminal color: auto, always, or never.")
+	save := fs.Bool("save", false, "Save a bounded report bundle after the scan.")
+	saveDir := fs.String("save-dir", "", "Save the report bundle at this directory (implies --save).")
 
 	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if err := a.configureColor(*colorMode, *outputFormat); err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
 		return exitUsage
 	}
 	switch *outputFormat {
@@ -311,6 +380,7 @@ func (a *App) scan(ctx context.Context, args []string) int {
 	a.format = *outputFormat
 	a.outFile = *outputFile
 	a.failIncomplete = *failIncomplete || a.failIncomplete
+	a.configureSave(*save, *saveDir)
 	if a.scanTarget == "" {
 		switch {
 		case *gitURL != "":
@@ -347,6 +417,11 @@ func (a *App) scan(ctx context.Context, args []string) int {
 				assessment.OutcomeTargetError, true, err, exitFailure)
 		}
 		defer fetched.Cleanup()
+		a.scanRepositoryURL = fetched.Source
+		a.scanSubpath = filepath.ToSlash(*subPath)
+		a.scanRevision = fetched.Revision
+		a.scanTarget = remoteTargetIdentity(fetched.Source, *subPath)
+		a.scanIdentity = a.scanTarget
 
 		root, err := fetched.SubDir(*subPath)
 		if err != nil {
@@ -394,23 +469,30 @@ func (a *App) execute(
 	stages scan.Stages,
 	useBaseline bool,
 ) int {
-	// Pre-flight. Executing anything untrusted requires a sandbox, so the gate
-	// is enforced before the pipeline is entered rather than discovered inside
-	// it, where a partial scan would already have started.
-	status := a.CheckDocker(ctx)
-	if !status.Ready() {
-		return a.failScan("runtime", "runtime_unavailable",
-			assessment.OutcomeHarnessError, true,
-			fmt.Errorf("%s; Docker is required to sandbox untrusted code",
-				status.Detail), exitUsage)
-	}
+	requiresDocker := tgt.Kind == target.KindMCP || stages.Install ||
+		stages.Probe || stages.RunScripts
+	if requiresDocker {
+		a.scanSandboxImage = sandbox.DefaultImage
+		if stages.Install && mountDir != "" {
+			manifest := acquire.Detect(mountDir)
+			a.scanSandboxImage = acquire.ImageFor(manifest.Ecosystem, a.scanSandboxImage)
+		}
+		// Pre-flight only when a selected stage can execute target code. A skill
+		// with no bundled scripts has no executable surface, so treating a
+		// stopped Docker daemon as a harness failure would contradict reality.
+		status := a.CheckDocker(ctx)
+		if !status.Ready() {
+			return a.failScan("runtime", "runtime_unavailable",
+				assessment.OutcomeHarnessError, true,
+				fmt.Errorf("%s; Docker is required to sandbox untrusted code; run 'detonate doctor' for setup details",
+					status.Detail), exitUsage)
+		}
 
-	// Clear anything a previous run leaked. A scan that died hard (SIGKILL,
-	// power loss, a panic of ours) leaves a container with no client attached,
-	// and the whole promise of this tool is that untrusted code does not
-	// outlive the scan.
-	if n := sandbox.ReapOrphans(ctx); n > 0 {
-		fmt.Fprintf(a.Stdout, "  cleaned up %d orphaned container(s) from a previous run\n", n)
+		// Clear anything a previous run leaked. A scan that died hard (SIGKILL,
+		// power loss, a panic of ours) leaves a container with no client attached.
+		if n := sandbox.ReapOrphans(ctx); n > 0 {
+			fmt.Fprintf(a.Stdout, "  cleaned up %d orphaned container(s) from a previous run\n", n)
+		}
 	}
 
 	result, err := scan.Run(ctx, scan.Request{
@@ -422,6 +504,7 @@ func (a *App) execute(
 		return a.failPipeline(err)
 	}
 	tools, tr, scenarios := result.Tools, result.Trace, result.Scenarios
+	a.recordScanFailures(result.Failures)
 
 	// Compare against the last scan of this target. Every other check here is
 	// a snapshot, and a snapshot cannot detect a rug pull by definition — a
@@ -447,6 +530,16 @@ func (a *App) execute(
 		a.printTools(tools)
 	}
 	return a.report(tr)
+}
+
+func (a *App) recordScanFailures(failures []scan.Failure) {
+	for _, failure := range failures {
+		a.scanFailures = append(a.scanFailures, report.Failure{
+			Phase: failure.Phase, Code: failure.Code,
+			Message:   normalizeFailureMessage(failure.Message),
+			Retryable: failure.Retryable,
+		})
+	}
 }
 
 // scanPrompt analyses a prompt or instruction file.
@@ -546,13 +639,31 @@ func (a *App) report(tr *trace.Trace) int {
 	// to it: a caller asking for JSON is piping it somewhere, and decorative
 	// text mixed into the stream would break that.
 	if a.format == "json" || a.format == "sarif" {
-		return a.reportMachine(tr)
+		return a.finalizeReport(tr, a.reportMachine(tr))
 	}
 
 	if tr == nil {
-		fmt.Fprintln(a.Stdout, "  no behavioural trace collected "+
-			"(this target kind is not executed yet)")
-		return exitOK
+		if len(a.scanScenarios) == 0 && len(a.scanFailures) == 0 {
+			fmt.Fprintln(a.Stdout, "  no behavioural trace collected "+
+				"(this target kind is not executed yet)")
+			return a.finalizeReport(tr, exitOK)
+		}
+		summary := assessment.Summarize(nil, a.scanScenarios)
+		const rule = "  ----------------------------------------------------------------"
+		fmt.Fprintf(a.Stdout, "\n%s\n", a.heading(rule))
+		fmt.Fprintf(a.Stdout, "  RISK: %s\n", a.riskText(string(summary.Risk)))
+		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", a.completenessText(string(summary.Completeness)))
+		for _, failure := range a.scanFailures {
+			fmt.Fprintf(a.Stdout, "  FAILURE: %s\n",
+				a.danger(failure.Phase+"/"+failure.Code))
+		}
+		fmt.Fprintf(a.Stdout, "%s\n", a.heading(rule))
+		a.printCoverage()
+		for _, failure := range a.scanFailures {
+			fmt.Fprintf(a.Stdout, "  %s %s\n", a.warning("[LIMIT]"),
+				terminalSafe(failure.Message))
+		}
+		return a.finalizeReport(tr, a.exitForSummary(summary))
 	}
 	summary := assessment.Summarize(tr.Events, a.scanScenarios)
 
@@ -579,19 +690,19 @@ func (a *App) report(tr *trace.Trace) int {
 	const rule = "  ----------------------------------------------------------------"
 
 	if len(findings) == 0 {
-		fmt.Fprintf(a.Stdout, "\n%s\n", rule)
-		fmt.Fprintf(a.Stdout, "  RISK: %s\n", summary.Risk)
-		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", summary.Completeness)
+		fmt.Fprintf(a.Stdout, "\n%s\n", a.heading(rule))
+		fmt.Fprintf(a.Stdout, "  RISK: %s\n", a.riskText(string(summary.Risk)))
+		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", a.completenessText(string(summary.Completeness)))
 		fmt.Fprintln(a.Stdout, "  No findings were observed in the scenarios that completed.")
-		fmt.Fprintf(a.Stdout, "%s\n", rule)
+		fmt.Fprintf(a.Stdout, "%s\n", a.heading(rule))
 		a.printCoverage()
 		a.printObservations(observations)
 		// Say the limit out loud. A scanner that lets "we found nothing" be
 		// read as "this is safe" is worse than no scanner, because it converts
 		// ignorance into false confidence.
-		fmt.Fprintln(a.Stdout, "  Note: no findings is not proof of safety; inspect completeness")
+		fmt.Fprintln(a.Stdout, a.warning("  [NOTE]")+" no findings is not proof of safety; inspect completeness")
 		fmt.Fprintln(a.Stdout, "  and the scenario outcomes before trusting this result.")
-		return a.exitForSummary(summary)
+		return a.finalizeReport(tr, a.exitForSummary(summary))
 	}
 
 	verdict := "suspicious"
@@ -599,23 +710,27 @@ func (a *App) report(tr *trace.Trace) int {
 		verdict = "dangerous"
 	}
 
-	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
-	fmt.Fprintf(a.Stdout, "  RISK: %s  (%d finding(s))\n", verdict, len(findings))
-	fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", summary.Completeness)
-	fmt.Fprintf(a.Stdout, "%s\n", rule)
+	fmt.Fprintf(a.Stdout, "\n%s\n", a.heading(rule))
+	fmt.Fprintf(a.Stdout, "  RISK: %s  (%d finding(s))\n", a.riskText(verdict), len(findings))
+	fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", a.completenessText(string(summary.Completeness)))
+	fmt.Fprintf(a.Stdout, "%s\n", a.heading(rule))
 	a.printCoverage()
 
 	for i, e := range findings {
-		fmt.Fprintf(a.Stdout, "\n  %d. [%s] %s\n", i+1, strings.ToUpper(string(e.Severity)), e.Summary)
+		findingLabel := a.warning("[FINDING]")
+		if e.Severity == trace.SeverityCritical {
+			findingLabel = a.danger("[FINDING]")
+		}
+		fmt.Fprintf(a.Stdout, "\n  %s %d  [%s] %s\n", findingLabel, i+1, strings.ToUpper(string(e.Severity)), terminalSafe(e.Summary))
 		if ev, ok := e.Detail["evidence"].(string); ok && ev != "" {
-			fmt.Fprintf(a.Stdout, "     evidence : %s\n", ev)
+			fmt.Fprintf(a.Stdout, "     %s %s\n", a.muted("evidence :"), terminalSafe(ev))
 		}
 		fmt.Fprintf(a.Stdout, "     observed : +%dms during %s\n", e.Elapsed.Milliseconds(), orDash(e.During))
 		fmt.Fprintf(a.Stdout, "     source   : %s\n", e.Source)
 	}
 	a.printObservations(observations)
-	fmt.Fprintf(a.Stdout, "\n%s\n", rule)
-	return exitFindings
+	fmt.Fprintf(a.Stdout, "\n%s\n", a.heading(rule))
+	return a.finalizeReport(tr, exitFindings)
 }
 
 func (a *App) printCoverage() {
@@ -626,7 +741,7 @@ func (a *App) printCoverage() {
 			completed++
 		}
 	}
-	fmt.Fprintf(a.Stdout, "  Coverage: %d/%d scenario(s) completed\n",
+	fmt.Fprintf(a.Stdout, "  %s: %d/%d scenario(s) completed\n", a.heading("Coverage"),
 		completed, len(a.scanScenarios))
 	for _, scenario := range a.scanScenarios {
 		if scenario.Outcome == assessment.OutcomePass ||
@@ -635,7 +750,7 @@ func (a *App) printCoverage() {
 		}
 		fmt.Fprintf(a.Stdout, "    - %s: %s", scenario.ID, scenario.Outcome)
 		if scenario.Reason != "" {
-			fmt.Fprintf(a.Stdout, " (%s)", scenario.Reason)
+			fmt.Fprintf(a.Stdout, " (%s)", terminalSafe(scenario.Reason))
 		}
 		fmt.Fprintln(a.Stdout)
 	}
@@ -649,6 +764,18 @@ func (a *App) exitForSummary(summary assessment.Summary) int {
 		return exitIncomplete
 	}
 	return exitOK
+}
+
+// exitForScan maps a scan to the semantic exit code — findings first, then the
+// completeness rule. It is the single source of truth shared by the live report
+// (reportMachine) and the saved-bundle replay (runSavedReport), so replaying a
+// stored result can never disagree with the live run about whether findings or
+// incompleteness matter. A saved report full of findings must not exit 0.
+func (a *App) exitForScan(s report.Scan) int {
+	if s.Counts.Critical > 0 || s.Counts.Notable > 0 {
+		return exitFindings
+	}
+	return a.exitForSummary(assessment.Summary{Risk: s.Risk, Completeness: s.Completeness})
 }
 
 // reportMachine writes JSON or SARIF and returns the same exit code the
@@ -694,16 +821,24 @@ func (a *App) reportMachine(tr *trace.Trace) int {
 		fmt.Fprintf(a.Stdout, "  wrote %s (%s)\n", a.outFile, a.format)
 	}
 
-	if s.Counts.Critical > 0 || s.Counts.Notable > 0 {
-		return exitFindings
-	}
-	return a.exitForSummary(assessment.Summary{
-		Risk: s.Risk, Completeness: s.Completeness,
-	})
+	return a.exitForScan(s)
 }
 
 const maxFailureMessageBytes = 4096
 const failureTruncationMarker = "...[truncated]"
+
+func normalizeFailureMessage(message string) string {
+	if message == "" {
+		message = "unknown failure"
+	}
+	message = strings.Join(strings.Fields(strings.ToValidUTF8(message, "?")), " ")
+	if len(message) > maxFailureMessageBytes {
+		message = strings.ToValidUTF8(
+			message[:maxFailureMessageBytes-len(failureTruncationMarker)], "",
+		) + failureTruncationMarker
+	}
+	return message
+}
 
 // failScan finishes an interrupted pipeline with the same machine-readable
 // contract as a successful scan. It always returns the caller-selected
@@ -716,19 +851,14 @@ func (a *App) failScan(
 	err error,
 	exitCode int,
 ) int {
-	message := "unknown failure"
+	message := ""
 	if err != nil {
 		message = err.Error()
 	}
 	// Error text can contain target-controlled stderr. Keep it on one line so
 	// it cannot forge terminal log records, and repair invalid UTF-8 before
 	// serializing it into JSON/SARIF.
-	message = strings.Join(strings.Fields(strings.ToValidUTF8(message, "?")), " ")
-	if len(message) > maxFailureMessageBytes {
-		message = strings.ToValidUTF8(
-			message[:maxFailureMessageBytes-len(failureTruncationMarker)], "",
-		) + failureTruncationMarker
-	}
+	message = normalizeFailureMessage(message)
 	if a.scanTarget == "" {
 		a.scanTarget = "unknown"
 	}
@@ -742,7 +872,7 @@ func (a *App) failScan(
 		Phase: phase, Code: code, Message: message, Retryable: retryable,
 	})
 
-	fmt.Fprintf(a.Stderr, "detonate: %s failed [%s]: %s\n", phase, code, message)
+	fmt.Fprintf(a.Stderr, "%s %s failed [%s]: %s\n", a.danger("[FAILED] detonate:"), phase, code, message)
 	if a.format == "json" || a.format == "sarif" {
 		if code := a.reportMachine(nil); code == exitFailure {
 			// reportMachine returning failure can mean either that it correctly
@@ -752,13 +882,54 @@ func (a *App) failScan(
 	} else {
 		summary := assessment.Summarize(nil, a.scanScenarios)
 		const rule = "  ----------------------------------------------------------------"
-		fmt.Fprintf(a.Stdout, "\n%s\n", rule)
-		fmt.Fprintf(a.Stdout, "  RISK: %s\n", summary.Risk)
-		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", summary.Completeness)
-		fmt.Fprintf(a.Stdout, "  FAILURE: %s/%s\n", phase, code)
-		fmt.Fprintf(a.Stdout, "%s\n", rule)
+		fmt.Fprintf(a.Stdout, "\n%s\n", a.heading(rule))
+		fmt.Fprintf(a.Stdout, "  RISK: %s\n", a.riskText(string(summary.Risk)))
+		fmt.Fprintf(a.Stdout, "  COMPLETENESS: %s\n", a.completenessText(string(summary.Completeness)))
+		fmt.Fprintf(a.Stdout, "  FAILURE: %s\n", a.danger(phase+"/"+code))
+		fmt.Fprintf(a.Stdout, "%s\n", a.heading(rule))
 		a.printCoverage()
 	}
+	return a.finalizeReport(nil, exitCode)
+}
+
+// configureSave resets the per-run bundle state. An explicit directory is
+// enough to opt in, so scripts need not repeat both flags.
+func (a *App) configureSave(save bool, directory string) {
+	a.saveRequested = save || directory != ""
+	a.saveDir = directory
+	a.saveFinalized = false
+}
+
+func (a *App) finalizeReport(tr *trace.Trace, exitCode int) int {
+	if !a.saveRequested || a.saveFinalized {
+		return exitCode
+	}
+	a.saveFinalized = true
+	scan := report.Build(tr, a.scanScenarios, a.scanTools, a.scanTarget, Version,
+		a.scanFailures...)
+	path, err := bundle.Save(bundle.Options{
+		Directory:        a.saveDir,
+		Target:           a.scanTarget,
+		Version:          Version,
+		DetonateCommit:   Commit,
+		DetonateModified: BuildModified,
+		RepositoryURL:    a.scanRepositoryURL,
+		Subpath:          a.scanSubpath,
+		Revision:         a.scanRevision,
+		SandboxImage:     a.scanSandboxImage,
+		Report:           scan,
+	})
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "%s report failed [report_save_failed]: %s\n",
+			a.danger("[FAILED] detonate:"), terminalSafe(err.Error()))
+		return exitFailure
+	}
+	writer := a.Stdout
+	if (a.format == "json" || a.format == "sarif") && a.outFile == "" {
+		// Never append status text to a machine document on stdout.
+		writer = a.Stderr
+	}
+	fmt.Fprintf(writer, "  %s %s\n", a.success("[SAVED]"), terminalSafe(path))
 	return exitCode
 }
 
@@ -768,7 +939,7 @@ func (a *App) failScan(
 // is what keeps it usable when the caller is a JSON stream, a test, or another
 // program rather than a person watching a scan run.
 func (a *App) progress() scan.Progress {
-	return func(msg string) { fmt.Fprintln(a.Stdout, msg) }
+	return func(msg string) { fmt.Fprintln(a.Stdout, a.active("[SCAN]")+" "+strings.TrimSpace(msg)) }
 }
 
 // failPipeline turns a failed scan into the same structured report a
@@ -818,9 +989,9 @@ func (a *App) printObservations(observations []trace.Event) {
 	if len(observations) == 0 {
 		return
 	}
-	fmt.Fprintf(a.Stdout, "\n  Observations (context, not findings):\n")
+	fmt.Fprintf(a.Stdout, "\n  %s\n", a.warning("[OBSERVATIONS] context, not findings"))
 	for _, e := range observations {
-		fmt.Fprintf(a.Stdout, "    - %s\n", e.Summary)
+		fmt.Fprintf(a.Stdout, "    - %s\n", terminalSafe(e.Summary))
 	}
 }
 
@@ -845,8 +1016,8 @@ func resolveTarget(mcpCmd, skillPath string) (target.Target, error) {
 }
 
 func (a *App) printTools(tools []toolinfo.ToolInfo) {
-	fmt.Fprintf(a.Stdout, "\n  discovered %d tool(s):\n", len(tools))
+	fmt.Fprintf(a.Stdout, "\n  %s %d tool(s):\n", a.heading("discovered"), len(tools))
 	for _, t := range tools {
-		fmt.Fprintf(a.Stdout, "    %s\n", t)
+		fmt.Fprintf(a.Stdout, "    %s\n", terminalSafe(t.String()))
 	}
 }

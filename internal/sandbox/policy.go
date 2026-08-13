@@ -114,7 +114,7 @@ func DefaultPolicy() Policy {
 // Python and Node are present because that is what real MCP servers are
 // written in; a sandbox that cannot run the ecosystem is a sandbox nobody
 // uses. Pin this to a digest before the first release.
-const DefaultImage = "python:3.12-slim"
+const DefaultImage = "python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36"
 
 // dropAllCapabilities removes every Linux capability from the container.
 //

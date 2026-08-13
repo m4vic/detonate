@@ -40,8 +40,14 @@ Legend: **P0** release/safety blocker · **P1** required for trustworthy release
 - [x] **P2/S** README quickstart rewritten around the evidence line, with a
       comparison table naming which scanners execute the target and which do not
       — *check:* every command in the README was run against the built binary
-- [ ] **P1/S** Tag `v0.1.0`
+- [x] **P1/S** Tag `v0.1.0`
       — *check:* fresh machine, install → first real result, under five minutes
+      — verified 2026-08-12: `v0.1.0` released 2026-08-05, `v0.2.0` released
+      2026-08-07. **Caution:** `v0.2.0` was cut on commit "docs: update
+      shields.io badges" — a docs-only change — the day *before* the first
+      canary-instrumentation commit landed (2026-08-08). The tag does not
+      mean this section is done; treat it as a release-numbering artifact,
+      not a milestone marker. See the process fix below.
 
 ## v0.2.0 — Canary instrumentation
 
@@ -55,6 +61,11 @@ Prerequisite, done ahead of the canary work because it touches every stage:
 
 - [ ] **P1/M** Canary token generator: high entropy, fresh per scan, collision-checked
       — *check:* generated token never matches plausible target content in the corpus
+      — *status 2026-08-12:* `internal/probe/canary.go` has a first version —
+      `GenerateCanary` writes one 16-byte hex-token file into the container
+      mount. It's a single canary type, not yet the plausible-path file
+      fixture the next item describes, and collision-checking against the
+      target corpus isn't implemented. Closest item to done; finish this one first.
 - [ ] **P1/M** Environment canaries seeded into the container env
       — *check:* fixture tool that echoes `env` produces a finding; one that does not, does not
 - [ ] **P1/M** File canaries at plausible paths (`~/.ssh/id_rsa`, `.env`, `~/.aws/credentials`)
@@ -64,6 +75,9 @@ Prerequisite, done ahead of the canary work because it touches every stage:
 - [ ] **P1/L** Network-intent sinkhole: DNS + HTTP catch-all on an internal
       Docker network with **no gateway**
       — *check:* policy test proves no route to the real network exists
+      — *status 2026-08-12:* a `NetworkProxy` field was added to `Policy`
+      (2026-08-08) — configuration groundwork only; no sinkhole DNS/HTTP
+      service and no policy test yet.
 - [ ] **P1/M** Canary matching across plain, base64, hex, URL encodings
       — *check:* a fixture that base64-encodes the token before returning it is still caught
 - [ ] **P0/S** Finding fingerprints exclude nonce values
@@ -76,18 +90,21 @@ Prerequisite, done ahead of the canary work because it touches every stage:
 
 ## v0.3.0 — Safe acquisition
 
-- [ ] **P0/L** Split acquisition into fetch (network, no execution) and build
+- [x] **P0/L** Split acquisition into fetch (network, no execution) and build
       (no network, non-root)
       — *check:* no path runs target code as uid 0 with network simultaneously
-- [ ] **P0/M** `npm ci --ignore-scripts`; lifecycle scripts only in the offline phase
-- [ ] **P0/M** `pip download` to a wheel cache, then offline install
-- [ ] **P0/S** `acquisition_unsupported` outcome for targets needing a networked build hook
+- [x] **P0/M** `npm ci --ignore-scripts`; lifecycle scripts only in the offline phase
+- [x] **P0/M** `pip download` to a wheel cache, then offline install
+- [x] **P0/S** `acquisition_unsupported` outcome for targets needing a networked build hook
       — *check:* reported as reduced completeness, never a silent privileged run
-- [ ] **P0/M** Adversarial fixture: `postinstall` attempting egress
+- [x] **P0/M** Adversarial fixture: `postinstall` attempting egress
       — *check:* blocked **and** reported
 - [ ] **P1/M** TypeScript compile and monorepo packages still build, or report
       unsupported with a named reason
-- [ ] **P1/S** Remove the acquisition warning from README once the boundary holds
+      — *reopened 2026-08-13:* the official Everything workspace depends on a
+      root lockfile plus `prepare`; it now returns named
+      `acquisition_unsupported`, but compatible replay remains unfinished
+- [x] **P1/S** Remove the acquisition warning from README once the boundary holds
 
 ## v0.4.0 — Measured
 
@@ -172,3 +189,22 @@ Run before every tag, at every version:
 - [ ] Clean-archive build on all three platforms
 - [ ] No invariant in [ROADMAP.md](ROADMAP.md) weakened
 - [ ] [CHANGELOG.md](../CHANGELOG.md) updated, breaking changes named
+- [ ] **A version tag matches its section's checkboxes above.** Added
+      2026-08-12 after `v0.2.0` was cut with none of this section's canary
+      items checked — the tag stopped meaning "this milestone shipped" and
+      started meaning "a release button was pressed." If the release
+      workflow auto-tags on merge, gate it on this file's checkboxes for the
+      target version instead, or stop auto-tagging and cut releases by hand
+      once a version's section is actually done.
+
+## Reconciliation note (2026-08-12)
+
+This file and `.ctx/context.md` (the working-memory log) had both drifted
+from the real repo: `TASKS.md` was last edited 2026-08-05, `.ctx/context.md`
+last entry 2026-07-31, while 219 commits and two releases happened since.
+`.ctx/context.md` is tool-generated (`ctx sync`) and shouldn't be hand-edited
+— it needs an actual resync, not a manual patch. This file has been brought
+back in line with verified GitHub state (commit history, releases, and a
+direct read of `internal/probe/canary.go`) as of this date; keep it that way
+by checking a box the same day the acceptance check actually passes, not
+after the fact.

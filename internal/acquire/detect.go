@@ -6,16 +6,14 @@
 // Without this package detonate can only scan stdlib-only servers, which is a
 // demo rather than a tool.
 //
-// The answer is two containers, two phases:
+// The answer is separate trust phases:
 //
-//	Phase 1 ACQUIRE   network ON, no target execution, deps into a volume
-//	Phase 2 DETONATE  network OFF, that volume mounted read-only
+//	FETCH      network ON, root allowed, target scripts disabled
+//	BUILD      network OFF, non-root, lifecycle/build scripts observed
+//	DETONATE   network OFF, non-root, dependencies mounted read-only
 //
-// Phase 1 is not a necessary evil to be minimised. Install scripts are THE
-// npm/PyPI supply-chain surface — a postinstall hook or setup.py runs
-// arbitrary code before anyone has looked at the package — and nobody
-// currently watches them. So install-time behaviour is captured as evidence
-// like any other, and this phase is a finding generator in its own right.
+// Install scripts remain evidence: they run in BUILD, where they can be
+// observed without being allowed to combine network access and root.
 package acquire
 
 import (
@@ -372,75 +370,89 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// installCommand is the shell command that installs a manifest's dependencies
-// into depsDir.
-//
-// Installing into an explicit directory rather than the image's site-packages
-// is what makes the result portable to phase 2: the deps live in a volume we
-// mount read-only, so the detonation container gets them without ever having
-// had a network.
-// sub is the target's slash-separated position inside the copied tree, empty
-// when the target is the whole thing.
-func (m Manifest) installCommand(depsDir, sub string) []string {
+const acquisitionUser = "1000:1000"
+
+// fetchCommand downloads dependencies while target-controlled lifecycle and
+// build scripts are disabled. It is the only acquisition command allowed to
+// run with network access or as root.
+func (m Manifest) fetchCommand(depsDir, sub string) []string {
 	switch m.Ecosystem {
 	case EcosystemPython:
-		var pipArgs string
-		switch m.File {
-		case "requirements.txt":
-			pipArgs = "-r /target/requirements.txt"
-		default:
-			// pyproject.toml / setup.py: install the project itself. No -e:
-			// an editable install writes into the target directory, which we
-			// mount read-only precisely so a target cannot modify itself
-			// mid-scan.
-			pipArgs = "/target"
+		if m.File != "requirements.txt" {
+			return nil
 		}
-		return []string{"sh", "-c",
-			"pip install --no-cache-dir --target " + depsDir + " " + pipArgs}
+		return []string{"sh", "-c", strings.Join([]string{
+			"set -e",
+			"mkdir -p " + depsDir + "/cache " + depsDir + "/site",
+			// Source distributions can execute setup.py or a PEP-517 backend
+			// merely to resolve metadata. Wheel-only fetch makes that impossible.
+			"pip download --disable-pip-version-check --only-binary=:all: " +
+				"--dest " + depsDir + "/cache -r /target/requirements.txt",
+			"chmod -R a+rwX " + depsDir,
+		}, "\n")}
 
 	case EcosystemNode:
-		// --ignore-scripts is NOT used in either branch. Lifecycle scripts are
-		// the supply-chain attack surface we are here to observe; suppressing
-		// them would hide the exact behaviour worth reporting. Safe to allow
-		// because this runs in a throwaway container with no host mounts
-		// beyond a read-only copy of the target.
-		if m.NeedsBuild {
-			app := appDir(depsDir)
-			// Where the build runs. For a standalone package that is the copy
-			// root; for a monorepo package it is the package's own directory
-			// inside the copied repository, so its tsconfig can still reach
-			// the root config it extends.
-			buildDir := app
-			if sub != "" {
-				buildDir = app + "/" + sub
-			}
-			// The whole project has to move into the volume: a build writes
-			// its output next to the source, and /target is a read-only host
-			// mount precisely so a target cannot rewrite itself mid-scan.
-			//
-			// set -e so a failed build fails the container. Silently
-			// continuing would leave phase 2 launching an entry point that
-			// was never produced, and report that as the target's fault.
-			return []string{"sh", "-c", strings.Join([]string{
-				"set -e",
-				"mkdir -p " + app,
-				"cp -a /target/. " + app + "/",
-				// A host node_modules is built for the host's OS and libc;
-				// inside the container its native modules are wrong. .git is
-				// dead weight that can dwarf the source.
-				"rm -rf " + app + "/node_modules " + app + "/.git",
-				"cd " + buildDir,
-				// devDependencies are required here, unlike the no-build
-				// branch: the compiler doing the build is one of them.
-				"npm install",
-				"npm run build",
-				// Phase 2 runs as a non-root uid that has no relationship to
-				// the root uid that just wrote these files.
-				"chmod -R a+rX " + app,
-			}, "\n")}
+		app := appDir(depsDir)
+		workDir := app
+		if sub != "" {
+			workDir += "/" + sub
 		}
-		return []string{"sh", "-c",
-			"cp /target/package*.json " + depsDir + "/ && cd " + depsDir + " && npm install --omit=dev"}
+		installArgs := "--ignore-scripts"
+		if !m.NeedsBuild {
+			installArgs += " --omit=dev"
+		}
+		install := "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then " +
+			"npm ci " + installArgs + "; else npm install " + installArgs + "; fi"
+		script := strings.Join([]string{
+			"set -e",
+			"mkdir -p " + app,
+			"mkdir -p " + depsDir + "/cache/npm",
+			"export npm_config_cache=" + depsDir + "/cache/npm",
+			"cp -a /target/. " + app + "/",
+			"rm -rf " + app + "/node_modules " + app + "/.git",
+			`cd "$1"`,
+			install,
+			"chmod -R a+rwX " + depsDir,
+		}, "\n")
+		return []string{"sh", "-c", script, "detonate-acquire", workDir}
+	}
+	return nil
+}
+
+// offlineCommand performs every acquisition step that may execute
+// target-controlled code. Its policy is network-off and non-root.
+func (m Manifest) offlineCommand(depsDir, sub string) []string {
+	switch m.Ecosystem {
+	case EcosystemPython:
+		if m.File != "requirements.txt" {
+			return nil
+		}
+		return []string{"sh", "-c", strings.Join([]string{
+			"set -e",
+			"pip install --disable-pip-version-check --no-index --only-binary=:all: " +
+				"--find-links " + depsDir + "/cache --target " + depsDir +
+				"/site -r /target/requirements.txt",
+		}, "\n")}
+
+	case EcosystemNode:
+		workDir := appDir(depsDir)
+		if sub != "" {
+			workDir += "/" + sub
+		}
+		steps := []string{
+			"set -e",
+			"export npm_config_cache=" + depsDir + "/cache/npm",
+			`cd "$1"`,
+			// This runs the lifecycle scripts suppressed during fetch. They stay
+			// observable without being allowed network access or root privilege.
+			"if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then " +
+				"npm ci --offline; else npm install --offline; fi",
+		}
+		if m.NeedsBuild {
+			steps = append(steps, "npm run build")
+		}
+		return []string{"sh", "-c", strings.Join(steps, "\n"),
+			"detonate-acquire", workDir}
 	}
 	return nil
 }
@@ -448,16 +460,16 @@ func (m Manifest) installCommand(depsDir, sub string) []string {
 // appDir is where a built project's source lives inside the dependency volume.
 func appDir(depsDir string) string { return depsDir + "/app" }
 
-// Images are pinned to a major version rather than :latest so a scan run twice
-// a month apart behaves the same. A scanner whose environment drifts produces
-// findings that cannot be reproduced.
+// Images retain a readable tag but are pinned to the multi-platform manifest
+// digest. The tag explains the runtime to a human; the digest makes the actual
+// bytes stable across machines and across time.
 const (
 	// PythonImage carries pip and a Python runtime.
-	PythonImage = "python:3.12-slim"
+	PythonImage = "python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36"
 
 	// NodeImage carries npm and a Node runtime. Chosen because most published
 	// MCP servers are Node packages, and the Python image has no npm at all.
-	NodeImage = "node:22-slim"
+	NodeImage = "node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
 )
 
 // imageFor picks the container image an ecosystem needs.

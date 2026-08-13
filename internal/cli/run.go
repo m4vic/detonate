@@ -48,6 +48,12 @@ type scanOptions struct {
 	// is what CI needs: the human-readable log stays in the job output while
 	// the artifact goes somewhere an upload step can find it.
 	out string
+	// color controls only human terminal output. Machine formats never contain
+	// ANSI escapes, including when "always" is requested.
+	color string
+	// save is opt-in. saveDir implies save and names the complete bundle path.
+	save    bool
+	saveDir string
 }
 
 // RunTarget scans one target, working out for itself what it is.
@@ -58,6 +64,10 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 		fmt.Fprintf(a.Stderr, "  unknown format %q; use text, json, or sarif\n", opt.format)
 		return exitUsage
 	}
+	if err := a.configureColor(opt.color, opt.format); err != nil {
+		fmt.Fprintf(a.Stderr, "  %v\n", err)
+		return exitUsage
+	}
 	a.format = opt.format
 	a.outFile = opt.out
 	a.failIncomplete = opt.failIncomplete
@@ -66,6 +76,11 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 	a.scanFailures = nil
 	a.scanTarget = target
 	a.scanIdentity = baselineIdentity(target, opt.subPath)
+	a.scanRepositoryURL = ""
+	a.scanSubpath = ""
+	a.scanRevision = ""
+	a.scanSandboxImage = ""
+	a.configureSave(opt.save, opt.saveDir)
 
 	// Progress chatter would corrupt a JSON stream on stdout. It stays only
 	// when the output is for a person, or when the document is going to a file
@@ -84,13 +99,18 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 				assessment.OutcomeTargetError, true, err, exitFailure)
 		}
 		defer fetched.Cleanup()
+		a.scanRepositoryURL = fetched.Source
+		a.scanSubpath = filepath.ToSlash(opt.subPath)
+		a.scanRevision = fetched.Revision
+		a.scanTarget = remoteTargetIdentity(fetched.Source, opt.subPath)
+		a.scanIdentity = a.scanTarget
 
 		root, err := fetched.SubDir(opt.subPath)
 		if err != nil {
 			fmt.Fprintf(a.Stderr, "  %v\n", err)
 			return exitUsage
 		}
-		fmt.Fprintf(a.Stdout, "  cloned  %s\n", fetched.Source)
+		a.metadata("cloned", fetched.Source)
 		target = root
 	}
 
@@ -106,8 +126,9 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 
 	switch d.Kind {
 	case KindPrompt:
-		fmt.Fprintf(a.Stdout, "  target  %s\n", shorten(d.File))
-		fmt.Fprintf(a.Stdout, "  type    prompt (%s)\n\n", d.Why)
+		a.section("target")
+		a.metadata("path", shorten(d.File))
+		a.metadata("type", "prompt ("+d.Why+")")
 		return a.scanPrompt(d.File)
 
 	case KindSkill:
@@ -123,8 +144,9 @@ func (a *App) RunTarget(ctx context.Context, target string, opt scanOptions) int
 }
 
 func (a *App) runSkill(ctx context.Context, d Detected, opt scanOptions) int {
-	fmt.Fprintf(a.Stdout, "  target  %s\n", shorten(d.Dir))
-	fmt.Fprintf(a.Stdout, "  type    skill (%s)\n", d.Why)
+	a.section("target")
+	a.metadata("path", shorten(d.Dir))
+	a.metadata("type", "skill ("+d.Why+")")
 
 	tgt, err := target.Skill(d.Dir)
 	if err != nil {
@@ -137,9 +159,9 @@ func (a *App) runSkill(ctx context.Context, d Detected, opt scanOptions) int {
 	// Skipping it by default would leave the most dangerous part unexamined.
 	runScripts := d.Scripts > 0 && !opt.quick && !opt.noScripts
 	if runScripts {
-		fmt.Fprintf(a.Stdout, "  plan    analyse instructions, run %d script(s) in the sandbox\n", d.Scripts)
+		a.metadata("plan", fmt.Sprintf("analyse instructions, run %d script(s) in the sandbox", d.Scripts))
 	} else {
-		fmt.Fprintln(a.Stdout, "  plan    analyse instructions only")
+		a.metadata("plan", "analyse instructions only")
 	}
 	fmt.Fprintln(a.Stdout)
 
@@ -147,23 +169,24 @@ func (a *App) runSkill(ctx context.Context, d Detected, opt scanOptions) int {
 }
 
 func (a *App) runMCP(ctx context.Context, d Detected, opt scanOptions) int {
-	fmt.Fprintf(a.Stdout, "  target  %s\n", shorten(d.Dir))
-	fmt.Fprintf(a.Stdout, "  type    MCP server (%s)\n", d.Why)
-	fmt.Fprintf(a.Stdout, "  start   %s\n", d.Command)
+	a.section("target")
+	a.metadata("path", shorten(d.Dir))
+	a.metadata("type", "MCP server ("+d.Why+")")
+	a.metadata("start", d.Command)
 
 	install := d.NeedsInstall && !opt.quick && !opt.noInstall
 	probe := !opt.quick && !opt.noProbe
 
 	var plan []string
 	if install {
-		plan = append(plan, "install deps (network on, target hooks may run)")
+		plan = append(plan, "fetch deps inertly, install/build offline as non-root")
 	}
 	plan = append(plan, "launch sandboxed (network off)")
 	if probe {
 		plan = append(plan, "probe tools with hostile input")
 	}
 
-	fmt.Fprintf(a.Stdout, "  plan    %s\n", strings.Join(plan, ", "))
+	a.metadata("plan", strings.Join(plan, ", "))
 	if d.NeedsInstall && !install {
 		// Say so explicitly: a skipped install usually means the scan fails
 		// on an import error, and a user who chose --quick should know why.
@@ -187,6 +210,9 @@ func bindScanFlags(fs *flag.FlagSet, opt *scanOptions) {
 	fs.BoolVar(&opt.failIncomplete, "fail-incomplete", false, "Exit 4 when required coverage is incomplete.")
 	fs.StringVar(&opt.format, "format", "text", "Output format: text, json, or sarif.")
 	fs.StringVar(&opt.out, "out", "", "Write machine-readable output to this file.")
+	fs.StringVar(&opt.color, "color", colorAuto, "Terminal color: auto, always, or never.")
+	fs.BoolVar(&opt.save, "save", false, "Save a bounded report bundle after the scan.")
+	fs.StringVar(&opt.saveDir, "save-dir", "", "Save the report bundle at this directory (implies --save).")
 }
 
 // baselineIdentity names a target stably across runs.
@@ -204,6 +230,14 @@ func baselineIdentity(target, subPath string) string {
 			id = abs
 		}
 	}
+	if subPath != "" {
+		id += "#" + filepath.ToSlash(subPath)
+	}
+	return id
+}
+
+func remoteTargetIdentity(repositoryURL, subPath string) string {
+	id := repositoryURL
 	if subPath != "" {
 		id += "#" + filepath.ToSlash(subPath)
 	}

@@ -67,11 +67,12 @@ func (a *App) runInteractive(ctx context.Context) int {
 	if output == nil {
 		output = os.Stdout
 	}
+	_ = a.configureColor(colorAuto, "text")
 
-	fmt.Fprint(output, banner)
-	fmt.Fprintln(output, "  alpha: /static is safe by default; /dynamic is experimental.")
-	fmt.Fprintln(output, "  Commands: /static <target>, /dynamic <target>, /combined <target>, /help, /exit")
-	fmt.Fprintln(output, "  Paste a target without a slash to use /static.")
+	fmt.Fprint(output, a.heading(banner))
+	fmt.Fprintln(output, a.warning("  ALPHA")+"  /static reads artifacts; /dynamic executes only inside Docker.")
+	fmt.Fprintln(output, a.heading("  COMMANDS")+"  /static <target>  /dynamic <target>  /report <dir>  /help  /exit")
+	fmt.Fprintln(output, a.muted("  Paste a target without a slash to use /static."))
 
 	// Only use readline (with its internal goroutines and terminal raw-mode) when
 	// stdin really is a terminal. In CI, during tests, or when input is piped the
@@ -95,7 +96,7 @@ func (a *App) runInteractive(ctx context.Context) int {
 		}
 
 		rl, err := readline.NewEx(&readline.Config{
-			Prompt:          "  detonate> ",
+			Prompt:          "  " + a.promptText(),
 			Stdin:           stdinCloser,
 			Stdout:          output,
 			Stderr:          a.Stderr,
@@ -138,7 +139,7 @@ func (a *App) runInteractiveFallback(ctx context.Context, input io.Reader, outpu
 	var lastCode int = exitOK
 	fmt.Fprintln(output)
 	for {
-		line := a.ask(in, "  detonate> ", "")
+		line := a.ask(in, "  "+a.promptText(), "")
 		line = strings.TrimSpace(line)
 		if line == "" || line == "/exit" || line == "/quit" {
 			break
@@ -191,6 +192,8 @@ func (a *App) dispatchInteractiveLine(ctx context.Context, line string) int {
 			return exitUsage
 		}
 		return a.runCombined(fields[1:])
+	case "/report", "report":
+		return a.runSavedReport(fields[1:])
 	case "doctor":
 		return a.doctor(ctx)
 	}
@@ -247,8 +250,8 @@ func (a *App) interactiveMCP(in *bufio.Reader, ctx context.Context) int {
 	args := []string{"--mcp", cmd, "--dir", dir}
 	if m := acquire.Detect(dir); m.Ecosystem != acquire.EcosystemNone {
 		fmt.Fprintf(a.Stdout, "\n  Found %s (%s dependencies).\n", m.File, m.Ecosystem)
-		fmt.Fprintln(a.Stdout, "  These install in a separate container that has network access")
-		fmt.Fprintln(a.Stdout, "  and may execute dependency/build hooks as root. Without this the scan will fail.")
+		fmt.Fprintln(a.Stdout, "  Dependencies fetch with scripts disabled; install/build hooks")
+		fmt.Fprintln(a.Stdout, "  run offline as non-root. Unsupported targets do not weaken this boundary.")
 		if ans := a.ask(in, "\n  Install dependencies? [Y/n]: ", "y"); !strings.HasPrefix(strings.ToLower(ans), "n") {
 			args = append(args, "--install")
 		}

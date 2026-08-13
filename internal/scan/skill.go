@@ -60,7 +60,7 @@ func runSkill(ctx context.Context, req Request, p Progress) (*Report, error) {
 			tr.Add(ev)
 		}
 		scenarios = append(scenarios, detonation.Scenarios...)
-	} else {
+	} else if len(sk.Scripts) > 0 {
 		for _, script := range sk.Scripts {
 			scenarios = append(scenarios, assessment.ScenarioResult{
 				ID:       scenario.SkillScriptID(script),
@@ -69,6 +69,20 @@ func runSkill(ctx context.Context, req Request, p Progress) (*Report, error) {
 				Reason:   "dynamic script execution was disabled",
 			})
 		}
+	} else {
+		tr.Add(trace.Event{
+			Kind:     trace.KindLifecycle,
+			Severity: trace.SeverityInfo,
+			Summary:  "dynamic execution did not run because the skill has no bundled scripts",
+			During:   "runtime-selection",
+			Source:   "static-scanner",
+		})
+		scenarios = append(scenarios, assessment.ScenarioResult{
+			ID:       "skill.runtime",
+			Required: true,
+			Outcome:  assessment.OutcomeSkipped,
+			Reason:   "the skill contains no bundled scripts to execute",
+		})
 	}
 
 	return &Report{

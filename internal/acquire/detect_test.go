@@ -227,36 +227,47 @@ func TestStartCommand(t *testing.T) {
 	}
 }
 
-func TestBuildInstallCommand(t *testing.T) {
+func TestBuildAcquisitionCommands(t *testing.T) {
 	m := Manifest{Ecosystem: EcosystemNode, File: "package.json",
 		Entry: "dist/index.js", NeedsBuild: true}
-	cmd := strings.Join(m.installCommand("/deps", ""), " ")
+	fetch := strings.Join(m.fetchCommand("/deps", ""), " ")
+	offline := strings.Join(m.offlineCommand("/deps", ""), " ")
 
 	// The whole project must move into the volume: a build writes next to the
 	// source, and /target is a read-only host mount.
-	if !strings.Contains(cmd, "cp -a /target/. /deps/app/") {
-		t.Errorf("build must copy the project into the volume: %q", cmd)
+	if !strings.Contains(fetch, "cp -a /target/. /deps/app/") {
+		t.Errorf("fetch must copy the project into the volume: %q", fetch)
 	}
-	if !strings.Contains(cmd, "npm run build") {
-		t.Errorf("build command missing: %q", cmd)
+	if strings.Contains(fetch, "npm run build") {
+		t.Errorf("networked fetch executes the build: %q", fetch)
+	}
+	if !strings.Contains(fetch, "--ignore-scripts") {
+		t.Errorf("networked fetch must suppress lifecycle scripts: %q", fetch)
+	}
+	if !strings.Contains(fetch, "npm ci") || !strings.Contains(fetch, "package-lock.json") {
+		t.Errorf("locked projects must use reproducible npm ci fetch: %q", fetch)
+	}
+	if !strings.Contains(fetch, "/cache/npm") || !strings.Contains(offline, "/cache/npm") {
+		t.Errorf("npm cache must survive into the offline container: fetch=%q offline=%q", fetch, offline)
+	}
+	if !strings.Contains(offline, "npm install --offline") ||
+		!strings.Contains(offline, "npm run build") {
+		t.Errorf("offline execution commands missing: %q", offline)
 	}
 	// The compiler is a devDependency, so omitting them makes the build fail.
-	if strings.Contains(cmd, "--omit=dev") {
-		t.Errorf("build needs devDependencies: %q", cmd)
-	}
-	if strings.Contains(cmd, "--ignore-scripts") {
-		t.Errorf("lifecycle scripts must still be observable: %q", cmd)
+	if strings.Contains(fetch, "--omit=dev") {
+		t.Errorf("build needs devDependencies: %q", fetch)
 	}
 	// A host node_modules holds native modules built for the wrong OS.
-	if !strings.Contains(cmd, "rm -rf /deps/app/node_modules") {
-		t.Errorf("stale host node_modules must be dropped: %q", cmd)
+	if !strings.Contains(fetch, "rm -rf /deps/app/node_modules") {
+		t.Errorf("stale host node_modules must be dropped: %q", fetch)
 	}
-	// Phase 2 runs as a uid unrelated to the root uid that wrote these files.
-	if !strings.Contains(cmd, "chmod -R a+rX /deps/app") {
-		t.Errorf("built files must be readable by the detonation uid: %q", cmd)
+	if !strings.Contains(fetch, "chmod -R a+rwX /deps") {
+		t.Errorf("offline phase must own the staged tree: %q", fetch)
 	}
-	if !strings.HasPrefix(cmd, "sh -c set -e") {
-		t.Errorf("a failed build must fail the container: %q", cmd)
+	if !strings.HasPrefix(fetch, "sh -c set -e") ||
+		!strings.HasPrefix(offline, "sh -c set -e") {
+		t.Errorf("a failed phase must fail its container: fetch=%q offline=%q", fetch, offline)
 	}
 }
 
@@ -285,14 +296,48 @@ func TestBuildContextClimbsToTheInheritedConfig(t *testing.T) {
 
 	// The build has to run in the package, not the copy root, or its tsconfig
 	// resolves against the wrong directory.
-	cmd := strings.Join(Manifest{Ecosystem: EcosystemNode, NeedsBuild: true}.
-		installCommand("/deps", bc.Sub), " ")
-	if !strings.Contains(cmd, "cd /deps/app/src/memory") {
-		t.Errorf("build must run in the package directory: %q", cmd)
+	m := Manifest{Ecosystem: EcosystemNode, NeedsBuild: true}
+	fetchCommand := m.fetchCommand("/deps", bc.Sub)
+	offlineCommand := m.offlineCommand("/deps", bc.Sub)
+	fetch := strings.Join(fetchCommand, " ")
+	if fetchCommand[len(fetchCommand)-1] != "/deps/app/src/memory" ||
+		offlineCommand[len(offlineCommand)-1] != "/deps/app/src/memory" {
+		t.Errorf("phases must receive the package directory as an argument: fetch=%q offline=%q",
+			fetchCommand, offlineCommand)
+	}
+	if !strings.Contains(fetchCommand[2], `cd "$1"`) ||
+		!strings.Contains(offlineCommand[2], `cd "$1"`) {
+		t.Errorf("phase scripts must not interpolate the package path: fetch=%q offline=%q",
+			fetchCommand, offlineCommand)
 	}
 	// The copy still starts at the root so the inherited config comes along.
-	if !strings.Contains(cmd, "cp -a /target/. /deps/app/") {
-		t.Errorf("copy must start at the build root: %q", cmd)
+	if !strings.Contains(fetch, "cp -a /target/. /deps/app/") {
+		t.Errorf("copy must start at the build root: %q", fetch)
+	}
+}
+
+func TestAcquisitionCommandsDoNotInterpolateHostileSubdirectory(t *testing.T) {
+	sub := "packages/odd; echo PWNED $(id)"
+	m := Manifest{Ecosystem: EcosystemNode, NeedsBuild: true}
+	for _, command := range [][]string{
+		m.fetchCommand("/deps", sub),
+		m.offlineCommand("/deps", sub),
+	} {
+		if strings.Contains(command[2], sub) {
+			t.Fatalf("target-controlled path was interpolated into shell script: %q", command[2])
+		}
+		if command[len(command)-1] != "/deps/app/"+sub {
+			t.Fatalf("work directory argument = %q", command[len(command)-1])
+		}
+	}
+}
+
+func TestRuntimeImagesAreDigestPinned(t *testing.T) {
+	for _, image := range []string{PythonImage, NodeImage} {
+		parts := strings.Split(image, "@sha256:")
+		if len(parts) != 2 || len(parts[1]) != 64 {
+			t.Errorf("image is not digest pinned: %q", image)
+		}
 	}
 }
 
@@ -364,10 +409,18 @@ func TestResultCommandRewrite(t *testing.T) {
 		t.Errorf("Command = %q, want the built path", got)
 	}
 
-	// Nothing was built, so nothing moved. The common path must be untouched.
+	// A non-Node runtime with no acquired code copy stays on /target.
 	plain := &Result{}
 	if got := plain.Command("python /target/server.py"); got != "python /target/server.py" {
 		t.Errorf("Command = %q, want it unchanged", got)
+	}
+}
+
+func TestNodeRuntimeCommandUsesDependencyTreeWithoutBuild(t *testing.T) {
+	installed := &Result{Root: "/deps/app"}
+	got := installed.Command("node /target/server/index.js")
+	if got != "node /deps/app/server/index.js" {
+		t.Fatalf("Command = %q, want source beside installed node_modules", got)
 	}
 }
 
@@ -396,36 +449,44 @@ func TestEnvFor(t *testing.T) {
 	}
 }
 
-func TestInstallCommand(t *testing.T) {
-	t.Run("requirements.txt installs from the file", func(t *testing.T) {
-		cmd := strings.Join(Manifest{Ecosystem: EcosystemPython, File: "requirements.txt"}.installCommand("/deps", ""), " ")
-		if !strings.Contains(cmd, "-r /target/requirements.txt") {
-			t.Errorf("command = %q", cmd)
+func TestAcquisitionCommandsEnforceTheBoundary(t *testing.T) {
+	t.Run("python fetch is wheel only and execution is offline", func(t *testing.T) {
+		m := Manifest{Ecosystem: EcosystemPython, File: "requirements.txt"}
+		fetch := strings.Join(m.fetchCommand("/deps", ""), " ")
+		offline := strings.Join(m.offlineCommand("/deps", ""), " ")
+		if !strings.Contains(fetch, "pip download") ||
+			!strings.Contains(fetch, "--only-binary=:all:") {
+			t.Errorf("unsafe Python fetch command: %q", fetch)
 		}
-		if !strings.Contains(cmd, "--target /deps") {
-			t.Errorf("deps must install into the shared volume, got %q", cmd)
+		if strings.Contains(fetch, "pip install") {
+			t.Errorf("networked phase installs packages: %q", fetch)
 		}
-	})
-
-	t.Run("pyproject installs the project, never editable", func(t *testing.T) {
-		cmd := strings.Join(Manifest{Ecosystem: EcosystemPython, File: "pyproject.toml"}.installCommand("/deps", ""), " ")
-		// -e writes into the target directory, which is mounted read-only
-		// precisely so a target cannot modify itself mid-scan.
-		if strings.Contains(cmd, " -e ") {
-			t.Errorf("editable install would write into the read-only target: %q", cmd)
+		if !strings.Contains(offline, "--no-index") ||
+			!strings.Contains(offline, "--target /deps/site") {
+			t.Errorf("Python install is not offline/staged: %q", offline)
 		}
 	})
 
-	t.Run("node does not suppress lifecycle scripts", func(t *testing.T) {
-		cmd := strings.Join(Manifest{Ecosystem: EcosystemNode, File: "package.json"}.installCommand("/deps", ""), " ")
-		// Lifecycle scripts are the supply-chain surface we exist to observe.
-		// Suppressing them would hide the most valuable thing this phase finds.
-		if strings.Contains(cmd, "--ignore-scripts") {
-			t.Errorf("install must let lifecycle scripts run so they can be observed: %q", cmd)
+	t.Run("local Python build metadata is not interpreted", func(t *testing.T) {
+		m := Manifest{Ecosystem: EcosystemPython, File: "pyproject.toml"}
+		if m.fetchCommand("/deps", "") != nil || m.offlineCommand("/deps", "") != nil {
+			t.Fatal("local Python projects must be rejected before a phase is launched")
 		}
 	})
 
-	if cmd := (Manifest{Ecosystem: EcosystemNone}).installCommand("/deps", ""); cmd != nil {
-		t.Errorf("installCommand(none) = %v, want nil", cmd)
+	t.Run("node scripts execute only offline", func(t *testing.T) {
+		m := Manifest{Ecosystem: EcosystemNode, File: "package.json"}
+		fetch := strings.Join(m.fetchCommand("/deps", ""), " ")
+		offline := strings.Join(m.offlineCommand("/deps", ""), " ")
+		if !strings.Contains(fetch, "--ignore-scripts") {
+			t.Errorf("networked npm phase can execute scripts: %q", fetch)
+		}
+		if !strings.Contains(offline, "npm install --offline") {
+			t.Errorf("lifecycle scripts are not observed offline: %q", offline)
+		}
+	})
+
+	if cmd := (Manifest{Ecosystem: EcosystemNone}).fetchCommand("/deps", ""); cmd != nil {
+		t.Errorf("fetchCommand(none) = %v, want nil", cmd)
 	}
 }

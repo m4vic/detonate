@@ -44,8 +44,8 @@ scan produce the same answer.
         │                skill.Analyze          (static)    │
         │                skill.DetonateScripts  (sandboxed) │
         │                                                   │
-        └──── MCP ─────▶ acquire.Install    network ON, root, target
-                         │                  hooks may run  ← THE UNSAFE STEP
+        └──── MCP ─────▶ acquire.Install    inert fetch: network ON, scripts off
+                         │                  install/build: network OFF, non-root
                          ▼
                          sandbox.Start      network OFF, read-only root,
                          │                  non-root, caps dropped
@@ -136,10 +136,12 @@ compilation when `dist/` is generated at publish time, monorepo build contexts
 where a package inherits config from the repository root, volume lifecycle, and
 install-output analysis.
 
-**This module owns the one unsafe step in the system.** `Install` runs with
-network on, writable root, and uid 0, because `npm install` and `pip install`
-need all three. Target-controlled lifecycle hooks execute there. Closing this
-is [ROADMAP.md](ROADMAP.md) v0.3.0 and it is the top open safety item.
+`Install` owns a two-phase boundary. Fetch may use network and uid 0, but npm
+lifecycle scripts are disabled, Python accepts wheels only, and VCS/local
+dependency forms that can execute source preparation are rejected. A second
+network-disabled, non-root container runs install/build hooks. Targets that
+cannot satisfy this boundary return `acquisition_unsupported`; the dependency
+volume is mounted read-only during detonation.
 
 ### `mcpdriver` — the protocol client
 

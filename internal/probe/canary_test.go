@@ -8,12 +8,11 @@ import (
 )
 
 func TestGenerateCanary(t *testing.T) {
-	dir := t.TempDir()
-	c, err := GenerateCanary(dir)
+	c, err := GenerateCanary()
 	if err != nil {
 		t.Fatalf("GenerateCanary: %v", err)
 	}
-	defer c.Cleanup()
+	defer func() { _ = c.Cleanup() }()
 
 	if c.Token == "" {
 		t.Fatal("token is empty")
@@ -23,6 +22,9 @@ func TestGenerateCanary(t *testing.T) {
 	}
 	if !strings.HasPrefix(c.Filename, "detonate-canary-") {
 		t.Errorf("filename = %q, want prefix detonate-canary-", c.Filename)
+	}
+	if c.HostDir == "" || filepath.Dir(c.HostPath) != c.HostDir {
+		t.Fatalf("canary is not contained by its staging directory: %+v", c)
 	}
 
 	// File must exist on disk with the token inside
@@ -36,30 +38,54 @@ func TestGenerateCanary(t *testing.T) {
 }
 
 func TestCanaryCleanup(t *testing.T) {
-	dir := t.TempDir()
-	c, err := GenerateCanary(dir)
+	c, err := GenerateCanary()
 	if err != nil {
 		t.Fatalf("GenerateCanary: %v", err)
 	}
 
-	path := c.HostPath
-	c.Cleanup()
+	dir := c.HostDir
+	if err := c.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
 
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("canary file still exists after Cleanup")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("canary staging directory still exists after Cleanup")
+	}
+	if err := c.Cleanup(); err != nil {
+		t.Errorf("second Cleanup should be a no-op: %v", err)
 	}
 }
 
-func TestGenerateCanaryEmptyDir(t *testing.T) {
-	_, err := GenerateCanary("")
-	if err == nil {
-		t.Fatal("expected error for empty dir")
+func TestGenerateCanaryDoesNotMutateTargetDirectory(t *testing.T) {
+	target := t.TempDir()
+	marker := filepath.Join(target, "source.txt")
+	if err := os.WriteFile(marker, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
+	before, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-func TestGenerateCanaryBadDir(t *testing.T) {
-	_, err := GenerateCanary(filepath.Join(t.TempDir(), "nonexistent", "subdir"))
-	if err == nil {
-		t.Fatal("expected error for nonexistent dir")
+	c, err := GenerateCanary()
+	if err != nil {
+		t.Fatalf("GenerateCanary: %v", err)
+	}
+	defer func() { _ = c.Cleanup() }()
+	if rel, err := filepath.Rel(target, c.HostPath); err == nil &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("canary path %q is inside target %q", c.HostPath, target)
+	}
+
+	after, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("target directory changed: before=%v after=%v", before, after)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != "original" {
+		t.Fatalf("target content changed: data=%q err=%v", data, err)
 	}
 }

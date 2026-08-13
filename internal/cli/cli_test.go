@@ -15,6 +15,7 @@ import (
 	"github.com/m4vic/detonate/internal/environment"
 	"github.com/m4vic/detonate/internal/mcptest"
 	"github.com/m4vic/detonate/internal/report"
+	"github.com/m4vic/detonate/internal/scan"
 )
 
 func TestMain(m *testing.M) {
@@ -258,18 +259,46 @@ func TestScanRequiresExactlyOneTarget(t *testing.T) {
 	})
 }
 
-// The Docker gate is detonate's core safety promise: no sandbox, no scan.
+// The Docker gate is detonate's core safety promise whenever target code is
+// selected for execution.
 func TestScanBlockedWithoutDocker(t *testing.T) {
 	app, _, stderr := newTestApp(false)
 	dir := writeSampleSkill(t)
 
-	code := app.Run(context.Background(), []string{"scan", "--skill", dir})
+	code := app.Run(context.Background(), []string{"scan", "--skill", dir, "--run-scripts"})
 	if code != exitUsage {
 		t.Errorf("exit = %d, want %d (environment problem, not scan failure)", code, exitUsage)
 	}
 	if !strings.Contains(stderr.String(), "[runtime_unavailable]") ||
 		!strings.Contains(stderr.String(), "Docker is required") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestScriptlessDynamicSkillDoesNotRequireDocker(t *testing.T) {
+	dir := t.TempDir()
+	skillMD := "---\nname: instructions-only\ndescription: Text-only skill.\n---\n\n# Instructions\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skillMD), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, stdout, stderr := newTestApp(false)
+	code := app.Run(context.Background(), []string{"dynamic", dir})
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"RISK: no_findings",
+		"COMPLETENESS: partial",
+		"skill.runtime: skipped",
+		"dynamic execution did not run because the skill has no bundled scripts",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(stderr.String(), "runtime_unavailable") {
+		t.Fatalf("scriptless skill incorrectly required Docker: %s", stderr.String())
 	}
 }
 
@@ -502,6 +531,69 @@ func TestFailureMessageIsBoundedAndSingleLine(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, failureTruncationMarker) {
 		t.Fatalf("truncation marker missing: %q", got)
+	}
+}
+
+func TestCompletedScanTeardownFailureIsStructuredAndNonZero(t *testing.T) {
+	app, stdout, _ := newTestApp(true)
+	app.format = "json"
+	app.docOut = stdout
+	app.Stdout = io.Discard
+	app.scanTarget = "fixture"
+	app.scanScenarios = []assessment.ScenarioResult{
+		{ID: "mcp.inventory", Required: true, Outcome: assessment.OutcomePass},
+		{ID: "pipeline.teardown", Required: true, Outcome: assessment.OutcomeTeardownError,
+			Reason: "sandbox still exists"},
+	}
+	app.recordScanFailures([]scan.Failure{{
+		Phase: "teardown", Code: "teardown_failed",
+		Message: "sandbox still exists", Retryable: true,
+	}})
+
+	if code := app.reportMachine(nil); code != exitFailure {
+		t.Fatalf("exit = %d, want %d", code, exitFailure)
+	}
+
+	var doc struct {
+		Completeness string           `json:"completeness"`
+		Failures     []report.Failure `json:"failures"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if doc.Completeness != "failed" {
+		t.Fatalf("completeness = %q, want failed", doc.Completeness)
+	}
+	if len(doc.Failures) != 1 || doc.Failures[0].Code != "teardown_failed" {
+		t.Fatalf("failures = %+v", doc.Failures)
+	}
+}
+
+func TestTextReportShowsUnsupportedAcquisitionWithoutATrace(t *testing.T) {
+	app, stdout, _ := newTestApp(true)
+	app.scanTarget = "https://github.com/example/repo#src/server"
+	app.scanScenarios = []assessment.ScenarioResult{{
+		ID: "pipeline.acquire", Required: true,
+		Outcome: assessment.OutcomeUnsupported,
+		Reason:  "workspace prepare cannot be replayed safely",
+	}}
+	app.scanFailures = []report.Failure{{
+		Phase: "acquire", Code: "acquisition_unsupported",
+		Message: "workspace prepare cannot be replayed safely",
+	}}
+
+	if code := app.report(nil); code != exitOK {
+		t.Fatalf("exit = %d, want 0 without --fail-incomplete", code)
+	}
+	for _, want := range []string{
+		"COMPLETENESS: inconclusive",
+		"FAILURE: acquire/acquisition_unsupported",
+		"pipeline.acquire: unsupported",
+		"[LIMIT] workspace prepare cannot be replayed safely",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("text report missing %q:\n%s", want, stdout.String())
+		}
 	}
 }
 

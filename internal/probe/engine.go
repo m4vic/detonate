@@ -136,11 +136,11 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 			// is better than implying it was tested.
 			events = append(events, trace.Event{
 				Kind: trace.KindProtocol, Severity: trace.SeverityInfo, At: time.Now(),
-				Summary: fmt.Sprintf("tool %q has no string parameters; not probed", tool.Name),
+				Summary: fmt.Sprintf("tool %q has no adversarial string-input surface; no payloads sent", tool.Name),
 				During:  "probe", Source: "probe-engine",
 			})
 			scenario.Outcome = assessment.OutcomeUnsupported
-			scenario.Reason = "tool has no string parameters reachable by the current probe set"
+			scenario.Reason = "current probe set found no adversarial string-input surface"
 			scenarios = append(scenarios, scenario)
 			continue
 		}
@@ -245,6 +245,18 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		scenarios = append(scenarios, scenario)
 	}
 	return Result{Events: events, Scenarios: scenarios}
+}
+
+// StringInputToolCount reports how many tools the current adversarial payload
+// set can actually reach. Progress output uses this before claiming probes ran.
+func StringInputToolCount(tools []toolinfo.ToolInfo) int {
+	count := 0
+	for _, tool := range tools {
+		if len(stringParams(tool.InputSchema)) > 0 {
+			count++
+		}
+	}
+	return count
 }
 
 func hasFinding(events []trace.Event) bool {

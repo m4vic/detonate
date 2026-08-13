@@ -67,12 +67,14 @@ func OpenSession(
 		_ = c.Close()
 		cancel()
 		if failed, detail := c.Failed(); failed {
-			return nil, fmt.Errorf("sandbox did not run %q: %s", command, truncate(detail, 500))
+			return nil, fmt.Errorf("sandbox did not run %q: %s; %s",
+				command, truncate(detail, 500), startupConfigurationHint)
 		}
 		if stderr != "" {
-			return nil, fmt.Errorf("%w (container stderr: %s)", err, truncate(stderr, 500))
+			return nil, fmt.Errorf("%w (container stderr: %s); %s",
+				err, truncate(stderr, 500), startupConfigurationHint)
 		}
-		return nil, err
+		return nil, fmt.Errorf("%w; %s", err, startupConfigurationHint)
 	}
 
 	return &Session{container: c, session: sess, cancel: cancel, command: command, mounts: mounts}, nil
@@ -129,15 +131,18 @@ func (s *Session) enumerationError(action string, err error) error {
 	// death — no stderr at all — into "the server exited" rather than a bare
 	// "EOF" that reads like the scanner's fault.
 	if failed, detail := s.container.FailedWithin(2 * time.Second); failed {
-		return fmt.Errorf("%s from sandboxed %q: the server exited: %s",
-			action, s.command, truncate(detail, 600))
+		return fmt.Errorf("%s from sandboxed %q: the server exited: %s; %s",
+			action, s.command, truncate(detail, 600), startupConfigurationHint)
 	}
 	if stderr := strings.TrimSpace(s.container.Stderr()); stderr != "" {
-		return fmt.Errorf("%s from sandboxed %q: %w (container stderr: %s)",
-			action, s.command, err, truncate(stderr, 600))
+		return fmt.Errorf("%s from sandboxed %q: %w (container stderr: %s); %s",
+			action, s.command, err, truncate(stderr, 600), startupConfigurationHint)
 	}
-	return fmt.Errorf("%s from sandboxed %q: %w", action, s.command, err)
+	return fmt.Errorf("%s from sandboxed %q: %w; %s",
+		action, s.command, err, startupConfigurationHint)
 }
+
+const startupConfigurationHint = "check required environment variables, credentials, command arguments, and config files; verify the command stays running and speaks MCP over stdio"
 
 // callTimeout bounds a single tool invocation. A tool that hangs on hostile
 // input must not stall the whole probe run — and a hang IS a result, so the

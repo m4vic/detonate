@@ -110,15 +110,17 @@ func EnumerateSandboxedWithTrace(
 		// Both surface as a protocol EOF, and conflating them is how a failed
 		// scan gets mistaken for a clean one.
 		if failed, detail := c.Failed(); failed {
-			return nil, fmt.Errorf("sandbox did not run %q: %s", command, truncate(detail, 500))
+			return nil, fmt.Errorf("sandbox did not run %q: %s; %s",
+				command, truncate(detail, 500), startupConfigurationHint)
 		}
 		// Otherwise include container stderr: when a sandboxed server fails to
 		// start, the reason is almost always there (missing interpreter, bad
 		// path), and without it the user just sees an opaque EOF.
 		if stderr := c.Stderr(); stderr != "" {
-			return nil, fmt.Errorf("%w (container stderr: %s)", err, truncate(stderr, 500))
+			return nil, fmt.Errorf("%w (container stderr: %s); %s",
+				err, truncate(stderr, 500), startupConfigurationHint)
 		}
-		return nil, err
+		return nil, fmt.Errorf("%w; %s", err, startupConfigurationHint)
 	}
 	defer session.Close()
 
@@ -132,14 +134,15 @@ func EnumerateSandboxedWithTrace(
 		// database it could not reach — so include it rather than report EOF
 		// alone.
 		if failed, detail := c.Failed(); failed {
-			return nil, fmt.Errorf("the sandboxed server %q exited during enumeration: %s",
-				command, truncate(detail, 600))
+			return nil, fmt.Errorf("the sandboxed server %q exited during enumeration: %s; %s",
+				command, truncate(detail, 600), startupConfigurationHint)
 		}
 		if stderr := c.Stderr(); stderr != "" {
-			return nil, fmt.Errorf("listing tools from sandboxed %q: %w (container stderr: %s)",
-				command, err, truncate(stderr, 600))
+			return nil, fmt.Errorf("listing tools from sandboxed %q: %w (container stderr: %s); %s",
+				command, err, truncate(stderr, 600), startupConfigurationHint)
 		}
-		return nil, fmt.Errorf("listing tools from sandboxed %q: %w", command, err)
+		return nil, fmt.Errorf("listing tools from sandboxed %q: %w; %s",
+			command, err, startupConfigurationHint)
 	}
 
 	tools := make([]toolinfo.ToolInfo, 0, len(listed))

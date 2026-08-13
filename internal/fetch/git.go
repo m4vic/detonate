@@ -34,6 +34,9 @@ type Result struct {
 	// Source is the URL it came from, for the report.
 	Source string
 
+	// Revision is the immutable commit checked out by the shallow clone.
+	Revision string
+
 	// cleanup removes the temp directory.
 	cleanup func()
 }
@@ -86,8 +89,26 @@ func Git(ctx context.Context, rawURL string) (*Result, error) {
 		}
 		return nil, fmt.Errorf("cloning %s: %s", normalized, truncate(detail, 300))
 	}
+	revision, err := revisionAt(ctx, dir)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("resolving cloned revision for %s: %w", normalized, err)
+	}
 
-	return &Result{Dir: dir, Source: normalized, cleanup: cleanup}, nil
+	return &Result{Dir: dir, Source: normalized, Revision: revision, cleanup: cleanup}, nil
+}
+
+func revisionAt(ctx context.Context, dir string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir,
+		"rev-parse", "--verify", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	revision := strings.TrimSpace(string(out))
+	if len(revision) != 40 {
+		return "", fmt.Errorf("git returned invalid commit %q", revision)
+	}
+	return revision, nil
 }
 
 // normalizeGitURL accepts the shorthand people actually paste.

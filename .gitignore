@@ -2,8 +2,10 @@
 /detonate
 /detonate.exe
 *.exe
+*.exe~
 *.test
 coverage.out
+/detonate-results/
 
 # Go workspace files (machine-local, never shared)
 go.work
@@ -23,6 +25,18 @@ dist/
 venv/
 env/
 
+# Local credentials and JavaScript dependencies
+.env
+.env.*
+!.env.example
+credentials.json
+node_modules/
+
+# Local databases and runtime state
+*.db
+*.sqlite
+*.sqlite3
+
 # Test / coverage
 .pytest_cache/
 .coverage
@@ -31,6 +45,10 @@ htmlcov/
 # one-context local mirror. This repo is public; the mirror can carry
 # cross-session working notes, so it must never be committed here.
 .ctx/
+
+# readback decision log — quotes the user verbatim and names dead ends. Same
+# reason as .ctx: this repo is public, so the record is local-only by default.
+.readback/
 
 # OS / editor
 .DS_Store
