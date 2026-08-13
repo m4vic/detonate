@@ -13,12 +13,40 @@ import (
 	"github.com/m4vic/detonate/internal/probe"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/scenario"
+	"github.com/m4vic/detonate/internal/trace"
 )
 
 // runMCP acquires, launches, enumerates and probes an MCP server.
-func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
+func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr error) {
 	tgt := req.Target
 	policy := sandbox.DefaultPolicy()
+
+	var installed *acquire.Result
+	var sess *mcpdriver.Session
+	defer func() {
+		var cleanupErrs []error
+		if sess != nil {
+			if err := sess.Close(); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("sandbox: %w", err))
+			}
+		}
+		if installed != nil {
+			if err := installed.Cleanup(context.Background()); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("dependency volume: %w", err))
+			}
+		}
+		if cleanupErr := errors.Join(cleanupErrs...); cleanupErr != nil {
+			if out != nil {
+				addTeardownFailure(out, cleanupErr)
+				return
+			}
+			if retErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("teardown failed: %w", cleanupErr))
+				return
+			}
+			retErr = harnessError("teardown", "teardown_failed", false, cleanupErr)
+		}
+	}()
 
 	var mounts []sandbox.Mount
 	var absDir string
@@ -38,10 +66,8 @@ func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
 
 	var scenarios []assessment.ScenarioResult
 
-	// Phase 1 runs the package manager with a network. Target-controlled
-	// lifecycle and build hooks may execute here; the separate container
-	// limits persistence but does not make acquisition inert.
-	var installed *acquire.Result
+	// Acquisition fetches inert artifacts with network access, then performs
+	// every target-controlled install/build step offline and as non-root.
 	if req.Stages.Install {
 		if absDir == "" {
 			return nil, errors.New("installing dependencies needs a target directory to read a manifest from")
@@ -50,16 +76,37 @@ func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
 		if m.Ecosystem == acquire.EcosystemNone {
 			p.step("  no dependency manifest found; skipping install")
 		} else {
-			p.step(fmt.Sprintf("  [1/2] installing %s deps from %s "+
-				"(separate container, network ON, hooks may execute)", m.Ecosystem, m.File))
+			p.step(fmt.Sprintf("  [1/2] fetching %s deps from %s "+
+				"(separate container, network ON, scripts disabled)", m.Ecosystem, m.File))
 		}
 
 		res, err := acquire.Install(ctx, absDir, policy)
 		if err != nil {
+			var unsupported *acquire.UnsupportedError
+			if errors.As(err, &unsupported) {
+				var acquisitionTrace *trace.Trace
+				if len(unsupported.Events) > 0 {
+					acquisitionTrace = newTrace(tgt.Reference)
+					acquisitionTrace.Events = append(acquisitionTrace.Events,
+						unsupported.Events...)
+				}
+				return &Report{
+					Scenarios: []assessment.ScenarioResult{{
+						ID:       "pipeline.acquire",
+						Required: true,
+						Outcome:  assessment.OutcomeUnsupported,
+						Reason:   unsupported.Error(),
+					}},
+					Failures: []Failure{{
+						Phase: "acquire", Code: "acquisition_unsupported",
+						Message: unsupported.Error(), Retryable: false,
+					}},
+					Trace: acquisitionTrace, Reference: tgt.Reference,
+				}, nil
+			}
 			return nil, targetError("acquire", "acquisition_failed", true, err)
 		}
 		installed = res
-		defer func() { _ = installed.Cleanup(context.Background()) }()
 
 		mounts = append(mounts, installed.Mounts()...)
 		policy.Env = installed.Env
@@ -71,11 +118,11 @@ func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
 			policy.Image = installed.Image
 		}
 
-		// A project that had to be compiled now lives in the volume, not at
-		// /target. Detection ran before the build and could only name the
-		// entry point the package declares, which did not exist on disk yet.
+		// Node source runs beside its installed node_modules in the read-only
+		// dependency volume. This applies even when no compile step was needed;
+		// Node does not resolve /deps/app/node_modules for /target/server.js.
 		if rewritten := installed.Command(tgt.Reference); rewritten != tgt.Reference {
-			p.step(fmt.Sprintf("  built   running from %s", installed.Root))
+			p.step(fmt.Sprintf("  acquired runtime at %s", installed.Root))
 			tgt.Reference = rewritten
 		}
 	}
@@ -121,11 +168,11 @@ func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
 
 	// Probing keeps the session open: a tool only reveals what it does when it
 	// is called, so the container has to outlive tools/list.
-	sess, err := mcpdriver.OpenSession(ctx, tgt.Reference, policy, mounts)
+	var err error
+	sess, err = mcpdriver.OpenSession(ctx, tgt.Reference, policy, mounts)
 	if err != nil {
 		return nil, targetError("start", "mcp_start_failed", false, err)
 	}
-	defer sess.Close()
 
 	tools, err := sess.Tools(ctx)
 	if err != nil {
@@ -154,8 +201,14 @@ func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
 		tr.Add(ev)
 	}
 
-	p.step(fmt.Sprintf("  probing %d tool(s) with %d adversarial payload(s)...",
-		len(tools), len(probe.Payloads())))
+	probeable := probe.StringInputToolCount(tools)
+	if probeable == 0 {
+		p.step(fmt.Sprintf("  %d tool(s) expose no adversarial string-input surface; no payloads sent",
+			len(tools)))
+	} else {
+		p.step(fmt.Sprintf("  probing %d/%d tool(s) with %d adversarial payload(s)...",
+			probeable, len(tools), len(probe.Payloads())))
+	}
 
 	// The engine attributes probe-phase behaviour to the specific payload and
 	// tool that provoked it, and skips tools that need the network (their
@@ -173,4 +226,21 @@ func runMCP(ctx context.Context, req Request, p Progress) (*Report, error) {
 		Tools: tools, Trace: tr,
 		Scenarios: scenarios, Reference: tgt.Reference,
 	}, nil
+}
+
+func addTeardownFailure(report *Report, err error) {
+	if report == nil || err == nil {
+		return
+	}
+	message := err.Error()
+	report.Scenarios = append(report.Scenarios, assessment.ScenarioResult{
+		ID:       "pipeline.teardown",
+		Required: true,
+		Outcome:  assessment.OutcomeTeardownError,
+		Reason:   message,
+	})
+	report.Failures = append(report.Failures, Failure{
+		Phase: "teardown", Code: "teardown_failed", Message: message,
+		Retryable: true,
+	})
 }

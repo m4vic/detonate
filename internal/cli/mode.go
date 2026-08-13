@@ -18,6 +18,7 @@ import (
 const modeUsage = `Usage:
   detonate static <file|folder|git-url>   Inspect without target execution
   detonate dynamic <file|folder>          Experimental sandboxed execution
+  detonate report <bundle-dir>            Render a saved result offline
   detonate combined <target>               Not available in alpha
 `
 
@@ -62,11 +63,16 @@ func (a *App) runStatic(ctx context.Context, args []string) int {
 	if !ok {
 		return exitUsage
 	}
+	if err := a.configureColor(opt.color, opt.format); err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
+		return exitUsage
+	}
 	// Static mode reports through the same machine-readable contract as a
 	// dynamic scan, so a CI job can gate on it without a container runtime.
 	a.format = opt.format
 	a.outFile = opt.out
 	a.failIncomplete = opt.failIncomplete
+	a.configureSave(opt.save, opt.saveDir)
 	if (a.format == "json" || a.format == "sarif") && a.outFile == "" {
 		a.docOut = a.Stdout
 		a.Stdout = io.Discard
@@ -79,12 +85,17 @@ func (a *App) runDynamic(ctx context.Context, args []string) int {
 	if !ok {
 		return exitUsage
 	}
+	if err := a.configureColor(opt.color, opt.format); err != nil {
+		fmt.Fprintf(a.Stderr, "detonate: %v\n", err)
+		return exitUsage
+	}
 	// The notice is decoration, and decoration on stdout corrupts a JSON or
 	// SARIF stream. It has to be suppressed here rather than by RunTarget,
 	// which cannot silence output that was already written before it was
 	// called.
 	if opt.format == "" || opt.format == "text" {
-		fmt.Fprintln(a.Stdout, "dynamic mode is experimental: target code runs only in Docker when available")
+		fmt.Fprintln(a.Stdout, a.active("[DYNAMIC]")+" target code runs only in Docker")
+		fmt.Fprintln(a.Stdout, a.muted("  Preflight a new setup with: detonate doctor"))
 	}
 	// RunTarget owns format selection and output redirection for this path,
 	// so the parsed options are handed over whole rather than applied here.
@@ -109,6 +120,10 @@ func (a *App) scanStatic(ctx context.Context, input, subPath string) int {
 	a.scanTools = nil
 	a.scanFailures = nil
 	a.scanTarget = input
+	a.scanRepositoryURL = ""
+	a.scanSubpath = ""
+	a.scanRevision = ""
+	a.scanSandboxImage = ""
 
 	targetPath := input
 	if fetch.IsURL(input) {
@@ -117,6 +132,10 @@ func (a *App) scanStatic(ctx context.Context, input, subPath string) int {
 			return a.failScan("fetch", "fetch_failed", assessment.OutcomeTargetError, true, err, exitFailure)
 		}
 		defer fetched.Cleanup()
+		a.scanRepositoryURL = fetched.Source
+		a.scanSubpath = filepath.ToSlash(subPath)
+		a.scanRevision = fetched.Revision
+		a.scanTarget = remoteTargetIdentity(fetched.Source, subPath)
 
 		// A monorepo is reached with --path, so it has to be applied to the
 		// clone here. Without it, --path parsed fine and then changed nothing,
@@ -127,7 +146,7 @@ func (a *App) scanStatic(ctx context.Context, input, subPath string) int {
 			return exitUsage
 		}
 		targetPath = root
-		fmt.Fprintf(a.Stdout, "static: cloned %s\n", fetched.Source)
+		a.metadata("cloned", fetched.Source)
 	} else if subPath != "" {
 		targetPath = filepath.Join(input, subPath)
 	}
@@ -190,7 +209,9 @@ func (a *App) scanStaticSkill(detected Detected) int {
 	if tr.HasSeverity(trace.SeverityNotable) {
 		outcome = assessment.OutcomeFinding
 	}
-	a.scanTarget = detected.Dir
+	if a.scanTarget == "" {
+		a.scanTarget = detected.Dir
+	}
 	a.scanScenarios = []assessment.ScenarioResult{{
 		ID: "skill.static", Required: true, Outcome: outcome,
 	}}
@@ -210,7 +231,9 @@ func (a *App) scanStaticMCP(detected Detected) int {
 		Summary: "static MCP inventory completed; target code was not executed",
 		During:  "static-inventory", Source: "static-scanner", Detail: detail,
 	})
-	a.scanTarget = detected.Dir
+	if a.scanTarget == "" {
+		a.scanTarget = detected.Dir
+	}
 	a.scanScenarios = []assessment.ScenarioResult{{
 		ID:       "mcp.static-inventory",
 		Required: true,

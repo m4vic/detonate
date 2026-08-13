@@ -81,11 +81,12 @@ It is not production-ready because:
 
 - The worktree, executable entrypoint, and canonical documents are uncommitted.
 - There is no current verified public release or installation channel.
-- Acquisition can execute target-controlled hooks as root with network access.
+- Safe acquisition is implemented in the current worktree but is not yet
+  maintainer-reviewed, CI-gated, or released.
 - Total, phase, tool, call, output, and disk budgets are incomplete.
-- Common fetch/runtime/acquisition/start/inventory/skill-load failures produce
-  structured reports; validation, cancellation, and teardown paths do not all
-  have equivalent coverage yet.
+- Common fetch/runtime/acquisition/start/inventory/skill-load and MCP teardown
+  failures produce structured reports; validation and cancellation paths do
+  not yet have equivalent coverage.
 - Runtime observation is incomplete and relies heavily on target output.
 - Modern MCP, Streamable HTTP, authorization, and full primitive coverage are
   missing.

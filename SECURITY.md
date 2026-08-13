@@ -40,8 +40,14 @@ The current security guarantees and known gaps are documented in
 [the target architecture](docs/TARGET_ARCHITECTURE.md), and
 [compatibility notes](docs/COMPATIBILITY.md). In particular:
 
-- Docker is a required isolation boundary for dynamic MCP and skill execution.
-- Dependency acquisition may execute target-controlled package/build hooks.
-- Prompt-only static analysis does not execute code and does not require Docker.
+- Docker is the required isolation boundary whenever Detonate executes an MCP
+  server or a skill's bundled script. Prompt, static MCP, and skill-instruction
+  analysis do not execute target code and do not require Docker.
+- Dependency acquisition has two separate phases. The fetch phase has network
+  access but disables package lifecycle/build scripts. Target-controlled install
+  and build hooks run only in the second phase, with network disabled and as a
+  non-root user. Unsupported dependency shapes are refused with
+  `acquisition_unsupported`; Detonate does not relax this boundary.
+- Sandbox runtime images are referenced by multi-platform manifest digest, and
+  saved bundles record the image and source revision used for the scan.
 - A no-findings result is not proof of safety; completeness must be inspected.
-

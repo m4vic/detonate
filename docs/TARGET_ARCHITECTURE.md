@@ -87,7 +87,7 @@ to be reached by a particular host/model configuration.
 | Behavioral observation | Target-controlled stderr patterns | Runtime events, bounded logs, filesystem diff, process events, controlled egress, optional eBPF |
 | Agent Skills | Regex analysis plus scripts run without arguments | Full artifact graph, dependency-aware scenarios, realistic invocations, optional LLM host |
 | Prompts | Regex signatures | Static normalization plus repeatable multi-model attack/defense suites |
-| Acquisition | One networked install/build container | Immutable resolve/fetch, offline build, offline/controlled detonation |
+| Acquisition | Script-disabled/wheel-only fetch, then offline non-root install/build | Immutable allowlisted resolve/fetch with provenance, offline build, offline/controlled detonation |
 | Results | Risk only (`clean`/`suspicious`/`dangerous`) | Risk, completeness, coverage, confidence, and failure reason |
 | Reproducibility | Partial | Immutable provenance envelope and record/replay |
 | Distribution | Workflow exists but entrypoint is untracked | Signed release artifacts, SBOM, package-manager installs, clean-checkout gate |
@@ -365,10 +365,12 @@ be an observation, not a critical finding.
 
 ## 11. Safe acquisition and build
 
-The current two-phase claim is unsafe and inaccurate: `npm install`, Python
-build backends, lifecycle hooks, and `npm run build` execute target-controlled
-code in a network-enabled container. The target architecture uses three
-separate phases.
+The current implementation has a real safety split: networked npm fetch runs
+with lifecycle scripts disabled, Python fetch is wheel-only, and all
+target-controlled install/build hooks run offline and non-root. Unsupported
+source/VCS/local forms are rejected explicitly. The target architecture keeps
+those phases while adding allowlisting, content-addressing, provenance, and
+complete resource/evidence controls.
 
 ### 11.1 Resolve/fetch
 

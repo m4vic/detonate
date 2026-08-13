@@ -193,8 +193,11 @@ func TestRunReportsToolsItCannotProbe(t *testing.T) {
 	if len(c.calls) != 0 {
 		t.Errorf("called a tool with no string parameters: %v", c.calls)
 	}
-	if len(events) != 1 || !strings.Contains(events[0].Summary, "not probed") {
+	if len(events) != 1 || !strings.Contains(events[0].Summary, "no adversarial string-input surface") {
 		t.Errorf("expected an explicit not-probed note, got %v", events)
+	}
+	if got := StringInputToolCount(tools); got != 0 {
+		t.Fatalf("string-input tool count = %d, want 0", got)
 	}
 }
 

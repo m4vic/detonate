@@ -108,10 +108,11 @@ to change wastes the one number people will quote.
 
 **Theme: close the root-plus-network hole.**
 
-Today `pip install`, npm lifecycle scripts, and `npm run build` execute
-target-controlled code as uid 0 with network access, *before* the hardened
-sandbox engages. This is a hole in the part of a security tool users assume is
-safe, and it blocks any public promotion.
+The current worktree closes the root-plus-network path: networked fetch uses
+wheel-only `pip download` or npm with lifecycle scripts disabled, and all
+target-controlled installation/build work runs offline and non-root. Unsafe
+manifest forms become explicit `acquisition_unsupported` outcomes. This still
+needs maintainer review and release/CI evidence before v0.3.0 is earned.
 
 Scope — two-phase acquisition:
 1. **Fetch, network on, no execution.** `npm ci --ignore-scripts`,

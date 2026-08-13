@@ -1,6 +1,6 @@
 # Detonate compatibility and live test record
 
-Last verified: 2026-07-30.
+Last verified: 2026-08-13. Rows that retain older evidence say so explicitly.
 
 This document separates observed results from planned support. A passing row
 only supports the exact claim in its “coverage” column.
@@ -10,14 +10,13 @@ only supports the exact claim in its “coverage” column.
 ```text
 Host: Windows amd64
 Go: 1.26.5
-Docker client/server: 29.6.2
+Git: 2.55.0.windows.3
+Docker client/server: 29.7.2
 Container host: Linux x86_64, seccomp and cgroup namespaces
-Node: 24.11.1
-npm/npx: 11.7.0
-Python: 3.10.0
-Ollama: 0.32.5
-MCP Inspector: 0.21.2 (v1 package; now deprecated)
-Detonate commit: 73da967
+Sandbox images:
+  node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+  python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+Detonate base commit: ff9b4b1170b2227f67f7acf3173748fdc528dc43 (dirty release-candidate worktree)
 ```
 
 `uvx` was not installed on the host. Detonate's normal acquisition path uses
@@ -27,25 +26,23 @@ container runtimes, so host `uvx` is not required for the current tested cases.
 
 | Check | Result | Important qualification |
 |---|---|---|
-| `gofmt -l .` | Pass | No Go source formatting drift |
-| `go vet ./...` | Pass | Current host toolchain |
-| `go test -count=1 ./...` | Pass | Includes current Docker integration packages on this machine |
-| `go test -race -count=1 ./...` | Pass | Linux `golang:1.26-bookworm` container with Docker socket; native host has CGO disabled |
-| Clean `HEAD` archive, Go 1.25 race suite | Pass | Reproduces the CI toolchain without ignored/untracked files; the public CI failure did not reproduce |
-| Local CLI package | Builds | It builds only because ignored `cmd/detonate/main.go` exists locally |
-| Clean-checkout/release CLI | Fail | Reproduced exactly: `stat /src/cmd/detonate: directory not found` |
-| [Public main CI run `#12`](https://github.com/m4vic/detonate/actions/runs/30527300628) | Fail | Format and vet passed; race-test step failed. The equivalent clean-archive run now passes locally, so retain this as an unresolved CI/environment or flake investigation |
-| [Historical release run `#1`](https://github.com/m4vic/detonate/actions/runs/30427882497) for `v0.1.0` | Fail | Tests passed; cross-platform build failed. The missing tracked CLI entrypoint reproduces that build failure |
-| GitHub release/tag state | None | No release and no current remote tag; local annotated `v0.1.0` points 19 commits behind `main` |
-| Local compatibility script | Fail | `detonate-docs-local/testmatrix.sh` is truncated and never dispatches its functions |
+| `gofmt -l .` | Pass | Empty output on 2026-08-13 |
+| `go mod tidy -diff` | Pass | No module metadata drift |
+| `go vet ./...` | Pass | Go 1.26.5 host toolchain |
+| `go test -race -count=1 -timeout 25m ./...` | Pass | Native Windows run with Docker integration tests and `NO_COLOR` unset |
+| Local CLI package | Builds | Tracked `cmd/detonate/main.go`; VCS metadata records the dirty release-candidate state |
+| Public MCPB provenance smoke | Pass | Two subpaths completed acquisition, sandbox, handshake, inventory, and saved-manifest inspection |
+| GoReleaser v2.17.1 snapshot | Pass | Six Linux, macOS, and Windows archives plus checksums built as `0.3.0-next`; no publish occurred |
+| Official Everything | Unsupported | Stable named workspace-lifecycle reason; no clean verdict or target execution |
+| Tag release gate | Not yet exercised | Workflow gate is written, but a real failing tag has not proved publication is blocked |
 
 ## 3. Live target results
 
-These are provisional manual audit rows, not a release corpus. They were run
-from the local working tree where the ignored `cmd/detonate/main.go` exists;
-the target clones used floating heads, and the current product does not emit
-immutable target IDs, durations, image/model digests, or retained evidence
-bundle paths. Phase 0 replaces these with versioned, reproducible fixtures.
+These are provisional manual audit rows, not a release corpus. The 2026-08-13
+runs used public repository URLs; each saved manifest records the resolved
+target commit, repository subpath, Detonate version/commit/dirty state, and
+sandbox image digest. The command still resolves the repository's current HEAD
+at scan time, so the manifest—not a floating URL alone—is the evidence identity.
 Detonate commands below are one-line PowerShell commands. Inspector rows retain
 the operation/session metadata available from the audit; where the exact
 launcher invocation was not retained, the row says so.
@@ -55,42 +52,71 @@ launcher invocation was not retained, the row says so.
 Command:
 
 ```text
-go run ./cmd/detonate github.com/modelcontextprotocol/servers --path src/everything --no-baseline --no-probe
+detonate dynamic https://github.com/modelcontextprotocol/servers --path src/everything --no-probe --no-baseline --save
 ```
 
-Observed:
+Observed on 2026-08-13 at target commit
+`76d64c822f5125032f89eb71dbdb94e42b434821`:
 
-- Clone, Node dependency acquisition/build, sandbox startup, MCP handshake, and
-  `tools/list` succeeded.
-- 14 tools were inventoried.
-- Current report: no findings.
+- Clone and package/build-context detection succeeded.
+- Dynamic acquisition stopped before execution with
+  `acquire/acquisition_unsupported`.
+- Named reason: the workspace package relies on a repository-root lockfile and
+  a `prepare` script; Detonate cannot yet replay that workspace lifecycle
+  offline without changing its build semantics.
+- Risk is `not_assessed`, completeness is `inconclusive`, and zero tools were
+  inventoried. This is a compatibility limitation, not a clean result.
 
 Coverage:
 
 ```text
-legacy stdio startup + tools/list only
+fetch + detection + explicit unsupported acquisition result
 ```
 
 Not covered:
 
-- Its prompts and resources.
-- Tool calls, progress, subscriptions, roots/client interactions.
-- Modern `2026-07-28` behavior or Streamable HTTP.
+- Dependency installation/build, sandbox startup, MCP handshake, inventory,
+  tool calls, resources, prompts, and transports.
 
-An independent Inspector run negotiated `2025-11-25`. The server advertised
-tools, resources, prompts, tasks, logging, and completions. The client
-advertised roots, sampling, and elicitation, which activate conditional server
-flows. A roots callback waited roughly 60 seconds before timing out while the
-main inspection still completed. This is a useful regression case: callback
-and parent-request deadlines must be separate and observable.
+### 3.2 Official MCPB examples
 
-Correct target result under the proposed model:
+Commands:
 
 ```text
-risk=no_findings, completeness=partial
+detonate dynamic https://github.com/modelcontextprotocol/mcpb --path examples/hello-world-node --no-probe --no-baseline --save
+detonate dynamic https://github.com/modelcontextprotocol/mcpb --path examples/file-system-node --cmd "node /target/server/index.js /tmp" --no-probe --no-baseline --save
 ```
 
-### 3.2 Official MCP Memory reference server
+Observed on 2026-08-13 at target commit
+`70fe3b34cd6dff1b3bba046638edc72a6467a4fb`:
+
+- Both packages completed inert dependency fetch, offline non-root install,
+  pinned-image sandbox launch, MCP handshake, and `tools/list`.
+- `hello-world-node` exposed one tool; `file-system-node` exposed 14 tools.
+- The saved identities are respectively
+  `.../mcpb#examples/hello-world-node` and
+  `.../mcpb#examples/file-system-node`, with distinct bundle directories and
+  the same resolved repository commit.
+- Probes were deliberately disabled for this provenance smoke run, so both
+  reports are `no_findings` plus `partial`, not safety verdicts.
+
+Coverage:
+
+```text
+legacy stdio startup + tools/list + saved provenance inspection
+```
+
+Not covered:
+
+- Adversarial calls and filesystem containment. A separate real
+  `hello-world-node` run with probes enabled correctly reported that its
+  zero-argument tool has no adversarial string-input surface and sent no
+  payloads.
+
+Sections 3.3–3.10 below retain the 2026-07-30 audit evidence and have not been
+rerun for this alpha unless a row says otherwise.
+
+### 3.3 Official MCP Memory reference server
 
 Command:
 
@@ -121,7 +147,7 @@ Correct target result:
 risk=no_findings, completeness=partial
 ```
 
-### 3.3 Official MCP Filesystem reference server
+### 3.4 Official MCP Filesystem reference server
 
 Command:
 
@@ -153,7 +179,7 @@ Correct target result:
 risk=no_findings, completeness=partial
 ```
 
-### 3.4 GitHub MCP server
+### 3.5 GitHub MCP server
 
 Command:
 
@@ -176,7 +202,7 @@ Correct target result:
 risk=not_assessed, completeness=failed, reason=unsupported_go_runtime
 ```
 
-### 3.5 MCP feature reference server over Streamable HTTP
+### 3.6 MCP feature reference server over Streamable HTTP
 
 Independent MCP Inspector test (run in a disposable Node container; exact
 launcher invocation was not retained):
@@ -200,7 +226,7 @@ Meaning:
   the auth flow.
 - This is a Detonate compatibility gap, not a server failure.
 
-### 3.6 Public Gemini weather server over Streamable HTTP
+### 3.7 Public Gemini weather server over Streamable HTTP
 
 Independent multi-command MCP Inspector session:
 
@@ -229,7 +255,7 @@ Meaning:
   servers.
 - Detonate cannot run this test itself until the HTTP transport adapter lands.
 
-### 3.7 Anthropic Agent Skill: `skills/pdf`
+### 3.8 Anthropic Agent Skill: `skills/pdf`
 
 Static/quick command:
 
@@ -270,7 +296,7 @@ risk=not_assessed, completeness=inconclusive
 
 This row is a mandatory regression test before release.
 
-### 3.8 Raw prompt
+### 3.9 Raw prompt
 
 Input:
 
@@ -293,7 +319,7 @@ Coverage:
 current deterministic text signatures only; no model was run
 ```
 
-### 3.9 Ollama tool calling feasibility
+### 3.10 Ollama tool calling feasibility
 
 Model:
 
@@ -331,7 +357,8 @@ shape:
 | Target | Why it belongs | Current status |
 |---|---|---|
 | First-party Go fault-injection fixture | Deterministic modern/legacy stdio+HTTP and failure cases | Not built |
-| [Everything](https://github.com/modelcontextprotocol/servers/tree/main/src/everything) | Broad tools/prompts/resources reference surface | Tools enumeration passes; most surface untested |
+| [Everything](https://github.com/modelcontextprotocol/servers/tree/main/src/everything) | Broad tools/prompts/resources reference surface | Named `acquisition_unsupported`: root lockfile + workspace `prepare` replay is not implemented |
+| [MCPB hello-world-node](https://github.com/modelcontextprotocol/mcpb/tree/main/examples/hello-world-node) | Packaged Node stdio baseline and zero-argument tool | Acquisition, handshake, one-tool inventory pass; no adversarial string-input surface |
 | [Memory](https://github.com/modelcontextprotocol/servers/tree/main/src/memory) | Nested schemas and writable state | Partial dynamic coverage |
 | [Filesystem](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) | Filesystem containment, mutation, roots, path traversal | 14-tool inventory passes; calls/containment untested |
 | [Fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) | Python packaging and HTTP | Not reverified in this audit |
@@ -410,14 +437,17 @@ in a registry does not prove that a server is safe or compatible.
   [Claude](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools),
   and [Gemini](https://ai.google.dev/gemini-api/docs/function-calling)
 
-## 8. Release compatibility gate
+## 8. Stable-release compatibility gate
 
-The first release requires:
+This longer-term gate is not the `v0.3.0-alpha.1` punch-list. A stable release
+requires:
 
 1. Clean-checkout CLI build.
 2. No known false critical finding in this record.
 3. Risk/completeness separation.
-4. Everything and Memory rows passing their declared legacy stdio profiles.
+4. Everything and Memory either passing their declared legacy stdio profiles
+   or returning a specific, documented unsupported result without a clean
+   verdict.
 5. At least one Python and one Go server reaching meaningful inventory.
 6. One dependency-aware Agent Skill scenario.
 7. Correct failure/partial status for unsupported HTTP/auth and browser shapes.

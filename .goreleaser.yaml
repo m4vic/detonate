@@ -1,9 +1,5 @@
 version: 2
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: detonate
     binary: detonate
@@ -18,15 +14,17 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X github.com/m4vic/detonate/internal/cli.Version={{.Version}}
+      - -s -w -X github.com/m4vic/detonate/internal/cli.Version={{.Version}} -X github.com/m4vic/detonate/internal/cli.Commit={{.Commit}}
 
 archives:
   - id: detonate-archive
-    format: tar.gz
+    formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 checksum:
   name_template: "checksums.txt"
@@ -41,7 +39,7 @@ changelog:
       - "^docs:"
       - "^test:"
 
-releases:
-  - github:
-      owner: m4vic
-      name: detonate
+release:
+  github:
+    owner: m4vic
+    name: detonate

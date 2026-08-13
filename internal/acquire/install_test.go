@@ -2,6 +2,7 @@ package acquire
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/m4vic/detonate/internal/sandbox"
+	"github.com/m4vic/detonate/internal/trace"
 )
 
 func requireDocker(t *testing.T) {
@@ -47,6 +49,112 @@ func TestInstallSkipsWhenNothingToInstall(t *testing.T) {
 	}
 }
 
+func TestInstallReportsWorkspacePrepareBuildAsUnsupportedBeforeDocker(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"package.json":                 `{"private":true,"workspaces":["src/*"]}`,
+		"package-lock.json":            `{}`,
+		"tsconfig.json":                `{"compilerOptions":{"target":"ES2022"}}`,
+		"src/everything/tsconfig.json": `{"extends":"../../tsconfig.json","compilerOptions":{"outDir":"dist"}}`,
+		"src/everything/package.json": `{
+			"main":"dist/index.js",
+			"scripts":{"build":"tsc && cp -r docs dist/","prepare":"npm run build"}
+		}`,
+	})
+	target := filepath.Join(root, "src", "everything")
+	_, err := Install(context.Background(), target, sandbox.DefaultPolicy())
+	var unsupported *UnsupportedError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("error = %v, want UnsupportedError", err)
+	}
+	if !strings.Contains(unsupported.Error(), "monorepo workspace lifecycle") ||
+		!strings.Contains(unsupported.Error(), "repository-root lockfile") {
+		t.Fatalf("unsupported reason is not actionable: %v", unsupported)
+	}
+}
+
+func TestAcquisitionPoliciesNeverCombineTargetExecutionRootAndNetwork(t *testing.T) {
+	m := Manifest{Ecosystem: EcosystemNode, File: "package.json", NeedsBuild: true}
+	fetch := fetchPolicy(sandbox.DefaultPolicy(), m)
+	offline := offlinePolicy(sandbox.DefaultPolicy(), m)
+
+	if !fetch.NetworkEnabled || fetch.User != "0:0" {
+		t.Fatalf("fetch policy lost required package-manager access: %+v", fetch)
+	}
+	if !strings.Contains(strings.Join(m.fetchCommand(DepsDir, ""), " "), "--ignore-scripts") {
+		t.Fatal("privileged networked fetch does not suppress target scripts")
+	}
+	if offline.NetworkEnabled {
+		t.Fatal("target-controlled offline phase has network access")
+	}
+	if offline.User == "0:0" || offline.User == "0" || offline.User == "root" {
+		t.Fatalf("target-controlled offline phase runs as root: %q", offline.User)
+	}
+	if !strings.Contains(strings.Join(m.offlineCommand(DepsDir, ""), " "), "npm run build") {
+		t.Fatal("test setup does not exercise a target-controlled command")
+	}
+}
+
+func TestLocalPythonProjectIsExplicitlyUnsupported(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"pyproject.toml": "[project]\nname='fixture'\nversion='1.0.0'\n",
+	})
+
+	_, err := Install(context.Background(), dir, sandbox.DefaultPolicy())
+	var unsupported *UnsupportedError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("error = %v, want UnsupportedError", err)
+	}
+	if !strings.Contains(err.Error(), "build backend") {
+		t.Fatalf("unsupported reason is not actionable: %v", err)
+	}
+}
+
+func TestLifecycleHookRunsOfflineNonRootAndEgressIsReported(t *testing.T) {
+	requireDocker(t)
+
+	dir := writeProject(t, map[string]string{
+		"package.json": `{
+			"name":"hostile-acquisition-fixture",
+			"version":"1.0.0",
+			"main":"index.js",
+			"scripts":{
+				"postinstall":"node -e \"if(process.getuid()===0){console.error('HOOK_RAN_AS_ROOT');process.exit(9)};require('dns').lookup('exfil.invalid',(e)=>{console.error(e?e.code:'NETWORK_REACHED');process.exit(e?7:8)})\""
+			}
+		}`,
+		"index.js": "console.log('fixture')\n",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	_, err := Install(ctx, dir, sandbox.DefaultPolicy())
+	var unsupported *UnsupportedError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Install error = %v, want UnsupportedError with egress evidence", err)
+	}
+
+	var networkFinding bool
+	for _, event := range unsupported.Events {
+		if event.Kind == trace.KindNetwork &&
+			event.Severity == trace.SeverityCritical &&
+			event.During == "acquire-offline" {
+			networkFinding = true
+		}
+	}
+	if !networkFinding {
+		t.Fatalf("blocked lifecycle egress was not reported: %+v", unsupported.Events)
+	}
+}
+
+func TestOfflineNetworkFailureIsClassifiedUnsupported(t *testing.T) {
+	events := []trace.Event{{Kind: trace.KindNetwork, During: "acquire-offline"}}
+	if !hasNetworkAttempt(events) {
+		t.Fatal("offline network attempt was not recognized for unsupported classification")
+	}
+	if hasNetworkAttempt([]trace.Event{{Kind: trace.KindNetwork, During: "acquire-fetch"}}) {
+		t.Fatal("expected network use during inert fetch was classified as unsupported")
+	}
+}
+
 // The end-to-end claim: a package installed in phase 1 is importable in phase
 // 2, which has no network. Without this the sandbox can only run stdlib-only
 // servers, and almost every real MCP server imports something.
@@ -78,8 +186,8 @@ func TestInstallMakesPackagesImportableWithoutNetwork(t *testing.T) {
 	if res.Volume == "" {
 		t.Fatal("no dependency volume created")
 	}
-	if res.Env["PYTHONPATH"] != DepsDir {
-		t.Errorf("PYTHONPATH = %q, want %q", res.Env["PYTHONPATH"], DepsDir)
+	if res.Env["PYTHONPATH"] != DepsDir+"/site" {
+		t.Errorf("PYTHONPATH = %q, want %q", res.Env["PYTHONPATH"], DepsDir+"/site")
 	}
 
 	// Now the actual proof: import it in a container with the network OFF.
@@ -106,8 +214,8 @@ func TestInstallMakesPackagesImportableWithoutNetwork(t *testing.T) {
 }
 
 // The TypeScript claim, end to end: a project whose entry point exists only
-// after compilation is built in phase 1 (network ON) and runs in phase 2
-// (network OFF).
+// after compilation is fetched without scripts, built offline as non-root,
+// and then runs in the network-disabled detonation sandbox.
 //
 // This is the shape of most published MCP servers — package.json points at
 // dist/, dist/ is gitignored, and the compiler is a devDependency. Before the
@@ -182,6 +290,59 @@ func TestInstallBuildsATypeScriptProject(t *testing.T) {
 	if !strings.Contains(out, "BUILD_OK") {
 		t.Fatalf("compiled entry point did not run in the offline sandbox.\n"+
 			"stdout: %q\nstderr: %q", out, c.Stderr())
+	}
+}
+
+func TestInstallBuildsATypeScriptMonorepoPackage(t *testing.T) {
+	requireDocker(t)
+
+	root := writeProject(t, map[string]string{
+		"package.json": `{"name":"fixture-root","version":"1.0.0","private":true}`,
+		"tsconfig.json": `{
+			"compilerOptions":{"module":"commonjs","target":"es2020"}
+		}`,
+		"packages/server/package.json": `{
+			"name":"fixture-server","version":"1.0.0",
+			"main":"dist/index.js","scripts":{"build":"tsc"},
+			"devDependencies":{"typescript":"5.6.3"}
+		}`,
+		"packages/server/tsconfig.json": `{
+			"extends":"../../tsconfig.json",
+			"compilerOptions":{"outDir":"dist","rootDir":"src"},
+			"include":["src"]
+		}`,
+		"packages/server/src/index.ts": `const marker: string = "MONOREPO_BUILD_OK"; console.log(marker);`,
+	})
+	targetDir := filepath.Join(root, "packages", "server")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	res, err := Install(ctx, targetDir, sandbox.DefaultPolicy())
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	defer res.Cleanup(context.Background())
+
+	wantRoot := DepsDir + "/app/packages/server"
+	if res.Root != wantRoot {
+		t.Fatalf("Root = %q, want %q", res.Root, wantRoot)
+	}
+	command := res.Command("node /target/dist/index.js")
+	p := sandbox.DefaultPolicy()
+	p.Image = res.Image
+	p.Env = res.Env
+	p.Timeout = 90 * time.Second
+	name, err := sandbox.NewName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := sandbox.Start(ctx, name, p, res.Mounts(), strings.Fields(command))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer c.Close()
+	if out := readAll(t, c); !strings.Contains(out, "MONOREPO_BUILD_OK") {
+		t.Fatalf("monorepo build output did not run in detonation sandbox: %q", out)
 	}
 }
 

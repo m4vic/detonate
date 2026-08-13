@@ -18,6 +18,12 @@
 > certification. Use disposable test targets, never provide real secrets, and
 > read the full [disclaimer](DISCLAIMER.md) before running dynamic scans.
 
+<p align="center">
+  <img src="docs/assets/dynamic-mcpb-scan.png" width="820" alt="Detonate dynamically scans the public MCPB hello-world server: inert dependency fetch, offline non-root sandbox launch, tool discovery, honest partial coverage, and saved report bundle">
+</p>
+
+<p align="center"><em>A real public MCP server scan. Dynamic execution stays in Docker; the report keeps incomplete coverage explicit.</em></p>
+
 ## Why Detonate:
 
 Today, thousands of developers install Model Context Protocol (MCP) servers and AI Agent Skills from GitHub directly onto their local systems. They run with **your local user permissions**, and your AI assistant invokes their tools automatically behind the scenes. 
@@ -104,8 +110,8 @@ detonate doctor
 detonate v0.1.0  linux/amd64
 
   [ok]   docker            docker ready
-  [ok]   image             python:3.12-slim
-  [ok]   image             node:22-slim
+  [ok]   image             python:3.12-slim@sha256:229a...
+  [ok]   image             node:22-slim@sha256:d649...
 
   Ready. Try:  detonate ./some-mcp-server
 ```
@@ -181,6 +187,7 @@ $ detonate static github.com/modelcontextprotocol/servers
 detonate doctor             check whether this machine can run a scan
 detonate static <target>    inspect without executing target code
 detonate dynamic <target>   experimental: runs the Docker sandbox path
+detonate report <dir>       render a saved bundle without rescanning
 detonate combined <target>  intentionally unavailable in alpha
 ```
 
@@ -192,6 +199,25 @@ detonate static ./skills/pdf-extractor
 detonate static ./system-prompt.txt
 detonate static github.com/owner/repo
 ```
+
+Saving is opt-in. `--save` creates a collision-resistant directory under
+`detonate-results/`; `--save-dir` chooses the exact new directory and implies
+`--save`:
+
+```bash
+detonate static github.com/owner/repo --save
+detonate dynamic ./my-server --save-dir ./reports/server-review
+detonate report ./reports/server-review
+```
+
+The initial bundle contains `manifest.json`, an ANSI-free `report.txt`, and
+the canonical redacted `report.json`. The manifest records the repository URL,
+requested subpath, resolved target commit, Detonate version/commit, dirty-build
+state, and sandbox image digest when those values apply. Detonate never
+overwrites an existing bundle directory. Source files, cloned repositories,
+dependency caches, and raw environments are not copied into the bundle. The
+`report` command reads only the saved files; it does not rescan the target or
+contact a model.
 
 Static prompt and skill analysis are the mature paths. Static **MCP** mode
 currently records only source and manifest inventory and reports incomplete
@@ -227,8 +253,8 @@ detonate github.com/modelcontextprotocol/servers --path src/memory
 The entry point comes from the manifest, so servers with no runnable file on
 disk are handled: `bin`/`main` for Node, `[project.scripts]` for Python.
 TypeScript projects whose `dist/` is generated at publish time are compiled
-first, in the install container — including monorepo packages, whose build
-needs the config they inherit from the repository root.
+first, in the offline non-root build container — including monorepo packages,
+whose build needs the config they inherit from the repository root.
 
 Or run it with no arguments for the slash-command interface:
 
@@ -240,10 +266,10 @@ detonate> /help
 ```
 
 Entering a target without a slash uses static mode. Dynamic mode remains
-experimental: dependency and build hooks may run as root in the networked
-acquisition container. Schema-reachable tools are called with adversarial
-input, and discovered skill scripts are executed without dependency-aware
-invocation data. `--quick` opts out of dynamic stages.
+experimental: dependencies are fetched with scripts disabled, then dependency
+and build hooks run offline as a non-root user. Schema-reachable tools are
+called with adversarial input, and discovered skill scripts are executed
+without dependency-aware invocation data. `--quick` opts out of dynamic stages.
 
 If detection guesses the start command wrong:
 
@@ -277,6 +303,14 @@ appear as annotations on the pull request diff.
 Exit codes are identical across formats, so switching to SARIF for
 annotations cannot change whether the build passes.
 
+Human terminal output uses color automatically when the terminal supports it.
+Use `--color always` to force it, `--color never` to disable it, or set the
+standard `NO_COLOR` environment variable. JSON, SARIF, redirected output, and
+output files never contain terminal color escapes.
+
+When `--save` is combined with JSON or SARIF on stdout, the `[SAVED]` status is
+written to stderr so the machine-readable stdout document remains valid.
+
 Failures before or during execution still emit the requested JSON/SARIF
 document. JSON reports place them in `failures` with a stable `phase`, `code`,
 bounded `message`, and `retryable` flag; the failed phase also appears in
@@ -288,6 +322,8 @@ result. Current codes are:
 | `fetch_failed` | repository fetch |
 | `runtime_unavailable` | Docker preflight |
 | `acquisition_failed` | dependency/build acquisition |
+| `acquisition_unsupported` | acquisition would cross the safe build boundary |
+| `teardown_failed` | sandbox or dependency-volume cleanup |
 | `mcp_start_failed` | sandboxed server startup |
 | `mcp_inventory_failed` | MCP negotiation or tool inventory |
 | `skill_load_failed` | skill resolution |
@@ -322,8 +358,10 @@ result. Current codes are:
 ```
 TARGET             clone or mount it, read-only
     |
-ACQUIRE            separate container, network ON; dependency/build hooks may
-                   execute target-controlled code as root in that container
+FETCH              separate container, network ON, scripts disabled; Python
+                   accepts wheels only and Node VCS/local sources are rejected
+    |
+BUILD              network OFF, non-root; lifecycle/build hooks may execute
     |
 DETONATE           network OFF, read-only root, all capabilities dropped,
                    no-new-privileges, non-root, memory and PID caps
@@ -340,11 +378,13 @@ output changes between runs cannot gate a CI pipeline.
 
 ## Honest limitations
 
-- **Acquisition is not yet a safe build boundary.** `pip install`, npm lifecycle
-  scripts, and `npm run build` can execute target-controlled code while the
-  acquisition container has network access, a writable root, and uid 0.
-  Current install observation analyzes process output; it is not complete
-  network, process, or filesystem tracing.
+- **Safe acquisition is intentionally conservative.** Registry-backed Node
+  packages and wheel-only Python requirements are supported. Local Python
+  projects, source distributions, recursive requirements, VCS/local Node
+  dependencies, and network-dependent build hooks produce
+  `acquisition_unsupported` instead of relaxing the boundary. Install
+  observation still analyzes process output; it is not complete process or
+  filesystem tracing.
 - **A container is not a virtual machine.** It is a process on the host kernel
   behind namespaces and cgroups, so a kernel exploit escapes it. That is why the
   detonation policy drops every capability, sets `no-new-privileges`, and
@@ -362,13 +402,17 @@ output changes between runs cannot gate a CI pipeline.
   the sandbox working is not a defect in the tool.
 - **Startup and invocation are observed; syscalls are not.** eBPF-level tracing
   would close that gap and is not built.
-- **Docker is required** for everything except prompt files.
+- **Docker is required only when target code executes.** Prompt files, static
+  MCP inventory, and skill-instruction analysis work without it. A skill needs
+  Docker when Detonate runs one of its bundled scripts; every dynamic MCP scan
+  needs Docker. Run `detonate doctor` before the first dynamic scan.
 - **Servers that shell out to system binaries may not start.** The sandbox
   images are slim, so `mcp-server-git` fails on a missing `git` executable. The
   error names the cause, but the scan does not complete.
-- **Monorepo packages that rely on hoisted workspace dependencies still fail.**
-  Packages that inherit only a tsconfig are handled; ones that need the root
-  `node_modules` are not.
+- **Some monorepo workspace lifecycle builds are unsupported.** Packages that
+  inherit only a tsconfig are handled. A package that relies on a repository-
+  root lockfile and runs its build from `prepare` currently returns the named
+  `acquisition_unsupported` result rather than changing npm's build semantics.
 
 ## Calibration
 
@@ -407,9 +451,8 @@ report risk, completeness, and per-scenario coverage, and common pipeline
 failures preserve that same contract instead of collapsing into a false clean
 result.
 
-What is not: acquisition can still execute target-controlled hooks as root with
-network access, resource budgets are incomplete, cancellation and teardown do
-not yet have equal failure coverage, and runtime observation leans on
+What is not: resource budgets are incomplete, cancellation paths do not yet
+have equal failure coverage, and runtime observation leans on
 target-controlled output. Each is tracked in the [roadmap](docs/ROADMAP.md)
 with the version that closes it.
 

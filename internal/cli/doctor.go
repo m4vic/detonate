@@ -21,7 +21,8 @@ import (
 // analysis need no container, and a user who believes the whole tool is
 // unavailable will not try the half that would have helped them.
 func (a *App) doctor(ctx context.Context) int {
-	fmt.Fprintf(a.Stdout, "detonate %s  %s/%s\n\n", Version, runtime.GOOS, runtime.GOARCH)
+	_ = a.configureColor(colorAuto, "text")
+	fmt.Fprintf(a.Stdout, "%s %s  %s/%s\n\n", a.heading("DETONATE"), Version, runtime.GOOS, runtime.GOARCH)
 
 	ready := true
 
@@ -31,14 +32,14 @@ func (a *App) doctor(ctx context.Context) int {
 	status := a.CheckDocker(ctx)
 	switch {
 	case status.Ready():
-		fmt.Fprintf(a.Stdout, "  [ok]   docker            %s\n", status.Detail)
+		fmt.Fprintf(a.Stdout, "  %s docker            %s\n", a.success("[OK]  "), status.Detail)
 	case status.Installed:
 		ready = false
-		fmt.Fprintf(a.Stdout, "  [FAIL] docker daemon     %s\n", status.Detail)
+		fmt.Fprintf(a.Stdout, "  %s docker daemon     %s\n", a.danger("[FAIL]"), status.Detail)
 		fmt.Fprintln(a.Stdout, "         start Docker Desktop, or: sudo systemctl start docker")
 	default:
 		ready = false
-		fmt.Fprintf(a.Stdout, "  [FAIL] docker            %s\n", status.Detail)
+		fmt.Fprintf(a.Stdout, "  %s docker            %s\n", a.danger("[FAIL]"), status.Detail)
 		fmt.Fprintln(a.Stdout, "         install it: https://docs.docker.com/get-docker/")
 	}
 
@@ -48,13 +49,13 @@ func (a *App) doctor(ctx context.Context) int {
 	if status.Ready() {
 		for _, image := range []string{acquire.PythonImage, acquire.NodeImage} {
 			if sandbox.ImagePresent(ctx, image) {
-				fmt.Fprintf(a.Stdout, "  [ok]   image             %s\n", image)
+				fmt.Fprintf(a.Stdout, "  %s image             %s\n", a.success("[OK]  "), image)
 				continue
 			}
 			// Not a failure. A missing image costs the first scan a download,
 			// it does not stop it, and reporting it as broken would send the
 			// user looking for a problem that does not exist.
-			fmt.Fprintf(a.Stdout, "  [warn] image             %s not downloaded yet\n", image)
+			fmt.Fprintf(a.Stdout, "  %s image             %s not downloaded yet\n", a.warning("[WARN]"), image)
 			fmt.Fprintf(a.Stdout, "         the first scan will pull it, or: docker pull %s\n", image)
 		}
 	}

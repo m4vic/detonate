@@ -9,7 +9,46 @@ permissions:
   contents: write
 
 jobs:
+  # A tag must not publish binaries that the main CI would have rejected. The
+  # tag-push event does not trigger the CI workflow, so the same gates run here
+  # and GoReleaser depends on them. Before this job existed, any v* tag ran
+  # GoReleaser immediately with no test, format, or clean-checkout gate — which
+  # directly contradicted the CHANGELOG's claim that release publication depends
+  # on them. This job is what makes that claim true.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Tracked entrypoint
+        run: git ls-files --error-unmatch cmd/detonate/main.go
+
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race -count=1 -timeout 25m ./...
+
+      - name: Confirm Docker was available
+        run: docker version
+
   goreleaser:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

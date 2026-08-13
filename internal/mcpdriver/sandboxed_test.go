@@ -155,6 +155,31 @@ func TestEnumerateSandboxedQuotesNonProtocolOutput(t *testing.T) {
 	if !strings.Contains(err.Error(), "Configuration:") {
 		t.Errorf("error does not quote what the target actually wrote: %v", err)
 	}
+	if !strings.Contains(err.Error(), "required environment variables") ||
+		!strings.Contains(err.Error(), "speaks MCP over stdio") {
+		t.Errorf("error does not provide an actionable startup hint: %v", err)
+	}
+}
+
+func TestEnumerateSandboxedRetainsStartupStderrAndConfigurationHint(t *testing.T) {
+	requireDocker(t)
+	policy := sandbox.DefaultPolicy()
+	policy.Timeout = 30 * time.Second
+
+	_, err := EnumerateSandboxed(context.Background(),
+		`sh -c "echo missing DATABASE_URL >&2; exit 1"`, policy, nil)
+	if err == nil {
+		t.Fatal("expected startup failure")
+	}
+	for _, want := range []string{
+		"missing DATABASE_URL",
+		"required environment variables",
+		"speaks MCP over stdio",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("startup error missing %q: %v", want, err)
+		}
+	}
 }
 
 func TestFirstBytes(t *testing.T) {

@@ -2,9 +2,11 @@ package acquire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,7 +23,16 @@ const DepsDir = "/deps"
 // would report a network failure for a target that was merely large.
 const installTimeout = 10 * time.Minute
 
-// Result is what phase 1 produced.
+// UnsupportedError means satisfying a target's acquisition request would
+// require weakening the root/network execution boundary.
+type UnsupportedError struct {
+	Reason string
+	Events []trace.Event
+}
+
+func (e *UnsupportedError) Error() string { return e.Reason }
+
+// Result is what the fetch and offline-install phases produced.
 type Result struct {
 	// Volume holds the installed dependencies. The caller mounts it read-only
 	// into the detonation container and must Cleanup it afterwards.
@@ -37,9 +48,10 @@ type Result struct {
 	// ecosystem, not just a volume.
 	Image string
 
-	// Root is where the target's code lives in the detonation container when
-	// phase 1 had to build it. Empty means the code is still read straight
-	// from /target, which is the common case.
+	// Root is where the runnable target code lives in the detonation container.
+	// Node dependencies are installed beside a copy of the source, so Node must
+	// also start from that copy even when no compilation step was needed.
+	// Empty means the original read-only /target mount remains the code root.
 	Root string
 
 	// Events is what the target's installation did. Empty for a target with
@@ -49,16 +61,8 @@ type Result struct {
 	manifest Manifest
 }
 
-// Install runs a target's dependency installation in its own container with
-// the network ON, and captures what happened.
-//
-// The security argument for allowing a network here, given that the whole tool
-// exists to deny one: this container executes the PACKAGE MANAGER, not the
-// target. It mounts the target read-only, has no other host access, and is
-// destroyed immediately after. Install scripts still run — deliberately,
-// because suppressing them would hide the supply-chain behaviour that is the
-// most valuable thing this phase can find. The target's own code is only ever
-// executed in phase 2, with the network off.
+// Install fetches inert artifacts with network access, then performs every
+// step that may execute target-controlled code offline and as non-root.
 func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Result, error) {
 	m := Detect(targetDir)
 	if m.Ecosystem == EcosystemNone {
@@ -66,10 +70,14 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 		// good target, and it skips straight to detonation.
 		return &Result{manifest: m}, nil
 	}
-
-	volume, err := createVolume(ctx)
-	if err != nil {
-		return nil, err
+	if m.Ecosystem == EcosystemPython && m.File != "requirements.txt" {
+		return nil, &UnsupportedError{Reason: fmt.Sprintf(
+			"safe acquisition of %s is not supported yet: resolving a local Python project may execute its build backend while the network is enabled; provide a wheel-only requirements.txt or skip dynamic acquisition",
+			m.File)}
+	}
+	if err := validateInertFetch(targetDir, m); err != nil {
+		return nil, &UnsupportedError{Reason: fmt.Sprintf(
+			"safe acquisition is unsupported for this manifest: %v", err)}
 	}
 
 	// A package inside a monorepo cannot be built alone: its tsconfig extends
@@ -79,11 +87,19 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 	if m.NeedsBuild {
 		bc = buildContextFor(targetDir)
 	}
+	if reason := unsupportedWorkspaceLifecycle(targetDir, m, bc); reason != "" {
+		return nil, &UnsupportedError{Reason: reason}
+	}
+
+	volume, err := createVolume(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// A built project's dependencies land beside its source in /deps/app, not
 	// at the volume root, so the interpreter has to be pointed there instead.
-	codeRoot := DepsDir
-	if m.NeedsBuild {
+	codeRoot := DepsDir + "/site"
+	if m.Ecosystem == EcosystemNode {
 		codeRoot = appDir(DepsDir)
 		if bc.Sub != "" {
 			codeRoot += "/" + bc.Sub
@@ -96,46 +112,98 @@ func Install(ctx context.Context, targetDir string, policy sandbox.Policy) (*Res
 		Image:    imageFor(m.Ecosystem, policy.Image),
 		manifest: m,
 	}
-	if m.NeedsBuild {
+	if m.Ecosystem == EcosystemNode {
 		res.Root = codeRoot
 	}
 
 	started := time.Now()
-	stdout, stderr, runErr := runInstall(ctx, bc, volume, m, policy)
+	fetchOut, fetchErrOut, runErr := runAcquisitionPhase(ctx, bc, volume,
+		fetchPolicy(policy, m), m.fetchCommand(DepsDir, bc.Sub))
+	action := fmt.Sprintf("fetching %s dependencies from %s without executing lifecycle scripts",
+		m.Ecosystem, m.File)
+	res.Events = append(res.Events, trace.Event{
+		Kind: trace.KindLifecycle, Severity: trace.SeverityInfo, At: started,
+		Summary: action, Source: "acquire", During: "acquire-fetch",
+	})
+	res.Events = append(res.Events, analyseAcquisition(fetchOut, fetchErrOut,
+		"acquire-fetch", true)...)
+	if runErr != nil {
+		cleanupErr := res.Cleanup(context.Background())
+		return nil, errors.Join(
+			fmt.Errorf("%s: %w%s", action, runErr, failureOutput(fetchOut, fetchErrOut)),
+			cleanupErr,
+		)
+	}
 
-	action := fmt.Sprintf("installing %s dependencies from %s", m.Ecosystem, m.File)
+	started = time.Now()
+	buildOut, buildErrOut, runErr := runAcquisitionPhase(ctx, bc, volume,
+		offlinePolicy(policy, m), m.offlineCommand(DepsDir, bc.Sub))
+	action = fmt.Sprintf("installing %s dependencies offline as non-root", m.Ecosystem)
 	if m.NeedsBuild {
 		action += fmt.Sprintf(" and building %s", m.Entry)
 	}
 	res.Events = append(res.Events, trace.Event{
 		Kind: trace.KindLifecycle, Severity: trace.SeverityInfo, At: started,
-		Summary: action, Source: "acquire", During: "install",
+		Summary: action, Source: "acquire", During: "acquire-offline",
 	})
 
-	// Analyse installer output for behaviour worth reporting. The network is
-	// ON here, so the blocked-egress signatures do not apply — what matters is
-	// what the install itself did, and the raw log is kept as evidence either
-	// way.
-	res.Events = append(res.Events, analyseInstall(stdout, stderr)...)
+	// Network signatures in this phase are blocked egress attempts because
+	// target-controlled installation deliberately runs offline.
+	offlineEvents := analyseAcquisition(buildOut, buildErrOut,
+		"acquire-offline", false)
+	res.Events = append(res.Events, offlineEvents...)
 
 	if runErr != nil {
-		_ = res.Cleanup(context.Background())
+		cleanupErr := res.Cleanup(context.Background())
+		if cleanupErr == nil && hasNetworkAttempt(offlineEvents) {
+			return nil, &UnsupportedError{
+				Reason: fmt.Sprintf(
+					"safe acquisition is unsupported: %s requires network access during target-controlled offline installation%s",
+					m.File, failureOutput(buildOut, buildErrOut)),
+				Events: offlineEvents,
+			}
+		}
 		// Naming the phase matters: a failed `npm run build` and a failed
 		// `npm install` need different fixes, and the output alone rarely says
 		// which one it was.
-		return nil, fmt.Errorf("%s: %w%s", action, runErr, failureOutput(stdout, stderr))
+		return nil, errors.Join(
+			fmt.Errorf("%s: %w%s", action, runErr, failureOutput(buildOut, buildErrOut)),
+			cleanupErr,
+		)
 	}
 	return res, nil
 }
 
-// Command rewrites a start command to point at the built code.
+func unsupportedWorkspaceLifecycle(targetDir string, m Manifest, bc buildContext) string {
+	if m.Ecosystem != EcosystemNode || !m.NeedsBuild || bc.Sub == "" {
+		return ""
+	}
+	pkg := readPackageJSON(targetDir)
+	if strings.TrimSpace(pkg.Scripts["prepare"]) == "" ||
+		fileExists(filepath.Join(targetDir, "package-lock.json")) ||
+		!fileExists(filepath.Join(bc.Root, "package-lock.json")) {
+		return ""
+	}
+	return "safe acquisition is unsupported for this monorepo workspace lifecycle: " +
+		"the package relies on a repository-root lockfile and a prepare script; " +
+		"Detonate cannot yet replay that workspace prepare step offline without changing its build semantics"
+}
+
+func hasNetworkAttempt(events []trace.Event) bool {
+	for _, event := range events {
+		if event.Kind == trace.KindNetwork && event.During == "acquire-offline" {
+			return true
+		}
+	}
+	return false
+}
+
+// Command rewrites a start command to point at the acquired runtime tree.
 //
-// Detection runs before the build and can only describe the target as it sits
-// on disk, so it produces `node /target/dist/index.js` for an entry point that
-// does not exist yet. After a build that file exists in the volume instead,
-// and launching the original path would fail with MODULE_NOT_FOUND.
-//
-// A no-op when nothing was built, which keeps the common path untouched.
+// Node source and node_modules must share /deps/app for normal module
+// resolution. This is true both for compiled servers and for plain JavaScript
+// entry points; launching the latter from /target made installed packages
+// invisible and failed with ERR_MODULE_NOT_FOUND.
 func (r *Result) Command(detected string) string {
 	if r.Root == "" {
 		return detected
@@ -187,47 +255,46 @@ func createVolume(ctx context.Context) (string, error) {
 	return name, nil
 }
 
-// runInstall executes the package manager in a container with network access.
-func runInstall(ctx context.Context, bc buildContext, volume string, m Manifest, base sandbox.Policy) (stdout, stderr string, err error) {
+// acquisitionPolicy applies bounded resources shared by both phases.
+func acquisitionPolicy(base sandbox.Policy, m Manifest) sandbox.Policy {
 	p := base
 	p.Timeout = installTimeout
-
-	// The image has to match the ecosystem. The default is python:3.12-slim,
-	// which has no npm, so every Node MCP server failed to install with
-	// "sh: 1: npm: not found" — and Node is most of the ecosystem.
-	//
-	// Chosen per phase rather than globally because the two phases need
-	// different things: install needs a package manager, detonation needs only
-	// a runtime. Keeping them separate means the detonation image can stay
-	// minimal.
 	p.Image = imageFor(m.Ecosystem, base.Image)
-
-	// The two deliberate relaxations, and only these two.
-	p.NetworkEnabled = true  // a package manager cannot work without one
-	p.ReadOnlyRootfs = false // pip and npm write caches and temp files
-
-	// Root, because pip and npm need to write into the volume, and a
-	// non-root uid cannot create files in a fresh Docker volume (which is
-	// owned by root). Acceptable here and nowhere else: this container runs
-	// the package manager rather than the target, holds no host mounts beyond
-	// a read-only copy of the target, and is destroyed immediately after.
-	p.User = "0:0"
-
-	// Installs pull large trees and npm is memory-hungry, so the ceiling has
-	// to be higher than the detonation phase's. Still bounded: an unbounded
-	// install is still a way to take down the host.
 	if p.MemoryBytes < 2*1024*1024*1024 {
 		p.MemoryBytes = 2 * 1024 * 1024 * 1024
 	}
 	p.PidLimit = 512
-
-	// pip and npm unpack and build in /tmp. At the detonation phase's 64 MiB
-	// a real server dies with "No space left on device" before it is ever
-	// scanned — which is a scan that failed for a reason having nothing to do
-	// with the target. noexec still applies, so this stays writable but not
-	// runnable.
 	p.TmpfsSize = "2g"
+	return p
+}
 
+// fetchPolicy may use root and network because its command forbids all target
+// lifecycle/build execution.
+func fetchPolicy(base sandbox.Policy, m Manifest) sandbox.Policy {
+	p := acquisitionPolicy(base, m)
+	p.NetworkEnabled = true
+	p.ReadOnlyRootfs = false
+	p.User = "0:0"
+	return p
+}
+
+// offlinePolicy is the only policy paired with commands that may execute
+// target-controlled code.
+func offlinePolicy(base sandbox.Policy, m Manifest) sandbox.Policy {
+	p := acquisitionPolicy(base, m)
+	p.NetworkEnabled = false
+	p.ReadOnlyRootfs = true
+	p.User = acquisitionUser
+	return p
+}
+
+func runAcquisitionPhase(
+	ctx context.Context,
+	bc buildContext,
+	volume string,
+	p sandbox.Policy,
+	command []string,
+) (stdout, stderr string, err error) {
 	name, err := sandbox.NewName()
 	if err != nil {
 		return "", "", err
@@ -241,22 +308,25 @@ func runInstall(ctx context.Context, bc buildContext, volume string, m Manifest,
 		{HostPath: volume, ContainerPath: DepsDir, ReadOnly: false},
 	}
 
-	c, startErr := sandbox.Start(ctx, name, p, mounts, m.installCommand(DepsDir, bc.Sub))
+	c, startErr := sandbox.Start(ctx, name, p, mounts, command)
 	if startErr != nil {
 		return "", "", startErr
 	}
-	defer c.Close()
-
 	out, _ := io.ReadAll(c.Stdout())
-
-	if exitErr := c.ExitError(); exitErr != nil {
-		return string(out), c.Stderr(), exitErr
+	exitErr := c.ExitError()
+	stderr = c.Stderr()
+	closeErr := c.Close()
+	if exitErr != nil || closeErr != nil {
+		return string(out), stderr, errors.Join(exitErr, closeErr)
 	}
-	return string(out), c.Stderr(), nil
+	return string(out), stderr, nil
 }
 
-// analyseInstall looks for behaviour worth reporting during installation.
-func analyseInstall(stdout, stderr string) []trace.Event {
+// analyseAcquisition extracts evidence from one acquisition phase. Network
+// signatures are ignored only during inert fetch, where egress is expected;
+// during offline execution they are evidence that a lifecycle/build hook
+// attempted to escape its boundary.
+func analyseAcquisition(stdout, stderr, during string, networkExpected bool) []trace.Event {
 	var events []trace.Event
 	combined := stdout + "\n" + stderr
 
@@ -268,7 +338,7 @@ func analyseInstall(stdout, stderr string) []trace.Event {
 		strings.Contains(strings.ToLower(combined), "preinstall") {
 		events = append(events, trace.Event{
 			Kind: trace.KindProcess, Severity: trace.SeverityNotable,
-			At: time.Now(), Source: "acquire", During: "install",
+			At: time.Now(), Source: "acquire", During: during,
 			Summary: "package lifecycle script executed during installation",
 			Detail:  map[string]any{"evidence": extractLine(combined, "install")},
 		})
@@ -277,8 +347,8 @@ func analyseInstall(stdout, stderr string) []trace.Event {
 	// Reuse the runtime signatures for things they still catch here: a
 	// permission error or a fork ceiling means the same thing during an
 	// install as during a run.
-	for _, e := range monitor.Analyze(stderr, "install") {
-		if e.Kind != trace.KindNetwork { // the network is legitimately on
+	for _, e := range monitor.Analyze(stderr, during) {
+		if !networkExpected || e.Kind != trace.KindNetwork {
 			events = append(events, e)
 		}
 	}
