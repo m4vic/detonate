@@ -1,0 +1,32 @@
+# Line endings are LF in the repository and in the working tree, on every OS.
+#
+# Without this file, a Windows clone with core.autocrlf=true checks out CRLF,
+# and then `gofmt -l .` flags every Go file while `go mod tidy -diff` reports
+# go.sum drift — locally red, green in CI. A pre-release check that is wrong on
+# the maintainer's own machine is worse than no check, because the habit it
+# teaches is to ignore it.
+#
+# eol=lf (not just text=auto) is deliberate: text=auto alone still hands CRLF to
+# the working tree under autocrlf, which is exactly the case that broke.
+
+* text=auto eol=lf
+
+# Explicit for the files whose tooling is line-ending sensitive.
+*.go    text eol=lf
+*.md    text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.rb    text eol=lf
+go.mod  text eol=lf
+go.sum  text eol=lf
+
+# Never touched.
+*.png   binary
+*.gif   binary
+*.exe   binary
+*.tar.gz binary
+*.zip   binary
