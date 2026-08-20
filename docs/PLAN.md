@@ -47,14 +47,20 @@ and no answer to "when is it done".
 
 The tool works. Nobody can *use* it. That is the whole gap this week.
 
-- [x] **1. GitHub Action.** **Done 2026-08-20.** Composite action that downloads the released binary,
-      verifies its checksum, and runs a scan. **This does not exist, and it is
-      the single highest-leverage missing piece in the project.**
-      — *check:* a repo adds 3 lines of YAML and gets a scan on push.
+- [x] **1. GitHub Action. Done 2026-08-20.** Composite action that downloads the
+      released binary, verifies its checksum, and runs a scan. Two lines of YAML
+      in a consumer repo.
+      — *verified:* the scan step was executed locally against real fixtures —
+      benign passes, poisoned fails the job, `fail-on: never` reports without
+      failing, an unassessable target warns rather than passing silently, and an
+      invalid `mode` is rejected. **Not yet verified:** the download-and-verify
+      path, since local testing used `version: source`.
 
-- [x] **2. SARIF upload to the Security tab.** **Done 2026-08-20** (wired in the action; unproven until it runs on a real PR). Detonate already emits SARIF;
-      GitHub Actions already ingests it natively. Only the wiring is missing.
-      — *check:* a finding appears as an annotation on a real pull request.
+- [x] **2. SARIF upload to the Security tab. Wired 2026-08-20.** Upload runs even
+      when the scan failed the job, since findings are exactly what should reach
+      the Security tab, and never fails the build on a permissions error.
+      — *check, still open:* a finding appears as an annotation on a real pull
+      request. Unproven until the workflow runs on GitHub.
 
 - [ ] **3. Rewrite the README for the author.** It currently opens by addressing
       consumers installing third-party servers. Lead with the CI snippet.
@@ -117,15 +123,16 @@ Not cancelled. Not now.
       none at all. Delete both; git remembers, and v1.1 re-adds the canary
       properly. Unwired scaffolding is what made v0.2 look shipped when it was
       not.
-- [x] **F3 — commit the 2026-08-20 work.** **Done 2026-08-20** — 7 commits on `feat/ci-gate-and-detection`, merged with `main`. 11 modified files and 6 new paths:
-      `.gitattributes`, `internal/termsafe` tests, `internal/dockertest`,
-      `internal/toolscan`, `internal/staticinv`, CI Docker gating, static-verdict
-      wiring. Branch off `main`.
-- [x] **F4 — archive the document sprawl.** **Done 2026-08-20** — 15 files/5,500 lines to 4 files/988 lines. 15 files, 5,500 lines, against 10,782
-      lines of non-test Go. Keep `ARCHITECTURE.md` (what the code does), this
-      file (what happens next), `COMPATIBILITY.md` (verified results), and the
-      root README/SECURITY/CHANGELOG. Everything else to `docs/archive/`.
-- [x] **F5 — retire `release/v0.3.0-alpha.1`.** **Done 2026-08-20** — deleted locally after confirming it is an ancestor of `main` and carries the v0.3.0-alpha.1 tag. The remote branch still exists. once work starts from `main`.
+- [x] **F3 — commit the 2026-08-20 work. Done.** Seven commits on
+      `feat/ci-gate-and-detection`, merged with `main`: line endings, termsafe
+      tests, Docker gating, toolscan, staticinv, doc consolidation, the Action.
+- [x] **F4 — archive the document sprawl. Done.** 15 files and 5,500 lines down
+      to 4 files and 988 lines. `ARCHITECTURE.md`, this plan, `COMPATIBILITY.md`
+      and the root files remain; the rest moved to `docs/archive/` with every
+      markdown link repaired.
+- [x] **F5 — retire `release/v0.3.0-alpha.1`. Done.** Deleted locally after
+      confirming it is an ancestor of `main` and carries the tag. The remote
+      branch still exists and can be deleted on GitHub.
 - [ ] **F6 — known accepted false positive:** a security-scanner MCP server whose
       tool honestly says "detects prompt injection such as 'ignore previous
       instructions'" is flagged by `instruction-override`. Accepted; the
