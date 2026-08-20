@@ -453,7 +453,7 @@ result.
 
 What is not: resource budgets are incomplete, cancellation paths do not yet
 have equal failure coverage, and runtime observation leans on
-target-controlled output. Each is tracked in the [roadmap](docs/ROADMAP.md)
+target-controlled output. Each is tracked in the [roadmap](docs/archive/ROADMAP.md)
 with the version that closes it.
 
 Interfaces stabilize at `1.0`, which means the report schema and exit codes are
@@ -466,11 +466,11 @@ results are tracked separately so proposed features are not mistaken for
 shipped behavior:
 
 - [Architecture](docs/ARCHITECTURE.md) — what the code does today, module by module
-- [Roadmap](docs/ROADMAP.md) and [task list](docs/TASKS.md) — what ships in each version
-- [Target architecture](docs/TARGET_ARCHITECTURE.md) — the design being built toward
-- [Research plan](docs/RESEARCH_PLAN.md) — what to adopt from published MCP-security work
-- [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
-- [Production-readiness and launch plan](docs/PRODUCTION_READINESS.md)
+- [Roadmap](docs/archive/ROADMAP.md) and [task list](docs/archive/TASKS.md) — what ships in each version
+- [Target architecture](docs/archive/TARGET_ARCHITECTURE.md) — the design being built toward
+- [Research plan](docs/archive/RESEARCH_PLAN.md) — what to adopt from published MCP-security work
+- [Implementation plan](docs/archive/IMPLEMENTATION_PLAN.md)
+- [Production-readiness and launch plan](docs/archive/PRODUCTION_READINESS.md)
 - [Compatibility and live tests](docs/COMPATIBILITY.md)
 
 ## Project policies

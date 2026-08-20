@@ -12,7 +12,7 @@ This document deliberately separates:
 
 The implementation order and acceptance gates are in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). Verified interoperability
-results are in [COMPATIBILITY.md](COMPATIBILITY.md).
+results are in [COMPATIBILITY.md](../COMPATIBILITY.md).
 
 ## 1. Product definition
 

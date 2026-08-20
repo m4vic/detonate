@@ -6,8 +6,8 @@ This document is **what the code does today**. If something here is wrong, the
 document is wrong — fix it.
 
 For the design we are building toward, see
-[TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md). For what ships when, see
-[ROADMAP.md](ROADMAP.md).
+[TARGET_ARCHITECTURE.md](archive/TARGET_ARCHITECTURE.md). For what ships when, see
+[ROADMAP.md](archive/ROADMAP.md).
 
 ## 1. The job
 
@@ -204,7 +204,7 @@ optimization.
 `checkPermissions` implements the declared-versus-actual check: a skill
 declaring `allowed-tools: [Read]` that instructs shell commands is a
 permission mismatch. Generalizing this into a full capability model is
-[ROADMAP.md](ROADMAP.md) v0.5.0.
+[ROADMAP.md](archive/ROADMAP.md) v0.5.0.
 
 ### `assessment` — the verdict
 
@@ -244,7 +244,7 @@ weak evidence.
 **`report`** renders one `Scan` three ways. `Build` is the single place a trace
 becomes a report, so text, JSON, and SARIF cannot disagree. SARIF
 `fingerprint` must stay stable across runs or GitHub treats every finding as
-new — which is why canary nonces are barred from it ([ROADMAP.md](ROADMAP.md)
+new — which is why canary nonces are barred from it ([ROADMAP.md](archive/ROADMAP.md)
 v0.2.0).
 
 ## 5. The vocabulary layer
@@ -345,7 +345,7 @@ containers.
 ## 8. Invariants
 
 These hold at every version. They are restated in
-[ROADMAP.md](ROADMAP.md) §Invariants because they outrank any feature.
+[ROADMAP.md](archive/ROADMAP.md) §Invariants because they outrank any feature.
 
 1. No LLM in any verdict.
 2. Risk and completeness stay independent.

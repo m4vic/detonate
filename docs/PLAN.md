@@ -1,0 +1,142 @@
+# Detonate — the plan to 1.0
+
+Status: 2026-08-20. **This is the only plan.** Everything else in `docs/` is
+history or reference. If a task is not on this list, it is not being built.
+
+## What we are building
+
+> **The pre-publish test for MCP servers and Agent Skills. Add it to CI, and it
+> runs your server in a locked sandbox and tells you what it actually did.**
+
+`go test` for MCP servers. One user: **the author**, testing their own work.
+One job: don't ship something that misbehaves. One moment: **CI, before publish**.
+
+Not a scanner for consumers auditing other people's servers. That market is full
+(Snyk `agent-scan`, Cisco MCP Scanner, Invariant MCP-Scan/Shield, mcpscan.ai,
+Inkog), and none of detonate's real strengths — frozen exit codes, SARIF,
+determinism, no-LLM verdicts, offline replay — matter to someone running a
+one-off check. They are all CI features. Detonate was built for the author; it
+was only ever *described* for the consumer.
+
+## Done means this
+
+Not a feeling. Six checkable facts:
+
+1. A stranger adds detonate to their MCP server repo in **3 lines of YAML**.
+2. It runs on **every PR**, in **under 5 minutes** on a typical server.
+3. Findings appear in the **GitHub Security tab**, inline on the PR.
+4. It **never exits 0 without a verdict** — no silent pass, ever.
+5. It **never hangs** — every scan has a ceiling.
+6. **Exit codes and `schema_version` are frozen**, with a deprecation policy.
+
+When those six are true, tag 1.0 and stop. Nothing else is required, and nothing
+else gets to delay it.
+
+## The decision rule
+
+**Does this help an author gate their own release in CI?**
+
+If no, it is not built and not discussed. That resolves static-vs-dynamic,
+breadth-vs-depth, and every future ordering argument without another document.
+This rule exists because the last two weeks produced thirteen planning documents
+and no answer to "when is it done".
+
+---
+
+## Week 1 — Make it adoptable (Aug 20–26)
+
+The tool works. Nobody can *use* it. That is the whole gap this week.
+
+- [ ] **1. GitHub Action.** Composite action that downloads the released binary,
+      verifies its checksum, and runs a scan. **This does not exist, and it is
+      the single highest-leverage missing piece in the project.**
+      — *check:* a repo adds 3 lines of YAML and gets a scan on push.
+
+- [ ] **2. SARIF upload to the Security tab.** Detonate already emits SARIF;
+      GitHub Actions already ingests it natively. Only the wiring is missing.
+      — *check:* a finding appears as an annotation on a real pull request.
+
+- [ ] **3. Rewrite the README for the author.** It currently opens by addressing
+      consumers installing third-party servers. Lead with the CI snippet.
+      — *check:* the first screen shows what it is, the 3-line YAML, and what a
+      failure looks like.
+
+- [ ] **4. Measure scan time** on the reference servers, and publish it.
+      — *check:* a typical server scans in under 5 minutes, or the number is
+      stated honestly and a budget is set.
+
+- [ ] **5. Calibration smoke — half a day, not a week.** Run against ~10 real
+      public MCP servers and hand-check every finding. Looking for anything
+      embarrassing, not a publishable precision figure.
+      — *check:* no false positive that would make an author delete the workflow.
+
+## Week 2 — Make it safe to gate on (Aug 27–Sep 2)
+
+A gate that hangs, or passes silently, gets removed from the pipeline in a week.
+
+- [ ] **6. Total scan budget.** ~20 per-phase timeouts exist; the scan as a whole
+      has no ceiling.
+      — *check:* a deliberately hanging target is killed and reported.
+
+- [ ] **7. No path exits 0 without a verdict.**
+      — *check:* fault injection at every phase boundary — cancel, timeout,
+      crash, teardown failure — and none yields exit 0.
+
+- [ ] **8. Verified teardown before success is reported.**
+      — *check:* zero `detonate-*` containers or volumes remain after any scan,
+      including failed ones.
+
+- [ ] **9. Freeze the contract.** Exit codes (already stable in practice) and
+      `schema_version`, plus a written deprecation policy.
+      — *check:* documented, and a test fails if an exit code changes.
+
+- [ ] **10. Ship `v1.0.0-rc1`, soak for a few days, then `v1.0.0`.**
+      — *check:* the six facts above all hold on the released binary.
+
+---
+
+## Explicitly after 1.0
+
+Not cancelled. Not now.
+
+- **Canary instrumentation + sinkhole network.** This is the real differentiator
+  and it was argued, correctly, to be the moat: "this exact nonce, which existed
+  only inside the sandbox, came back out" has a false-positive rate near zero.
+  It is still cut from 1.0, because **a moat is not a minimum**. It is roughly a
+  month of work that makes detonate better, not usable. Ship first, then build
+  it as **v1.1** — the release that makes `no_findings` worth trusting.
+- MCPTox benchmark and the published precision/recall numbers (v1.2).
+- Static source-level tool extraction for non-MCPB servers. Measure demand first.
+- Capability model, targeted probing, transport breadth, remote MCP, eBPF.
+- The "AI system harness" generalization.
+
+## Fix register — small, do them inside the weeks above
+
+- [ ] **F1/F2 — delete the dead scaffolds.** `probe.GenerateCanary` and
+      `monitor.WatchContainer` have no non-test callers. `WatchContainer` has
+      none at all. Delete both; git remembers, and v1.1 re-adds the canary
+      properly. Unwired scaffolding is what made v0.2 look shipped when it was
+      not.
+- [ ] **F3 — commit the 2026-08-20 work.** 11 modified files and 6 new paths:
+      `.gitattributes`, `internal/termsafe` tests, `internal/dockertest`,
+      `internal/toolscan`, `internal/staticinv`, CI Docker gating, static-verdict
+      wiring. Branch off `main`.
+- [ ] **F4 — archive the document sprawl.** 15 files, 5,500 lines, against 10,782
+      lines of non-test Go. Keep `ARCHITECTURE.md` (what the code does), this
+      file (what happens next), `COMPATIBILITY.md` (verified results), and the
+      root README/SECURITY/CHANGELOG. Everything else to `docs/archive/`.
+- [ ] **F5 — retire `release/v0.3.0-alpha.1`** once work starts from `main`.
+- [ ] **F6 — known accepted false positive:** a security-scanner MCP server whose
+      tool honestly says "detects prompt injection such as 'ignore previous
+      instructions'" is flagged by `instruction-override`. Accepted; the
+      alternative is a two-word bypass for attackers. Item 5 says how often it
+      actually fires.
+
+## Invariants — unchanged
+
+1. No LLM in any verdict.
+2. Risk and completeness stay independent.
+3. Target-controlled code never executes on the host.
+4. The sandbox never gains network access.
+5. No telemetry.
+6. Every finding carries evidence. Capability is not malice.

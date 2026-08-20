@@ -1,15 +1,15 @@
 # Detonate implementation plan
 
 Status: implementation in progress, 2026-07-30. **Superseded for current
-state and near-term priorities by [STATUS.md](../STATUS.md) and
-[PRODUCTION_GRADE.md](../PRODUCTION_GRADE.md) at the repository root** —
+state and near-term priorities by [STATUS.md](#) <!-- deleted from the repo --> and
+[PRODUCTION_GRADE.md](#) <!-- deleted from the repo --> at the repository root** —
 those are checked against the running binary as of 2026-08-05; `v0.1.0` is
 tagged and this document's "not release-ready" framing below is stale.
 This file remains the record of the longer-horizon architectural phases.
 
 This plan implements [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md). It is
 ordered to stop false confidence and release failures before adding features.
-For the code as it stands today, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the code as it stands today, see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 The cross-phase release, CLI, packaging, and promotion contract is tracked in
 [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).

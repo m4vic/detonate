@@ -1,6 +1,6 @@
 # Release checklist — v0.3.0-alpha.1
 
-Status: open, 2026-08-12. This is a **release punch-list, not a build plan** — the design is
+Status: closed 2026-08-13 (released); reconciled 2026-08-20. This is a **release punch-list, not a build plan** — the design is
 settled; these are the specific things that must pass before the tag. Derived from a Codex audit,
 each claim re-verified against the code by Claude (the two saved-report items were found to share
 one root cause; see item 1).
@@ -35,7 +35,7 @@ discipline is to ship the tight thing.
 
 - [x] **2. Release workflow gated on CI; CHANGELOG claim made true.**
       **Owner: Claude. Done 2026-08-12; CI-gating not yet exercised on GitHub.** Added a `verify`
-      job to [release.yml](../.github/workflows/release.yml) (tracked-entrypoint, gofmt, vet,
+      job to [release.yml](../../.github/workflows/release.yml) (tracked-entrypoint, gofmt, vet,
       `-race` test, docker) that `goreleaser` now `needs:`. This makes the CHANGELOG's "release
       publication depends on … gates" line accurate rather than false.
       — *verified locally:* YAML parses; gates mirror `ci.yml`. **Not yet verified:** that a tag
@@ -62,7 +62,7 @@ discipline is to ship the tight thing.
 
 - [x] **5. Pin sandbox image digests + record target provenance in the bundle.**
       **Owner: Codex; Claude reviews the evidence shape.** Images are mutable tags
-      (`python:3.12-slim`, `node:22-slim`) in [detect.go:468](../internal/acquire/detect.go). For
+      (`python:3.12-slim`, `node:22-slim`) in [detect.go:468](../../internal/acquire/detect.go). For
       `repo --path examples/hello-world-node`, the saved target is only the repo URL, so different
       monorepo packages produce ambiguous bundles. Record: repo URL, requested subpath, resolved
       commit SHA, detonate version/commit, sandbox image **digest**.
@@ -124,8 +124,27 @@ discipline is to ship the tight thing.
 - [x] GoReleaser **snapshot** (dry run) succeeds. **Verified 2026-08-13
       (Codex):** GoReleaser v2.17.1 validated the configuration and built six
       Linux, macOS, and Windows archives plus checksums as `0.3.0-next`.
-- [ ] `git fetch` — reconcile with `origin/main` (Codex saw it one commit ahead; both touch README).
-- [ ] Only then: tag `v0.3.0-alpha.1`.
+- [x] `git fetch` — reconcile with `origin/main`. **Done 2026-08-13** (merged as PR #3);
+      the local clone was re-synced 2026-08-20, which also corrected a divergent local
+      `v0.1.0` tag that pointed at `4ae5fd4` instead of the published `5c5aa38`.
+- [x] Only then: tag `v0.3.0-alpha.1`. **Done 2026-08-13.** Annotated tag on `58f3517`,
+      pushed; GitHub release published and marked Latest at 11:58Z.
+
+## Outcome
+
+**Released 2026-08-13.** Both workflow runs on the tag completed successfully — `Release`
+(3m05s) and `CI` (1m27s) — which retires the item-2 caveat: the release gate is no longer
+"written-but-unproven-in-CI" on the passing path. It has still never been observed
+*blocking* a bad tag; proving that needs a deliberately failing tag, and nobody should cut
+one to find out. Treat it as verified-green, unverified-red.
+
+One gap this checklist did not catch, found on 2026-08-20 and now fixed: the suite's 21
+Docker-backed tests skip silently when no daemon is present, so "tests passed" in the
+pre-tag gate did not by itself mean the sandbox invariants were exercised. CI now sets
+`DETONATE_REQUIRE_DOCKER=1`, which turns those skips into failures. See
+[PLAN_v0.4.0-static-detection.md](PLAN_v0.4.0-static-detection.md) §3.
+
+Next milestone: [PLAN_v0.4.0-static-detection.md](PLAN_v0.4.0-static-detection.md).
 
 ## Explicitly OUT of scope for this alpha
 

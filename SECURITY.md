@@ -37,7 +37,7 @@ a fix is available. These are targets, not a service-level agreement.
 
 The current security guarantees and known gaps are documented in
 [the architecture](docs/ARCHITECTURE.md),
-[the target architecture](docs/TARGET_ARCHITECTURE.md), and
+[the target architecture](docs/archive/TARGET_ARCHITECTURE.md), and
 [compatibility notes](docs/COMPATIBILITY.md). In particular:
 
 - Docker is the required isolation boundary whenever Detonate executes an MCP
