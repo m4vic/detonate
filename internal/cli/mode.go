@@ -12,6 +12,8 @@ import (
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/fetch"
 	"github.com/m4vic/detonate/internal/skill"
+	"github.com/m4vic/detonate/internal/staticinv"
+	"github.com/m4vic/detonate/internal/toolscan"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
@@ -234,12 +236,65 @@ func (a *App) scanStaticMCP(detected Detected) int {
 	if a.scanTarget == "" {
 		a.scanTarget = detected.Dir
 	}
-	a.scanScenarios = []assessment.ScenarioResult{{
+
+	// Recover whatever inventory the target declares, then analyze it with the
+	// same rules dynamic mode uses. Static mode previously returned
+	// `unsupported` unconditionally, which meant the one path a user without
+	// Docker can reach produced no verdict at all.
+	inv := staticinv.Extract(detected.Dir)
+	a.scanTools = inv.Tools
+
+	if len(inv.Tools) == 0 {
+		// Nothing to analyze. This stays `unsupported` — the honest outcome —
+		// but now names the specific reason instead of claiming the analysis
+		// does not exist.
+		fmt.Fprintf(a.Stderr, "  no static tool inventory: %s\n", inv.Reason)
+		a.scanScenarios = []assessment.ScenarioResult{{
+			ID:       "mcp.static-inventory",
+			Required: true,
+			Outcome:  assessment.OutcomeUnsupported,
+			Reason:   inv.Reason + "; run dynamic mode for the sandboxed probe path",
+		}}
+		return a.report(tr)
+	}
+
+	findings := toolscan.Analyze(inv.Tools)
+	for _, ev := range findings {
+		tr.Add(ev)
+	}
+
+	outcome := assessment.OutcomePass
+	for _, ev := range findings {
+		if ev.Severity == trace.SeverityCritical || ev.Severity == trace.SeverityNotable {
+			outcome = assessment.OutcomeFinding
+			break
+		}
+	}
+
+	fmt.Fprintf(a.Stdout, "  analyzed %d declared tool(s) from %s\n",
+		len(inv.Tools), inv.Source)
+
+	scenarios := []assessment.ScenarioResult{{
 		ID:       "mcp.static-inventory",
 		Required: true,
-		Outcome:  assessment.OutcomeUnsupported,
-		Reason:   "MCP static source analysis is not implemented; run dynamic mode for the current sandboxed probe path",
+		Outcome:  outcome,
 	}}
+
+	// An inventory the target admits is a lower bound cannot support a complete
+	// verdict. Recorded as a separate unsupported scenario so risk and
+	// completeness stay independent: the tools we DID see were genuinely
+	// analyzed (above), and the ones we could not see reduce completeness here
+	// rather than quietly downgrading the finding.
+	if !inv.Complete {
+		scenarios = append(scenarios, assessment.ScenarioResult{
+			ID:       "mcp.static-inventory-coverage",
+			Required: true,
+			Outcome:  assessment.OutcomeUnsupported,
+			Reason:   inv.Reason,
+		})
+	}
+
+	a.scanScenarios = scenarios
 	return a.report(tr)
 }
 
