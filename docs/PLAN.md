@@ -84,13 +84,45 @@ The tool works. Nobody can *use* it. That is the whole gap this week.
 
 A gate that hangs, or passes silently, gets removed from the pipeline in a week.
 
+**Reprioritised 2026-08-20 by measurement.** The dynamic corpus run
+([COMPATIBILITY.md §3b](COMPATIBILITY.md)) found **0 of 6 real public servers
+reached a verdict, and all six exited 0**. Item 7 is therefore not a hypothetical
+guard against a future bug — it is a live defect reproducible on every reference
+server today, and it is the most important item in this plan.
+
+The four causes are not detection problems; three are acquisition gaps and one is
+a coverage-accounting rule:
+
+- **A0. Monorepo workspace acquisition unsupported** — takes out three of the four
+  reference servers at once, because `modelcontextprotocol/servers` is one
+  workspace.
+- **A1. Python acquisition unsupported** — a deliberate safety refusal that
+  removes every Python server.
+- **A2. Servers needing runtime config** report every tool as `target_error`.
+- **A3. A zero-argument tool is permanently `unsupported`**, capping completeness
+  for any server that has one.
+
+A0-A2 are why the dynamic differentiator does not currently reach real targets.
+Sizing them is the first task of week two, before anything else is committed to.
+
 - [ ] **6. Total scan budget.** ~20 per-phase timeouts exist; the scan as a whole
       has no ceiling.
       — *check:* a deliberately hanging target is killed and reported.
 
-- [ ] **7. No path exits 0 without a verdict.**
+- [ ] **7. No path exits 0 without a verdict. THE priority.** Measured broken:
+      six real servers, six exits of 0, zero verdicts. An unassessed target must
+      not be able to look like a pass, whatever the cause.
       — *check:* fault injection at every phase boundary — cancel, timeout,
-      crash, teardown failure — and none yields exit 0.
+      crash, teardown failure — and none yields exit 0; and every target in the
+      corpus that reaches no verdict exits non-zero.
+
+- [ ] **7a. Size the acquisition gaps A0-A2 before committing to them.** Cheapest
+      first: an author's CI already builds their project, so a supported
+      "dependencies are already installed, just scan it" path (`--no-install`
+      plus an explicit `--cmd`) may cover A0 and A1 without implementing monorepo
+      or Python acquisition at all. Test that before building anything.
+      — *check:* at least one `modelcontextprotocol/servers` package reaches a
+      real verdict by some documented route.
 
 - [ ] **8. Verified teardown before success is reported.**
       — *check:* zero `detonate-*` containers or volumes remain after any scan,
