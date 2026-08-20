@@ -407,6 +407,57 @@ comparison.
 Well inside the 5-minute budget the plan sets for a per-PR gate. Dynamic-mode
 timing is unmeasured.
 
+## 3b. Dynamic-mode corpus run — 2026-08-20
+
+Same corpus, dynamic mode, on real Docker (server 29.7.2). This is the mode that
+carries detonate's actual differentiator, and it is the first time it has been
+measured against a spread of real public servers rather than one known-good
+example.
+
+**Result: 0 of 6 targets reached a complete verdict, and all six exited 0.**
+
+| Target | Risk | Completeness | Time | Why |
+|---|---|---|---:|---|
+| `mcpb/hello-world-node` | no_findings | partial | 12s | its one tool takes no string input |
+| `mcpb/file-system-node` | no_findings | inconclusive | 13s | 12 of 14 tools returned `isError` on a benign call |
+| `servers/time` | not_assessed | inconclusive | 0s | Python acquisition unsupported |
+| `servers/memory` | not_assessed | inconclusive | 0s | monorepo workspace acquisition unsupported |
+| `servers/filesystem` | not_assessed | inconclusive | 0s | monorepo workspace acquisition unsupported |
+| `servers/sequentialthinking` | not_assessed | inconclusive | 0s | monorepo workspace acquisition unsupported |
+
+### The four blockers, in order of how much they cost
+
+1. **Monorepo workspace acquisition is unsupported.** Three of four reference
+   servers fail here — `pipeline.acquire` reports the package relies on a
+   repository-root lockfile and a workspace prepare step. The whole
+   `modelcontextprotocol/servers` repository is one workspace, so this single gap
+   takes out the best-known MCP servers in existence.
+2. **Python acquisition is unsupported.** `safe acquisition of pyproject.toml is
+   not supported yet: resolving a local Python project may execute its build
+   backend while the network is enabled.` This is a deliberate safety refusal,
+   not a bug — but it means no Python server can be scanned dynamically.
+3. **Servers that need runtime configuration report every tool as
+   `target_error`.** `file-system-node` grants no directories inside the sandbox,
+   so 12 of its 14 tools fail a benign schema-valid call. Detonate reports this
+   honestly; the effect is still that a working server yields no verdict.
+4. **A zero-argument tool can never be "complete".** Its scenario is
+   `unsupported` — "no adversarial string-input surface" — which is accurate but
+   permanently caps completeness for any server that has one.
+
+### What this means
+
+Escalating from static to dynamic currently gives **less**, not more:
+`file-system-node` reports `complete` statically and `inconclusive` dynamically,
+because dynamic selects 14 scenarios it cannot finish where static selected one
+it could.
+
+Every one of these exits 0. A CI gate on default settings would pass all six
+while assessing none — which is exactly the failure the plan's fourth
+"done" condition forbids, now demonstrated rather than hypothesised.
+
+The Action therefore keeps `mode: static` as its default. Dynamic is the mode
+with the higher ceiling and, today, the lower floor.
+
 ## 4. Representative server corpus
 
 Use the official reference servers plus one target per packaging/transport
