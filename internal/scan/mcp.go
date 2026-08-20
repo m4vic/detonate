@@ -13,6 +13,7 @@ import (
 	"github.com/m4vic/detonate/internal/probe"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/scenario"
+	"github.com/m4vic/detonate/internal/toolscan"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
@@ -149,6 +150,21 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		if installed != nil && res.Trace != nil {
 			res.Trace.Events = append(installed.Events, res.Trace.Events...)
 		}
+
+		// The same inventory analysis the probing path runs. Wiring it into
+		// only one of the two would mean a poisoned description is caught or
+		// missed depending on whether probes happened to be enabled — and the
+		// metadata is identical either way. This path is the one a user reaches
+		// with probing off, which is exactly when metadata is all there is.
+		if findings := toolscan.Analyze(res.Tools); len(findings) > 0 {
+			if res.Trace == nil {
+				res.Trace = newTrace(tgt.Reference)
+			}
+			for _, ev := range findings {
+				res.Trace.Add(ev)
+			}
+		}
+
 		scenarios = append(scenarios, assessment.ScenarioResult{
 			ID: "mcp.inventory", Required: true, Outcome: assessment.OutcomePass,
 		})
@@ -198,6 +214,18 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// own API when we call it must not be confused with the server reaching
 	// out on its own; only the second is suspicious.
 	for _, ev := range monitor.Analyze(sess.Stderr(), "enumeration") {
+		tr.Add(ev)
+	}
+
+	// What the inventory itself says, independent of anything the server does.
+	// The metadata was already being collected and rendered; nothing read it
+	// until now, which left the highest-leverage MCP attack surface — a
+	// description the model obeys and the installer never reads — unexamined.
+	//
+	// Pure and inventory-only, so it needs no sandbox and cannot be affected by
+	// probe ordering. It runs here rather than after probing so that a poisoned
+	// description is reported even when probing is skipped entirely.
+	for _, ev := range toolscan.Analyze(tools) {
 		tr.Add(ev)
 	}
 
