@@ -1,6 +1,7 @@
 # Detonate compatibility and live test record
 
-Last verified: 2026-08-13. Rows that retain older evidence say so explicitly.
+Last verified: 2026-08-20 (section 3a). Earlier sections retain their 2026-08-13
+evidence and say so explicitly.
 
 This document separates observed results from planned support. A passing row
 only supports the exact claim in its “coverage” column.
@@ -348,6 +349,63 @@ Conclusion:
 - A local provider adapter is technically viable.
 - This does not validate a full MCP agent loop, prompt-injection resistance, or
   deterministic security judgment.
+
+## 3a. Static-mode corpus run — 2026-08-20
+
+First measurement of `internal/toolscan` + `internal/staticinv` against real
+public servers rather than fixtures written by the same author as the rules.
+
+**Corpus:** every package in `modelcontextprotocol/servers` (7) and every example
+in `modelcontextprotocol/mcpb` (6), shallow-cloned 2026-08-20. Static mode only;
+Docker was unavailable on the host, so the dynamic path is **not** measured here.
+
+### Reach — which targets static mode can assess at all
+
+| Group | Targets | Complete verdict | Inconclusive |
+|---|---:|---:|---:|
+| `modelcontextprotocol/servers` | 7 | 0 | 7 |
+| `modelcontextprotocol/mcpb` examples | 6 | 5 | 1 |
+| **Total** | **13** | **5 (38%)** | **8 (62%)** |
+
+The seven reference servers — the most widely used MCP servers there are — ship
+no MCPB `manifest.json`, so static mode has no inventory to analyze and correctly
+reports `not_assessed` / `inconclusive` rather than a clean-looking result.
+`hello-world-uv` has a manifest but omits the optional `tools` array, which is
+the same honest outcome for a different reason.
+
+**This is the headline limitation of static mode today**, and it is a fact about
+coverage, not about detection: on the 38% it can read, it read them correctly.
+
+### Precision — false positives on real tool metadata
+
+| | |
+|---|---:|
+| Targets analyzed | 5 |
+| Real tool descriptions analyzed | 27 |
+| Findings raised | **0** |
+| False positives | **0** |
+
+Tool counts: `calculator-rust` 2, `chrome-applescript` 10,
+`file-manager-python` 3, `file-system-node` 11, `hello-world-node` 1. Every SARIF
+result emitted was `level: note` — observations, not findings.
+
+**Qualification, and it matters:** 27 descriptions from official example bundles
+is a small and unusually well-behaved sample. Published reference examples are
+the friendliest possible corpus; a random sample of community servers is a much
+harder test and has not been run. This supports "the rules do not fire on
+well-written metadata" and nothing stronger. The ~78% false-positive rate
+measured across MCP scanners in arXiv 2607.11086 is not yet a like-for-like
+comparison.
+
+### Scan time
+
+| | |
+|---|---:|
+| Typical target | 44–75 ms |
+| Slowest (`servers/everything`) | 2,011 ms |
+
+Well inside the 5-minute budget the plan sets for a per-PR gate. Dynamic-mode
+timing is unmeasured.
 
 ## 4. Representative server corpus
 
