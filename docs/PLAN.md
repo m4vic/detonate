@@ -62,19 +62,23 @@ The tool works. Nobody can *use* it. That is the whole gap this week.
       — *check, still open:* a finding appears as an annotation on a real pull
       request. Unproven until the workflow runs on GitHub.
 
-- [ ] **3. Rewrite the README for the author.** It currently opens by addressing
-      consumers installing third-party servers. Lead with the CI snippet.
-      — *check:* the first screen shows what it is, the 3-line YAML, and what a
-      failure looks like.
+- [x] **3. Rewrite the README for the author. Done 2026-08-20.** First screen is
+      the tagline, the CI snippet, a real failure, and static mode's measured
+      reach. "Why Detonate" reframed around publishing rather than installing.
+      — *verified:* first screen shows what it is, the YAML, and a failure.
 
-- [ ] **4. Measure scan time** on the reference servers, and publish it.
-      — *check:* a typical server scans in under 5 minutes, or the number is
-      stated honestly and a budget is set.
+- [x] **4. Measure scan time. Done 2026-08-20 for static.** 44-75ms typical
+      across 13 real targets, one 2s outlier. Far inside the 5-minute budget.
+      — *still open:* dynamic-mode timing, which needs Docker and is the mode
+      that actually costs minutes.
 
-- [ ] **5. Calibration smoke — half a day, not a week.** Run against ~10 real
-      public MCP servers and hand-check every finding. Looking for anything
-      embarrassing, not a publishable precision figure.
-      — *check:* no false positive that would make an author delete the workflow.
+- [x] **5. Calibration smoke. Done 2026-08-20.** 13 real public targets; 27 real
+      tool descriptions analyzed; **zero findings, zero false positives**. Nothing
+      an author would delete the workflow over.
+      — *qualification:* official example bundles are the friendliest possible
+      corpus, and only 5 of 13 targets could be read statically at all. This
+      supports "does not fire on well-written metadata" and nothing stronger.
+      Full numbers in [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ## Week 2 — Make it safe to gate on (Aug 27–Sep 2)
 
@@ -118,11 +122,9 @@ Not cancelled. Not now.
 
 ## Fix register — small, do them inside the weeks above
 
-- [ ] **F1/F2 — delete the dead scaffolds.** `probe.GenerateCanary` and
-      `monitor.WatchContainer` have no non-test callers. `WatchContainer` has
-      none at all. Delete both; git remembers, and v1.1 re-adds the canary
-      properly. Unwired scaffolding is what made v0.2 look shipped when it was
-      not.
+- [x] **F1/F2 — delete the dead scaffolds. Done 2026-08-20.** Both removed;
+      v1.1 re-adds the canary with the sinkhole network that makes it mean
+      something.
 - [x] **F3 — commit the 2026-08-20 work. Done.** Seven commits on
       `feat/ci-gate-and-detection`, merged with `main`: line endings, termsafe
       tests, Docker gating, toolscan, staticinv, doc consolidation, the Action.
