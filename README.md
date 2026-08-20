@@ -1,7 +1,8 @@
 # detonate
 <p align="center">
-  <img src="docs/assets/demo.gif" width="820" alt="Detonate demo — dynamic sandbox running against a malicious MCP server">
+  <img src="docs/assets/dynamic-mcpb-scan.png" width="820" alt="Detonate dynamically scans the public MCPB hello-world server: inert dependency fetch, offline non-root sandbox launch, tool discovery, honest partial coverage, and saved report bundle">
 </p>
+
 
 <p align="center">
   <img src="https://img.shields.io/github/license/m4vic/detonate" alt="License">
@@ -18,9 +19,7 @@
 > certification. Use disposable test targets, never provide real secrets, and
 > read the full [disclaimer](DISCLAIMER.md) before running dynamic scans.
 
-<p align="center">
-  <img src="docs/assets/dynamic-mcpb-scan.png" width="820" alt="Detonate dynamically scans the public MCPB hello-world server: inert dependency fetch, offline non-root sandbox launch, tool discovery, honest partial coverage, and saved report bundle">
-</p>
+
 
 <p align="center"><em>A real public MCP server scan. Dynamic execution stays in Docker; the report keeps incomplete coverage explicit.</em></p>
 
@@ -68,7 +67,6 @@ Adopting on an existing project? Start with `fail-on: never` to see findings
 without blocking anyone, then turn the gate on.
 
 ## Why Detonate:
-
 Today, thousands of developers install Model Context Protocol (MCP) servers and AI Agent Skills from GitHub directly onto their local systems. They run with **your local user permissions**, and your AI assistant invokes their tools automatically behind the scenes. 
 
 Most people install these tools without considering the consequences:
