@@ -101,8 +101,12 @@ runs:
         fi
 
         if [ "$version" = "latest" ]; then
-          version=$(curl -sSfL "https://api.github.com/repos/${repo}/releases/latest" \
-            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          # Body captured first, then parsed. Piping curl straight into
+          # `grep -m1` makes grep exit on the first match and close the pipe;
+          # curl then dies writing to it (exit 23) and `set -o pipefail` fails
+          # the whole step, so resolving "latest" broke every single time.
+          body=$(curl -sSfL "https://api.github.com/repos/${repo}/releases/latest")
+          version=$(echo "$body" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
           if [ -z "$version" ]; then
             echo "::error::could not resolve the latest detonate release; pin \`version:\` instead"
             exit 1
