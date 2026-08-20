@@ -56,3 +56,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Scan output written by the GitHub Action and by --out.
+*.sarif

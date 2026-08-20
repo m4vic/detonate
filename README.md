@@ -24,6 +24,49 @@
 
 <p align="center"><em>A real public MCP server scan. Dynamic execution stays in Docker; the report keeps incomplete coverage explicit.</em></p>
 
+## Use it in CI
+
+Test your MCP server or Agent Skill **before you publish it**. Add this to
+`.github/workflows/detonate.yml`:
+
+```yaml
+name: detonate
+on: [push, pull_request]
+
+permissions:
+  contents: read
+  security-events: write   # so findings reach the Security tab
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: m4vic/detonate@v1
+```
+
+That runs a scan on every push, fails the job on findings, and publishes SARIF
+so results appear in **Security → Code scanning** and inline on pull requests.
+
+| Input | Default | What it does |
+|---|---|---|
+| `target` | `.` | Path or git URL to scan |
+| `mode` | `static` | `static` never executes the target; `dynamic` runs it in a Docker sandbox and enumerates its real tools |
+| `version` | `latest` | Pin a release for reproducible CI |
+| `fail-on` | `findings` | `findings` (exit 3), `incomplete` (also exit 4 — strict), or `never` (report only) |
+| `upload-sarif` | `true` | Publish to GitHub code scanning |
+| `args` | — | Extra flags, e.g. `--path packages/server` |
+
+Exit codes are stable and safe to gate on: **0** clean, **1** error, **2** usage,
+**3** findings, **4** incomplete.
+
+Start with `mode: static` — it always completes and needs no Docker. Move to
+`mode: dynamic` once you have confirmed your server starts in CI; that is where
+detonate actually runs your code and reports what it did.
+
+Adopting on an existing project? Start with `fail-on: never` to see findings
+without blocking anyone, then turn the gate on.
+
 ## Why Detonate:
 
 Today, thousands of developers install Model Context Protocol (MCP) servers and AI Agent Skills from GitHub directly onto their local systems. They run with **your local user permissions**, and your AI assistant invokes their tools automatically behind the scenes. 
