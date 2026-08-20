@@ -3,12 +3,12 @@ package skill
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/dockertest"
 	"github.com/m4vic/detonate/internal/sandbox"
 )
 
@@ -30,14 +30,9 @@ func TestDetonateScriptsWithResultsRecordsUnsupportedInterpreter(t *testing.T) {
 }
 
 func TestDetonateScriptsWithResultsRecordsNonZeroExit(t *testing.T) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not on PATH")
-	}
+	dockertest.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
-		t.Skip("docker daemon not running")
-	}
 
 	dir := t.TempDir()
 	script := filepath.Join("scripts", "fail.sh")
@@ -50,7 +45,7 @@ func TestDetonateScriptsWithResultsRecordsNonZeroExit(t *testing.T) {
 
 	policy := sandbox.DefaultPolicy()
 	if err := sandbox.EnsureImage(ctx, policy.Image); err != nil {
-		t.Skipf("sandbox image unavailable: %v", err)
+		dockertest.Unavailable(t, "sandbox image unavailable: %v", err)
 	}
 	result := DetonateScriptsWithResults(
 		ctx, dir, Skill{Scripts: []string{script}}, policy,

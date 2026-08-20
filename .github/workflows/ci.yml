@@ -38,13 +38,22 @@ jobs:
       # concurrent by nature — a container's stderr is written by one goroutine
       # while another reads it — and that exact pattern already produced a real
       # bug where a finding was silently lost.
-      - name: Test
-        run: go test -race -count=1 -timeout 25m ./...
-
       # Ubuntu runners ship with Docker, so the sandbox integration tests run
-      # for real here rather than skipping.
-      - name: Confirm Docker was available
+      # for real here rather than skipping. Checked before the suite so a
+      # missing daemon fails in an obvious place.
+      - name: Confirm Docker is available
         run: docker version
+
+      # DETONATE_REQUIRE_DOCKER turns every Docker-gated skip into a failure.
+      # Without it, an unavailable daemon makes 21 tests — every sandbox
+      # invariant, including "the network is blocked" and "the target does not
+      # run as root" — skip silently, and the job prints the same green as a run
+      # that proved all of them. `docker version` passing does not mean the
+      # tests used Docker; this does.
+      - name: Test
+        env:
+          DETONATE_REQUIRE_DOCKER: '1'
+        run: go test -race -count=1 -timeout 25m ./...
 
   # A normal checkout is already clean on GitHub, but extracting git archive
   # makes the invariant explicit: ignored and untracked developer files cannot

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m4vic/detonate/internal/dockertest"
 	"github.com/m4vic/detonate/internal/sandbox"
 )
 
@@ -60,16 +61,11 @@ for line in sys.stdin:
               "error": {"code": -32601, "message": "method not found"}})
 `
 
+// requireDocker delegates to the shared gate so that this package cannot
+// drift from the others on what "Docker is available" means.
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not on PATH")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
-		t.Skip("docker daemon not running")
-	}
+	dockertest.Require(t)
 }
 
 // writeServer drops the fixture server somewhere the container can mount it.

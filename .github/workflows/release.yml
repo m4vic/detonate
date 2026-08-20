@@ -41,11 +41,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test (race)
-        run: go test -race -count=1 -timeout 25m ./...
-
-      - name: Confirm Docker was available
+      - name: Confirm Docker is available
         run: docker version
+
+      # See ci.yml: without this, an unavailable daemon skips every sandbox
+      # invariant and the release gate passes having proved none of them.
+      - name: Test (race)
+        env:
+          DETONATE_REQUIRE_DOCKER: '1'
+        run: go test -race -count=1 -timeout 25m ./...
 
   goreleaser:
     needs: verify
