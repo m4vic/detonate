@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/decoy"
 	"github.com/m4vic/detonate/internal/mcpdriver"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/probe"
@@ -182,6 +184,34 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		}, nil
 	}
 
+	// Furnish the sandbox before the target starts.
+	//
+	// An empty home is not a neutral environment, it is an untestable one: a
+	// target with nothing to read cannot demonstrate that it reads things it
+	// should not. The decoy is writable so a server that stores state under ~
+	// still behaves normally, and it is deleted with the scan.
+	var den *decoy.Environment
+	decoyDir, decoyErr := os.MkdirTemp("", "detonate-decoy-")
+	if decoyErr == nil {
+		defer os.RemoveAll(decoyDir)
+		if planted, plantErr := decoy.Plant(decoyDir, sandbox.ContainerHome); plantErr == nil {
+			den = planted
+			mounts = append(mounts, sandbox.Mount{
+				HostPath:      decoyDir,
+				ContainerPath: sandbox.ContainerHome,
+				ReadOnly:      false,
+			})
+		} else {
+			decoyErr = plantErr
+		}
+	}
+	if decoyErr != nil {
+		// Not fatal: a scan without a decoy is a weaker scan, not a wrong one.
+		// It must be visible rather than silent, though, or the report would
+		// imply a leak check that never ran.
+		p.step("  could not furnish the sandbox decoy; credential-leak checks are disabled")
+	}
+
 	// Probing keeps the session open: a tool only reveals what it does when it
 	// is called, so the container has to outlive tools/list.
 	var err error
@@ -244,7 +274,11 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// re-scan of the whole stderr buffer afterwards: it re-flagged the
 	// expected, blocked network noise from every API-backed tool as a critical
 	// finding, which turned a clean Notion server into "dangerous".
-	probeResult := probe.RunWithResults(ctx, sess, tools, 0)
+	var probeOpts []probe.Option
+	if den != nil {
+		probeOpts = append(probeOpts, probe.WithDecoy(den))
+	}
+	probeResult := probe.RunWithResults(ctx, sess, tools, 0, probeOpts...)
 	for _, ev := range probeResult.Events {
 		tr.Add(ev)
 	}

@@ -70,8 +70,24 @@ func containerArgs(name string, p Policy, mounts []Mount, command []string) []st
 	for _, o := range securityOptions {
 		args = append(args, "--security-opt", o)
 	}
-	for dest, opts := range tmpfsMounts(p.TmpfsSize) {
-		args = append(args, "--tmpfs", dest+":"+opts)
+	// A mount at the same path wins over the tmpfs that would otherwise cover
+	// it. That is what lets a caller replace the empty tmpfs home with a
+	// furnished decoy: Docker would refuse or silently shadow one of the two,
+	// and which one won would depend on argument order.
+	covered := make(map[string]bool, len(mounts))
+	for _, m := range mounts {
+		covered[m.ContainerPath] = true
+	}
+
+	// Sorted, for the same reason the environment below is sorted: map
+	// iteration order is random in Go, so an unsorted loop produced a different
+	// `docker run` invocation on every scan of the same target.
+	tmpfs := tmpfsMounts(p.TmpfsSize)
+	for _, dest := range sortedKeys(tmpfs) {
+		if covered[dest] {
+			continue
+		}
+		args = append(args, "--tmpfs", dest+":"+tmpfs[dest])
 	}
 	for _, m := range mounts {
 		args = append(args, "--volume", m.arg())

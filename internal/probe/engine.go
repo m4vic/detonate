@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/decoy"
 	"github.com/m4vic/detonate/internal/monitor"
 	scenariodef "github.com/m4vic/detonate/internal/scenario"
 	"github.com/m4vic/detonate/internal/toolcall"
@@ -119,10 +120,37 @@ func GetDefaultProbes() []Probe {
 
 // RunWithResults probes every tool and records one terminal scenario result
 // per tool, including tools that cannot be reached by the current payload set.
-func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration) Result {
+// Option configures a probe run. Variadic so the existing four-argument calls
+// keep working; a decoy is not required to probe.
+type Option func(*config)
+
+type config struct {
+	decoy *decoy.Environment
+}
+
+// WithDecoy makes the engine check every tool response for planted secrets.
+//
+// This is the strongest evidence detonate can produce. A payload finding says a
+// response looked wrong; a decoy hit says a token that existed only inside this
+// sandbox came back out of a tool call, which has no benign explanation.
+func WithDecoy(e *decoy.Environment) Option {
+	return func(c *config) { c.decoy = e }
+}
+
+func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration, opts ...Option) Result {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	var events []trace.Event
 	var scenarios []assessment.ScenarioResult
 	probes := GetDefaultProbes()
+
+	// Reported once per tool+token. A traversal payload set can pull the same
+	// key back thirteen times, and thirteen copies of one fact is not thirteen
+	// findings.
+	leaked := map[string]bool{}
 
 	for i, tool := range tools {
 		scenario := assessment.ScenarioResult{
@@ -197,6 +225,13 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 			scenario.Outcome = assessment.OutcomeTargetError
 			scenario.Reason = "tool returned isError on a benign schema-valid call"
 		}
+		// A benign call that returns a planted secret is worse than a hostile
+		// one that does: the tool did not need to be attacked to leak.
+		if err == nil {
+			events = append(events, leakEvents(&cfg, leaked, tool.Name, "probe:baseline",
+				"benign", baselineResult.SearchableText())...)
+		}
+
 		baseline = c.Stderr() // after the benign call: this is "normal"
 
 		for _, pr := range probes {
@@ -224,6 +259,12 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 
 				probeEvents := pr.Evaluate(ctx, tool.Name, p, result, err, before, after, baseline)
 				events = append(events, probeEvents...)
+
+				if err == nil {
+					events = append(events, leakEvents(&cfg, leaked, tool.Name,
+						"probe:"+string(p.Category), clip(p.Value, 80),
+						result.SearchableText())...)
+				}
 
 				if ctx.Err() != nil {
 					scenario.Outcome = assessment.OutcomeTimeout
@@ -425,4 +466,41 @@ func clip(s string, max int) string {
 		return string(r[:max]) + "..."
 	}
 	return s
+}
+
+// leakEvents reports planted secrets found in a tool's response.
+//
+// The nonce goes in the evidence because that is what makes the finding
+// checkable by someone who does not trust the scanner: they can confirm the
+// value never existed outside this scan. It is deliberately NOT part of any
+// fingerprint — the token changes every run, so including it would make two
+// scans of an unchanged target look like two different findings.
+func leakEvents(cfg *config, seen map[string]bool, tool, during, stimulus, response string) []trace.Event {
+	if cfg.decoy == nil || response == "" {
+		return nil
+	}
+
+	var events []trace.Event
+	for _, hit := range cfg.decoy.Match(response) {
+		key := tool + "|" + hit.Token.Value
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		events = append(events, trace.Event{
+			Kind: trace.KindFile, Severity: trace.SeverityCritical, At: time.Now(),
+			Summary: fmt.Sprintf("tool %q returned the contents of %s", tool, hit.Token.Path),
+			During:  during, Source: "decoy",
+			Detail: map[string]any{
+				"tool":     tool,
+				"secret":   string(hit.Token.Kind),
+				"path":     hit.Token.Path,
+				"encoding": hit.Encoding,
+				"stimulus": stimulus,
+				"nonce":    hit.Token.Value,
+			},
+		})
+	}
+	return events
 }
