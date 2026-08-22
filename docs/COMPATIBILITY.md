@@ -511,14 +511,50 @@ The first version of `testdata/honest` crashed on hostile input and was flagged
 eleven times. Those were **true positives** — a server that dies on malformed
 input is a real defect — and the guard went into the fixture, not the rule.
 
-### Not yet measured
+### Corpus re-run with the decoy — the honest scorecard
 
-The dynamic corpus re-run is **outstanding**. It was attempted on 2026-08-20 and
-produced no data: the Docker daemon stopped, and all six targets returned
-`runtime_unavailable` / `completeness: failed` / exit 2. Worth noting that this
-is correct behaviour — an unavailable runtime did not silently pass — but it
-means the question "does the decoy plus realistic baseline lift real servers out
-of `inconclusive`?" remains **unanswered**.
+Re-run on 2026-08-20 after the decoy and the realistic benign baseline landed.
+**The corpus outcome did not change.** Still 0 of 6 reaching a complete verdict,
+for exactly the same four reasons: three acquisition gaps and one
+coverage-accounting rule. Furnishing the sandbox does not fix a server that
+never starts.
+
+| Target | Before | After |
+|---|---|---|
+| `hello-world-node` | partial | partial |
+| `file-system-node` | inconclusive | inconclusive |
+| `time`, `memory`, `filesystem`, `sequentialthinking` | inconclusive (0s) | inconclusive (0s) |
+
+Where it *did* move is inside the one server that starts. Blocker A2 was
+misdiagnosed as "servers needing runtime config"; the real cause is narrower and
+splits in two:
+
+1. **Startup configuration.** The official filesystem server takes its permitted
+   directories as launch arguments. Detonate started it with none, so every tool
+   answered "Access denied" regardless of input. Passing
+   `--cmd "node /target/server/index.js /home/detonate/workspace"` grants it the
+   decoy workspace. This needs no new feature — the flag already exists.
+2. **Path shape.** Even then, a *relative* benign value (`notes.txt`) was still
+   denied, because a server comparing against an allowed directory resolves an
+   absolute path first. The benign input is now an absolute path inside the decoy
+   workspace.
+
+Measured effect on `file-system-node`, 14 tools:
+
+| | `pass` | `target_error` | `unsupported` |
+|---|---:|---:|---:|
+| Before | 1 | 12 | 2 |
+| Workspace granted, relative path | 2 | 12 | 2 |
+| Workspace granted, **absolute path** | **6** | **8** | 2 |
+
+Four tools moved from "written off as broken" to genuinely exercised. The
+remaining eight are write, edit, create, move and media tools, which need input
+shapes a single benign string cannot supply — that is the schema-driven
+generation work, not a configuration problem.
+
+Completeness stays `inconclusive` because eight tools still fail, so the verdict
+is unchanged. The number that moved is coverage, and it moved because two of our
+own defects were removed, not because the target changed.
 
 ## 4. Representative server corpus
 

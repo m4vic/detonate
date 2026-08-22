@@ -179,7 +179,7 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		// that reads files gets something that actually exists.
 		benignValue := benign
 		if cfg.decoy != nil {
-			benignValue = decoy.BenignInput()
+			benignValue = cfg.decoy.BenignInput()
 		}
 		baselineResult, err := c.Call(ctx, tool.Name, argsFor(params, benignValue))
 		if err != nil {

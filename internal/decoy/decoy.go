@@ -142,11 +142,20 @@ func Plant(dir, containerHome string) (*Environment, error) {
 // off as target_error — a working server scored as broken, and completeness
 // dropped for a defect that was ours.
 //
-// The decoy plants real files, so there is now a correct answer to give: a bare
-// name that resolves both as a workspace-relative path and as a plain filename.
+// The decoy plants real files, so there is now a correct answer to give.
+//
+// Absolute, not a bare filename. A relative "notes.txt" was tried first and the
+// official MCP filesystem server still answered "Access denied" for all 12 of
+// its file tools: servers that take an allowed-directory argument compare
+// against a resolved absolute path, so a relative name never matches. An
+// absolute path inside the decoy workspace satisfies both — a server that joins
+// it onto its own root still lands in the right place.
+//
 // It carries no token, so a tool returning it proves nothing and triggers
 // nothing.
-func BenignInput() string { return "notes.txt" }
+func (e *Environment) BenignInput() string {
+	return e.ContainerHome + "/workspace/notes.txt"
+}
 
 // Match reports every planted token found in text, in any encoding it checks.
 //
