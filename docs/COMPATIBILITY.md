@@ -556,6 +556,68 @@ Completeness stays `inconclusive` because eight tools still fail, so the verdict
 is unchanged. The number that moved is coverage, and it moved because two of our
 own defects were removed, not because the target changed.
 
+## 3d. The pre-built route — 2026-08-20
+
+Blockers A0 and A1 are acquisition refusals: detonate will not resolve a
+monorepo workspace, and will not resolve a Python project whose build backend
+could run while the network is up. Both are deliberate. Both take out real
+servers.
+
+An author does not need us to solve either, because **their CI has already built
+the project**. The question was whether detonate could scan a tree that is
+already installed and compiled. It could not, for one reason nobody had noticed.
+
+### The defect
+
+`policy.Image` was only ever set from the acquisition result. With
+`--no-install` the target stayed on the default **Python** image, so a Node
+server died at launch:
+
+```
+exec: "node": executable file not found in $PATH
+```
+
+The one route available to an author with their own build was silently broken.
+Fixed by consulting `acquire.Detect` for the ecosystem even when the install
+stage is skipped — detection only reads a manifest, so asking which runtime a
+target needs costs nothing regardless of who installed its dependencies.
+
+### Result
+
+`servers/src/filesystem`, one of the three reference servers that previously
+failed acquisition in 0 seconds. Built inside `node:22-slim` exactly as CI would
+(`npm install --no-workspaces && npm run build`), then scanned with:
+
+```
+detonate dynamic ./src/filesystem --no-install   --cmd "node /target/dist/index.js /home/detonate/workspace"
+```
+
+| | Before | After |
+|---|---|---|
+| Outcome | acquisition unsupported, 0s | launched, enumerated, probed |
+| Tools discovered | 0 | 14 |
+| Tools probed | 0 | 12 |
+| `pass` | 0 | **8** |
+| `target_error` | — | 6 |
+| `unsupported` | — | 2 |
+
+Risk `no_findings`; completeness stays `inconclusive` because six tools still
+fail. **This is the first `modelcontextprotocol/servers` package ever to reach
+real dynamic testing.**
+
+The remaining six are the directory-shaped tools — `list_directory`,
+`directory_tree`, `create_directory`, `search_files` — which need a directory
+path where the benign value supplies a file path. One benign string cannot
+satisfy both shapes, which is a precise statement of why schema-driven input
+generation is the next real coverage work rather than a nice-to-have.
+
+### What this means for A0 and A1
+
+Neither needs to be implemented for 1.0. The supported answer for a monorepo,
+a Python project, or any custom build is: build it in your CI as you already do,
+then scan with `--no-install` and an explicit `--cmd`. That route is now real
+and measured. It is not yet documented, which is the remaining gap.
+
 ## 4. Representative server corpus
 
 Use the official reference servers plus one target per packaging/transport

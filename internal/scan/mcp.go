@@ -130,6 +130,23 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		}
 	}
 
+	// Pick the runtime image even when acquisition is skipped.
+	//
+	// The image was only ever set from the install result, so --no-install left
+	// the target on the default Python image and a Node server died with
+	// `exec: "node": executable file not found in $PATH`. That silently broke
+	// the one route an author with their own build has: their CI already ran
+	// `npm ci` and compiled, so they skip our acquisition and hand us a ready
+	// tree — and we started it on the wrong runtime.
+	//
+	// Detection is cheap and reads only a manifest, so it costs nothing to ask
+	// which runtime a target needs regardless of who installed its dependencies.
+	if !req.Stages.Install && absDir != "" {
+		if m := acquire.Detect(absDir); m.Ecosystem != acquire.EcosystemNone {
+			policy.Image = acquire.ImageFor(m.Ecosystem, policy.Image)
+		}
+	}
+
 	// Always sandboxed. There is no host-execution path reachable from here:
 	// the unsandboxed EnumerateTools still exists for our own tests, but
 	// shipping a way to reach it would recreate exactly the
