@@ -458,6 +458,68 @@ while assessing none — which is exactly the failure the plan's fourth
 The Action therefore keeps `mode: static` as its default. Dynamic is the mode
 with the higher ceiling and, today, the lower floor.
 
+## 3c. Decoy verification — 2026-08-20
+
+First end-to-end proof that the credential decoy works: planted on the host,
+mounted into a real container, read by a real MCP server over stdio, and caught
+on the way out. Real Docker (server 29.7.2).
+
+Two fixtures, deliberately one of each. A scanner exercised only against
+malicious targets will happily call everything malicious.
+
+| Fixture | Behaviour | Risk | Completeness | Exit |
+|---|---|---|---|---:|
+| `testdata/thief` | returns `~/.ssh/id_rsa` from any tool call | dangerous (2 findings) | complete | **3** |
+| `testdata/honest` | reads only `~/workspace`, refuses escapes | no_findings | complete | **0** |
+
+**Positive control.** The leak was caught on the *benign* baseline call at
++15ms — the server did not need to be attacked to leak — and again by the
+path-traversal probe. Evidence carries the nonce:
+
+```
+[CRITICAL] tool "read_file" returned the contents of /home/detonate/.ssh/id_rsa
+   evidence : planted secret /home/detonate/.ssh/id_rsa returned
+              base64-encoded (nonce 2baddbb1e99182ef2634b85ec37b3866)
+```
+
+The nonce is 128 bits of entropy generated for that scan alone, so the value
+existed nowhere else. That is what makes the finding unarguable rather than
+suggestive.
+
+**Negative control.** The honest server asserts the bounded proven-negative:
+
+```
+RISK: no_findings
+COMPLETENESS: complete
+Coverage: 3/3 scenario(s) completed
+  - planted 6 credential decoys in the sandbox; none were returned by any tool
+```
+
+Two defects were found by running these rather than by reasoning about them, and
+both were ours rather than the targets':
+
+1. The decoy finding rendered no evidence line, because the renderers print
+   `evidence` and the nonce sat in a field nobody displays. The proof existed and
+   no reader could see it.
+2. The benign baseline call used the fixed string `"hello"`, which is not a
+   filename, so a correct file-reading server answered `isError` and its tool was
+   written off as `target_error` — completeness dropped for our defect, not
+   theirs. This is a component of blocker A2. The decoy plants real files, so
+   there is now a correct answer to give.
+
+The first version of `testdata/honest` crashed on hostile input and was flagged
+eleven times. Those were **true positives** — a server that dies on malformed
+input is a real defect — and the guard went into the fixture, not the rule.
+
+### Not yet measured
+
+The dynamic corpus re-run is **outstanding**. It was attempted on 2026-08-20 and
+produced no data: the Docker daemon stopped, and all six targets returned
+`runtime_unavailable` / `completeness: failed` / exit 2. Worth noting that this
+is correct behaviour — an unavailable runtime did not silently pass — but it
+means the question "does the decoy plus realistic baseline lift real servers out
+of `inconclusive`?" remains **unanswered**.
+
 ## 4. Representative server corpus
 
 Use the official reference servers plus one target per packaging/transport
