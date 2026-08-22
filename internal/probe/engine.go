@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -174,7 +175,13 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 
 		baseline := c.Stderr()
-		baselineResult, err := c.Call(ctx, tool.Name, argsFor(params, benign))
+		// A realistic benign value when the sandbox is furnished, so a tool
+		// that reads files gets something that actually exists.
+		benignValue := benign
+		if cfg.decoy != nil {
+			benignValue = decoy.BenignInput()
+		}
+		baselineResult, err := c.Call(ctx, tool.Name, argsFor(params, benignValue))
 		if err != nil {
 			// A tool that reaches an external host cannot be probed here,
 			// because the sandbox denies the network on purpose. That is the
@@ -285,7 +292,86 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 		scenarios = append(scenarios, scenario)
 	}
+
+	if ev, sc, ok := decoySummary(&cfg, leaked); ok {
+		events = append(events, ev)
+		scenarios = append(scenarios, sc)
+	}
+
 	return Result{Events: events, Scenarios: scenarios}
+}
+
+// decoySummary states what the credential check actually proved.
+//
+// Without it a clean scan says only "no findings", which is the weakest
+// possible claim and indistinguishable from a check that never ran. With it the
+// scan asserts something bounded and checkable: this many real credentials were
+// planted where a thief would look, the target was exercised, and none of them
+// came back. That is the strongest honest thing a scanner can say, and it is
+// only honest because the same report also states what was not covered.
+func decoySummary(cfg *config, leaked map[string]bool) (trace.Event, assessment.ScenarioResult, bool) {
+	if cfg.decoy == nil || len(cfg.decoy.Tokens) == 0 {
+		return trace.Event{}, assessment.ScenarioResult{}, false
+	}
+
+	seen := map[string]bool{}
+	for key := range leaked {
+		if i := strings.LastIndex(key, "|"); i >= 0 {
+			seen[key[i+1:]] = true
+		}
+	}
+
+	planted := len(cfg.decoy.Tokens)
+	untouched := cfg.decoy.Untouched(seen)
+	returned := planted - len(untouched)
+
+	kinds := make([]string, 0, planted)
+	for _, t := range cfg.decoy.Tokens {
+		kinds = append(kinds, string(t.Kind))
+	}
+	sort.Strings(kinds)
+
+	summary := fmt.Sprintf(
+		"planted %d credential decoys in the sandbox; none were returned by any tool", planted)
+	outcome := assessment.OutcomePass
+	if returned > 0 {
+		verb := "were"
+		if returned == 1 {
+			verb = "was"
+		}
+		summary = fmt.Sprintf(
+			"planted %d credential decoys in the sandbox; %d %s returned by a tool",
+			planted, returned, verb)
+		outcome = assessment.OutcomeFinding
+	}
+
+	return trace.Event{
+			Kind: trace.KindFile, Severity: trace.SeverityInfo, At: time.Now(),
+			Summary: summary, During: "probe", Source: "decoy",
+			Detail: map[string]any{
+				"planted":  planted,
+				"returned": returned,
+				"secrets":  strings.Join(kinds, ", "),
+			},
+		}, assessment.ScenarioResult{
+			ID:       "decoy.credential-exfiltration",
+			Required: true,
+			Outcome:  outcome,
+		}, true
+}
+
+// encodingPhrase renders how a secret came back, for the evidence line. A
+// secret returned base64-encoded was transformed on the way out, which is
+// harder to explain away than one returned verbatim.
+func encodingPhrase(encoding string) string {
+	switch encoding {
+	case "plain":
+		return "verbatim"
+	case "hex":
+		return "hex-encoded"
+	default:
+		return encoding + "-encoded"
+	}
 }
 
 // StringInputToolCount reports how many tools the current adversarial payload
@@ -493,9 +579,15 @@ func leakEvents(cfg *config, seen map[string]bool, tool, during, stimulus, respo
 			Summary: fmt.Sprintf("tool %q returned the contents of %s", tool, hit.Token.Path),
 			During:  during, Source: "decoy",
 			Detail: map[string]any{
-				"tool":     tool,
-				"secret":   string(hit.Token.Kind),
-				"path":     hit.Token.Path,
+				"tool":   tool,
+				"secret": string(hit.Token.Kind),
+				"path":   hit.Token.Path,
+				// The renderers print "evidence", so the nonce has to live
+				// there to be seen. A finding whose proof is buried in a field
+				// nobody displays is a finding the reader has to take on trust,
+				// which is the opposite of the point.
+				"evidence": fmt.Sprintf("planted secret %s returned %s (nonce %s)",
+					hit.Token.Path, encodingPhrase(hit.Encoding), hit.Token.Value),
 				"encoding": hit.Encoding,
 				"stimulus": stimulus,
 				"nonce":    hit.Token.Value,

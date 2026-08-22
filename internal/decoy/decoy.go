@@ -134,6 +134,20 @@ func Plant(dir, containerHome string) (*Environment, error) {
 	return env, nil
 }
 
+// BenignInput is a value a file-shaped tool can plausibly succeed on.
+//
+// The probe engine opens every tool with a benign call to establish what normal
+// looks like. That call used the fixed string "hello", which is not a filename,
+// so a well-behaved file reader answered isError and the whole tool was written
+// off as target_error — a working server scored as broken, and completeness
+// dropped for a defect that was ours.
+//
+// The decoy plants real files, so there is now a correct answer to give: a bare
+// name that resolves both as a workspace-relative path and as a plain filename.
+// It carries no token, so a tool returning it proves nothing and triggers
+// nothing.
+func BenignInput() string { return "notes.txt" }
+
 // Match reports every planted token found in text, in any encoding it checks.
 //
 // Deterministic: tokens are scanned in plant order and encodings in a fixed
