@@ -879,3 +879,70 @@ nothing was found. The line is "was anything examined at all".
 The memory server's write-dependent tools remain unprobed under the default
 profile. Reaching them needs a writable workspace the target can persist into,
 which is a sandbox-profile change and is **not** implemented.
+
+---
+
+## 3g. The decoy was invisible on Linux — 2026-08-23
+
+Found by the first CI run on a real Linux runner. `TestDecoyCatchesAServerThat
+StealsTheSSHKey` — the positive control for the entire evidence mechanism —
+failed with `decoy finding severity = "info", want critical`.
+
+### What was actually wrong
+
+Every planted decoy was written mode `0600`. The sandbox runs as uid 1000
+(`sandbox.Policy`). The files are created by whoever ran detonate — uid 1001 on
+a GitHub runner, some other number on a laptop — so POSIX ownership never
+matches and `0600` grants nothing to the reader.
+
+Verified directly:
+
+```
+$ docker run --rm alpine sh -c '... chown 1001 ... chmod 600 ...'
+--- as another uid, mode 0600:  cat: Permission denied
+--- same file at 0644:          PRIVATE-KEY-TOKEN
+```
+
+So on Linux the decoy was planted, mounted, and **unreadable by the target**. A
+thieving server could not open the key it was being tempted with, nothing
+leaked, and the scan reported a clean result it had not earned.
+
+### Why it survived this long
+
+Docker Desktop on Windows and macOS serves bind mounts through a VM that ignores
+POSIX ownership, so every local run could read the files regardless of mode.
+Every measurement in §3c through §3f was taken on Windows. The mechanism has
+only ever been proven on the one platform where the permission model does not
+apply.
+
+`0600` was chosen for realism — a real `~/.ssh/id_rsa` is `0600`. That realism
+is worth nothing if the target cannot open the file: a thief that respects
+permissions it was never granted is not a threat model, it is a broken fixture.
+
+### The fix
+
+- Files are planted `0644`, directories `0755`.
+- Both are applied with an explicit `Chmod` **after** creation, because
+  `os.WriteFile` and `os.MkdirAll` mask the mode they are given by the process
+  umask: asking for `0644` under `umask 077` still yields `0600`.
+- `internal/decoy` now asserts the requirement without Docker, on every
+  platform where POSIX modes exist, so the next regression fails in a unit test
+  rather than in someone's pipeline.
+
+Mutation-checked: reverting `fileMode` to `0o600` fails both new tests, naming
+`.env`, `.netrc`, and `.ssh/id_rsa` individually.
+
+### What this changes about earlier sections
+
+Every dynamic-mode "no credential was returned" result recorded before this
+date was measured on Windows, where the decoy was readable. Those results stand
+for what they measured. **No proven-negative result had been demonstrated on
+Linux at all** until this fix — the platform CI and most users run on.
+
+### The other half of the failure
+
+The control took whichever decoy-sourced event came first. A run always ends
+with an info-level summary of what was planted, so when the leak was absent the
+test reported `severity = info` rather than "the key was never stolen" — the
+right failure for the wrong reason, and it cost time. The control now selects
+the event carrying a nonce and says which of the two things went wrong.

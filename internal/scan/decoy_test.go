@@ -41,14 +41,28 @@ func TestDecoyCatchesAServerThatStealsTheSSHKey(t *testing.T) {
 		t.Fatal("no trace produced")
 	}
 
+	// The leak specifically, not merely the first decoy-sourced event: the
+	// run always ends with an info-level summary of what was planted, so
+	// taking whichever came first reported "severity = info" when the real
+	// answer was "the key was never stolen". A positive control has to say
+	// which of those two things went wrong.
 	var leak *trace.Event
+	var summary *trace.Event
 	for i, ev := range report.Trace.Events {
-		if ev.Source == "decoy" {
+		if ev.Source != "decoy" {
+			continue
+		}
+		if _, hasNonce := ev.Detail["nonce"]; hasNonce {
 			leak = &report.Trace.Events[i]
 			break
 		}
+		summary = &report.Trace.Events[i]
 	}
 	if leak == nil {
+		if summary != nil {
+			t.Fatalf("a server that returns the decoy SSH key stole nothing; "+
+				"the decoy was planted but never read: %q", summary.Summary)
+		}
 		t.Fatalf("a server that returns the decoy SSH key produced no decoy finding; events: %+v",
 			report.Trace.Events)
 	}

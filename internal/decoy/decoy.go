@@ -94,6 +94,43 @@ type Hit struct {
 	Encoding string
 }
 
+// The decoy is planted by detonate and read inside the sandbox, and those are
+// two different users.
+//
+// The sandbox runs as uid 1000 (see sandbox.Policy). The files are created by
+// whoever ran detonate — uid 1001 on a GitHub runner, some other number on a
+// developer's laptop — so POSIX ownership never matches, and a 0600 file is
+// simply unreadable from inside the container. The decoy was planted, mounted,
+// and invisible.
+//
+// It went unnoticed because Docker Desktop on Windows and macOS serves bind
+// mounts through a VM that ignores POSIX ownership, so every local run could
+// read the files regardless of mode. On Linux — CI, and most real users — the
+// most important mechanism in the tool caught nothing. The positive control in
+// internal/scan is what surfaced it.
+//
+// 0600 was chosen because a real ~/.ssh/id_rsa is 0600. That realism is worth
+// nothing if the target cannot open the file: a thief that respects permissions
+// it was never granted is not a threat model, it is a broken fixture.
+const (
+	fileMode = 0o644
+	dirMode  = 0o755
+)
+
+// makeReadableInSandbox forces the mode after creation.
+//
+// os.WriteFile and os.MkdirAll both mask the mode they are given by the
+// process umask, so passing 0644 under `umask 077` still yields 0600. An
+// explicit chmod is the only way to state the requirement rather than request
+// it. Windows has no POSIX modes and Chmod is close to a no-op there, which is
+// harmless: the mount layer already ignores ownership.
+func makeReadableInSandbox(path string) error {
+	if err := os.Chmod(path, fileMode); err != nil {
+		return fmt.Errorf("making decoy %s readable inside the sandbox: %w", path, err)
+	}
+	return nil
+}
+
 // Plant builds a decoy home under dir and returns what it planted.
 //
 // dir must already exist and should be a per-scan temporary directory: the
@@ -110,11 +147,14 @@ func Plant(dir, containerHome string) (*Environment, error) {
 		}
 
 		full := filepath.Join(dir, filepath.FromSlash(f.path))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(full), dirMode); err != nil {
 			return nil, fmt.Errorf("creating decoy directory for %s: %w", f.path, err)
 		}
 		if err := os.WriteFile(full, []byte(f.render(token)), f.mode); err != nil {
 			return nil, fmt.Errorf("planting decoy %s: %w", f.path, err)
+		}
+		if err := makeReadableInSandbox(full); err != nil {
+			return nil, err
 		}
 
 		env.Tokens = append(env.Tokens, Token{
@@ -132,7 +172,29 @@ func Plant(dir, containerHome string) (*Environment, error) {
 		return nil, err
 	}
 
+	// Directories last, and over the whole tree: a file the sandbox user can
+	// read is still unreachable behind a directory it cannot traverse, and
+	// MkdirAll masks its mode by the umask exactly as WriteFile does.
+	if err := openDirectories(dir); err != nil {
+		return nil, err
+	}
+
 	return env, nil
+}
+
+func openDirectories(root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		if err := os.Chmod(path, dirMode); err != nil {
+			return fmt.Errorf("making decoy directory %s traversable inside the sandbox: %w", path, err)
+		}
+		return nil
+	})
 }
 
 // BenignInput is a value a file-shaped tool can plausibly succeed on.
@@ -277,7 +339,7 @@ var layout = []decoyFile{
 	{
 		path: ".ssh/id_rsa",
 		kind: KindSSHKey,
-		mode: 0o600,
+		mode: fileMode,
 		// The body carries base64(token) verbatim, on its own line.
 		//
 		// An earlier version encoded "detonate-decoy-key-"+token, which read as
@@ -298,7 +360,7 @@ var layout = []decoyFile{
 	{
 		path: ".aws/credentials",
 		kind: KindAWSCreds,
-		mode: 0o600,
+		mode: fileMode,
 		render: func(t string) string {
 			return fakeNotice + "\n[default]\naws_access_key_id = AKIA" +
 				strings.ToUpper(t[:16]) + "\naws_secret_access_key = " + t + "\n"
@@ -307,7 +369,7 @@ var layout = []decoyFile{
 	{
 		path: ".env",
 		kind: KindEnvFile,
-		mode: 0o600,
+		mode: fileMode,
 		render: func(t string) string {
 			return fakeNotice + "\nDATABASE_URL=postgres://app:" + t +
 				"@db.internal:5432/app\nSTRIPE_SECRET_KEY=sk_live_" + t + "\n"
@@ -316,7 +378,7 @@ var layout = []decoyFile{
 	{
 		path: ".netrc",
 		kind: KindNetrc,
-		mode: 0o600,
+		mode: fileMode,
 		render: func(t string) string {
 			return fakeNotice + "\nmachine api.internal\n  login deploy\n  password " + t + "\n"
 		},
@@ -324,7 +386,7 @@ var layout = []decoyFile{
 	{
 		path: ".config/gh/hosts.yml",
 		kind: KindGitHubToken,
-		mode: 0o600,
+		mode: fileMode,
 		render: func(t string) string {
 			return fakeNotice + "\ngithub.com:\n    user: example\n    oauth_token: ghp_" + t + "\n"
 		},
@@ -332,7 +394,7 @@ var layout = []decoyFile{
 	{
 		path: ".bash_history",
 		kind: KindShellHistory,
-		mode: 0o600,
+		mode: fileMode,
 		render: func(t string) string {
 			return "ls -la\ncd ~/workspace\ngit status\n" +
 				"export INTERNAL_API_TOKEN=" + t + "\nnpm test\n"
