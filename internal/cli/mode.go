@@ -24,6 +24,39 @@ const modeUsage = `Usage:
   detonate combined <target>               Not available in alpha
 `
 
+// helpRequested reports whether the user asked for help rather than a scan.
+//
+// `detonate static --help` used to treat "--help" as a path and answer
+// "static scan: C:\...\--help does not exist". Asking a CLI for help is the
+// first thing anyone does, and a tool that answers with a file-not-found error
+// about a flag looks broken before it has done anything.
+func helpRequested(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "help":
+			return true
+		}
+	}
+	return false
+}
+
+// printModeUsage prints one mode's usage and the options it accepts.
+func (a *App) printModeUsage(name, summary string) {
+	fmt.Fprintf(a.Stdout, "Usage:\n  detonate %s <target> [options]\n\n%s\n\nOptions:\n",
+		name, summary)
+
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(a.Stdout)
+	var opt scanOptions
+	bindScanFlags(fs, &opt)
+	fs.PrintDefaults()
+
+	fmt.Fprint(a.Stdout, "\nExit codes:\n"+
+		"  0  clean            3  findings\n"+
+		"  1  scan failed      4  incomplete coverage\n"+
+		"  2  usage or environment problem\n")
+}
+
 // modeArgs separates the one target from the options that follow it.
 //
 // The mode subcommands used to require exactly one argument, which meant any
@@ -61,6 +94,13 @@ func (a *App) modeArgs(name string, args []string) (string, scanOptions, bool) {
 }
 
 func (a *App) runStatic(ctx context.Context, args []string) int {
+	if helpRequested(args) {
+		a.printModeUsage("static",
+			"Inspect a target without executing any of its code. Needs no Docker.\n"+
+				"Reads prompts, skill instructions, and the tool inventory an MCPB\n"+
+				"bundle declares in manifest.json.")
+		return exitOK
+	}
 	input, opt, ok := a.modeArgs("static", args)
 	if !ok {
 		return exitUsage
@@ -83,6 +123,13 @@ func (a *App) runStatic(ctx context.Context, args []string) int {
 }
 
 func (a *App) runDynamic(ctx context.Context, args []string) int {
+	if helpRequested(args) {
+		a.printModeUsage("dynamic",
+			"Run the target inside a Docker sandbox (network off, read-only root,\n"+
+				"non-root) and report what it actually did. Credential decoys are\n"+
+				"planted in the sandbox home, so a tool that returns one is caught.")
+		return exitOK
+	}
 	input, opt, ok := a.modeArgs("dynamic", args)
 	if !ok {
 		return exitUsage
