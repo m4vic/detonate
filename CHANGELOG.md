@@ -3,7 +3,7 @@
 All notable user-visible changes are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) once versioned prereleases begin.
 
-## Unreleased
+## v0.4.0 — 2026-08-23
 
 ### Added
 
@@ -33,6 +33,24 @@ All notable user-visible changes are recorded here. The project follows
 
 ### Changed
 
+- **Nested input schemas are probed.** Payloads now reach strings inside arrays
+  and objects, not only top-level parameters. A tool whose arguments are an
+  array of objects previously reported "no adversarial string-input surface" and
+  was never probed at all. On the official MCP memory server this took tools
+  with a reachable attack surface from 3 of 11 to 10 of 11. The walk is bounded
+  by depth and a leaf cap, because the schema is written by the target.
+- **The sandbox no longer takes the blame for its own restrictions.** A tool
+  that fails because the root filesystem is read-only is reported as
+  `unsupported` naming the restriction, matching how denied egress was already
+  handled. Six of the memory server's tools were recorded as broken for failing
+  to write to a filesystem detonate had mounted read-only on purpose. `EACCES`
+  alone does not qualify: a tool refusing to read `/etc/shadow` is working
+  correctly, and that is a different fact.
+- **A scan that assessed nothing no longer exits 0.** Exit 0 means "no
+  findings", and a pipeline reads it as "safe to merge". Four real community MCP
+  servers returned `not_assessed` and exited clean. Risk `not_assessed` now
+  exits 4. This is narrower than `--fail-incomplete`: partial coverage still
+  exits 0, because something was genuinely assessed and nothing was found.
 - **Zero-argument tools are now called once, benignly, when a decoy is present**
   and their response checked for planted secrets. They were previously never
   invoked at all, so a tool returning a credential on every call could not be
@@ -51,6 +69,20 @@ All notable user-visible changes are recorded here. The project follows
 
 ### Fixed
 
+- **The credential decoy was unreadable inside the sandbox on Linux.** Files
+  were planted `0600`; the sandbox runs as uid 1000 while the files are created
+  by whoever ran detonate, so ownership never matched and the target could not
+  open the credentials it was being tempted with. Nothing leaked, and scans
+  reported clean results they had not earned. It survived because Docker Desktop
+  on Windows and macOS ignores POSIX ownership on bind mounts, so every local
+  run passed; the first CI run on Linux caught it. Files are now `0644` and
+  directories `0755`, applied with an explicit `chmod` after creation because
+  `os.WriteFile` masks its mode by the umask.
+- `detonate static --help` treated `--help` as a file path and answered that it
+  did not exist. Every subcommand now prints usage, options, and exit codes.
+- The startup banner's box was two characters wider on four lines than the rules
+  above and below, and its version field overflowed for any build from an
+  untagged commit — which is every build a contributor makes.
 - `version: latest` in the GitHub Action failed on every run: piping curl into
   `grep -m1` closed the pipe, curl exited 23, and `pipefail` failed the step.
 - Decoy findings rendered no evidence line, so the nonce that makes them
