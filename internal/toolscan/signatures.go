@@ -53,12 +53,35 @@ var warningContext = regexp.MustCompile(`(?i)\b(never|do not|don't|avoid|warns?|
 
 func isWarning(line string) bool { return warningContext.MatchString(line) }
 
-// directivePattern is the second half of the shadowing rule: a description
-// that merely *names* another tool is ordinary cross-referencing ("similar to
-// read_file"), which honest servers do constantly. A description that names
-// another tool AND issues a directive about it is the tool-poisoning pattern.
-// Both halves must be present.
-var directivePattern = regexp.MustCompile(`(?i)\b(instead\s+of|rather\s+than|before\s+(using|calling|invoking)|after\s+(using|calling|invoking)|do\s+not\s+(use|call)|never\s+(use|call)|always\s+(use|call)|must\s+(first\s+)?(use|call)|prefer|redirect|route)\b`)
+// A description that merely *names* another tool is ordinary cross-referencing
+// ("similar to read_file"), which honest servers do constantly. A description
+// that names another tool AND issues a directive about it, in the same
+// sentence, is the tool-poisoning pattern. Both halves must be present.
+//
+// A directive about another tool comes in two shapes, and conflating them is
+// what makes this rule fire on honest documentation.
+//
+// Redirection supersedes or suppresses another tool: "call this instead of
+// read_file", "never use get_weather". That is the tool-poisoning pattern —
+// the description is competing with another tool for the agent's routing.
+//
+// Sequencing orders calls within one workflow: "always call read_docx
+// immediately before any accept/reject/reply". A real server ships this, and it
+// is a correctness constraint its author is documenting, not an attack.
+// Measured on @adeu/mcp-server, exactly that sentence was reported CRITICAL.
+//
+// Structurally the two are identical and only intent separates them, so
+// sequencing is surfaced as an observation to verify rather than asserted as a
+// finding. Capability is not malice — the same rule this project already
+// learned once, when treating a skill's use of an API key as an attack flagged
+// 30 of 59 known-good skills.
+var redirectionPattern = regexp.MustCompile(`(?i)\b(instead\s+of|rather\s+than|in\s+place\s+of|do\s+not\s+(use|call)|never\s+(use|call)|redirect|route)\b`)
+
+var sequencingPattern = regexp.MustCompile(`(?i)\b(before\s+(using|calling|invoking)|after\s+(using|calling|invoking)|always\s+(use|call)|must\s+(first\s+)?(use|call)|prefer)\b`)
+
+// directivePattern is the union, used as the cheap first gate.
+var directivePattern = regexp.MustCompile(
+	`(?:` + redirectionPattern.String() + `)|(?:` + sequencingPattern.String() + `)`)
 
 // lineContaining returns the whole line the first match falls on.
 //

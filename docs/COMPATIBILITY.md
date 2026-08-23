@@ -965,3 +965,101 @@ report could then have come from the target rather than from us.
 A sweep for other tests carrying the same blind spot found no further cases:
 the only Windows skips remaining are the two POSIX-mode tests, and both now run
 on Linux in CI.
+
+---
+
+## 3h. First corpus run against strangers' code — 2026-08-23
+
+Six servers taken from the official MCP registry via `scripts/find-targets.py`,
+installed inside a container and scanned through the pre-built route. This is
+the first measurement against servers written by people who have never seen
+detonate, and it found three false-positive generators that the fixture corpus
+structurally could not — fixtures are written by the same author as the rules.
+
+### Reach, before any scanning
+
+Of the first 400 registry entries: **289 remote-only** (an HTTPS endpoint someone
+else operates — no code to sandbox, and probing it would be attacking a live
+third-party service), 3 requiring API keys, and **33 distinct servers actually
+probeable**. About 8%.
+
+### Defect 1 — one dead socket reported as 935 findings
+
+`affiliate-networks-mcp` (682 tools) returned **949 findings**. One payload
+killed the server process; every subsequent call, across every remaining tool,
+returned `connection closed: calling "tools/call": client is closing: EOF`, and
+each was recorded as that tool crashing under hostile input.
+
+| | Before | After |
+|---|---:|---:|
+| Total findings | **949** | **4** |
+| crash | 935 | **1** |
+| template-injection | 11 | **0** |
+| shadowing | 3 | **3 → 0** (see defect 3) |
+| tools reported as never probed | 0 | **74** |
+
+The first crash is kept — a payload that kills the target *is* the result. What
+stops is pretending the corpse says anything about tools that were never
+reached. The report now states: *"the target stopped responding after
+`affiliate_scaleo_list_programmes`; 129 tool(s) were never probed"*.
+
+### Defect 2 — a two-digit leak marker
+
+The template-injection probe sent `{{7*7}}` and searched responses for `"49"`.
+A benign error carrying `"timestamp": "2026-08-23T13:15:54.497Z"` was reported
+as CRITICAL server-side template injection, because `.497` contains `49`. One
+report from that scan held **33 incidental occurrences of "49"** and zero of a
+distinctive value.
+
+Now `{{31337*31337}}` matched against `982007569`. Same standard the credential
+decoys already meet with a 128-bit nonce: evidence nobody can argue with. The
+test states this as *specificity*, not length — `uid=` is four characters and
+excellent evidence, while a two-digit number is none.
+
+### Defect 3 — shadowing fired on ordinary documentation
+
+Two separate errors, both measured:
+
+**No proximity.** Any directive word anywhere in a description paired with any
+tool name anywhere else in it. On a server whose 682 tools all begin
+`affiliate_`, that is near-certain. Two of the three findings displayed evidence
+that did not contain the trigger at all, because the directive was paragraphs
+from the name that matched. Now both must occur in the same sentence, and the
+evidence is that sentence.
+
+**Redirection conflated with sequencing.** `@adeu/mcp-server` documents
+*"Always call `read_docx` immediately before any accept/reject/reply — do not
+reuse IDs from earlier in the conversation."* That is a correctness constraint
+its author is documenting. It was reported CRITICAL.
+
+Structurally it is identical to an attack and only intent separates them, so the
+rule now splits:
+
+| Shape | Example | Verdict |
+|---|---|---|
+| Redirection — supersedes or suppresses another tool | "call this **instead of** get_weather" | CRITICAL finding |
+| Sequencing — orders calls within one workflow | "**always call** read_docx **before** ..." | observation to confirm |
+
+This is the same lesson `internal/skill` already learned when treating a skill's
+use of an API key as an attack flagged 30 of 59 known-good skills: **capability
+is not malice.**
+
+### Result
+
+| Target | Before | After |
+|---|---:|---:|
+| `affiliate-networks-mcp` (682 tools) | 949 findings, exit 3 | 1 finding, exit 3 |
+| `@adeu/mcp-server` (9 tools) | 1 CRITICAL, exit 3 | 0 findings, exit 0 |
+| `@aetherwealth/mcp` (49 tools) | 1 CRITICAL, exit 3 | 0 findings, exit 0 |
+
+Controls unchanged: `testdata/action/poisoned` exit 3, `benign` exit 0,
+`thief` exit 3, `honest` exit 0. The poisoned fixture's redirection finding
+still fires, now worded *"redirects the agent away from another tool"*.
+
+### What this does not establish
+
+Three servers is not a false-positive rate. The surviving crash finding on
+`affiliate-networks-mcp` has not been confirmed as a genuine vulnerability
+rather than an unhandled oversized input, and the sequencing observations have
+not been reviewed by the servers' authors. What it does establish is that the
+fixture corpus cannot find this class of defect at all.

@@ -113,30 +113,71 @@ func analyzeShadowing(tool toolinfo.ToolInfo, names []nameMatcher, now time.Time
 		return nil
 	}
 
-	// Sorted so the reported set does not depend on enumeration order when a
-	// description references several tools.
+	// The directive and the tool it names must appear in the SAME sentence.
+	//
+	// Without that, any directive word anywhere in a description pairs with any
+	// tool name anywhere else in it. Measured on a real registry server with
+	// 682 tools, this produced three findings and all three were wrong: one
+	// fired on "a small manifest returned instead of the data" — describing a
+	// return format, not redirecting the agent — and two displayed evidence
+	// that did not contain the trigger at all, because the directive was
+	// paragraphs away from the name that matched.
+	//
+	// Long descriptions and prefixed tool names make this near-certain: on that
+	// server every tool began "affiliate_", so almost every description
+	// mentioned something matching another tool's name. A finding whose
+	// evidence does not show why it fired cannot be argued about, which is the
+	// opposite of the point.
 	var referenced []string
-	for _, other := range names {
-		if other.name == tool.Name {
+	var trigger string
+	redirects := false
+	seen := map[string]bool{}
+	for _, sentence := range sentences(text) {
+		if !directivePattern.MatchString(sentence) {
 			continue
 		}
-		if other.re.MatchString(text) {
-			referenced = append(referenced, other.name)
+		for _, other := range names {
+			if other.name == tool.Name || seen[other.name] {
+				continue
+			}
+			if other.re.MatchString(sentence) {
+				referenced = append(referenced, other.name)
+				seen[other.name] = true
+				if redirectionPattern.MatchString(sentence) {
+					// Redirection outranks sequencing: one superseding sentence
+					// is the finding, whatever else the description says.
+					if !redirects {
+						trigger, redirects = strings.TrimSpace(sentence), true
+					}
+				} else if trigger == "" {
+					trigger = strings.TrimSpace(sentence)
+				}
+			}
 		}
 	}
 	if len(referenced) == 0 {
 		return nil
 	}
+	// Sorted so the reported set does not depend on enumeration order when a
+	// description references several tools.
 	sort.Strings(referenced)
 
-	return []trace.Event{event(trace.KindProtocol, trace.SeverityCritical, now,
-		"tool description directs the agent's use of another tool: "+quoteTool(tool.Name),
+	severity, summary := trace.SeverityInfo, "tool description sequences a call to another tool, which is ordinary documentation but worth confirming: "+quoteTool(tool.Name)
+	if redirects {
+		severity = trace.SeverityCritical
+		summary = "tool description redirects the agent away from another tool: " + quoteTool(tool.Name)
+	}
+
+	return []trace.Event{event(trace.KindProtocol, severity, now,
+		summary,
 		sourceInventory,
 		map[string]any{
 			"tool":       tool.Name,
 			"references": strings.Join(referenced, ", "),
-			"evidence":   clip(strings.TrimSpace(lineContaining(directivePattern, text)), evidenceLimit),
-			"rule":       "tool-shadowing",
+			// The sentence that actually triggered the rule, not merely the
+			// first line carrying a directive somewhere in the description.
+			"evidence": clip(trigger, evidenceLimit),
+			"rule":     "tool-shadowing",
 		})}
 }
 
@@ -173,4 +214,26 @@ func clip(s string, max int) string {
 		return string(r[:max]) + "..."
 	}
 	return s
+}
+
+// sentences splits a description into units small enough that co-occurrence
+// means something.
+//
+// Newlines count as boundaries too: tool descriptions are frequently bulleted
+// or multi-paragraph, and two facts in different bullets are not one claim.
+func sentences(text string) []string {
+	var out []string
+	start := 0
+	for i, r := range text {
+		if r == '.' || r == '!' || r == '?' || r == '\n' || r == ';' {
+			if seg := text[start : i+1]; strings.TrimSpace(seg) != "" {
+				out = append(out, seg)
+			}
+			start = i + 1
+		}
+	}
+	if seg := text[start:]; strings.TrimSpace(seg) != "" {
+		out = append(out, seg)
+	}
+	return out
 }
