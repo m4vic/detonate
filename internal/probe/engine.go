@@ -225,6 +225,18 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 				benignArgs[name] = allowed[0]
 			}
 		}
+
+		// Required parameters the string probe set does not fill.
+		//
+		// edit_file requires "edits", an array. Only string parameters were
+		// ever supplied, so a required field was simply absent and the call
+		// failed schema validation before the tool ran — reported as
+		// target_error, blamed on the tool, caused by us.
+		for name, value := range requiredNonStringArgs(tool.InputSchema) {
+			if _, taken := benignArgs[name]; !taken {
+				benignArgs[name] = value
+			}
+		}
 		baselineResult, err := c.Call(ctx, tool.Name, benignArgs)
 		if err != nil {
 			// A tool that reaches an external host cannot be probed here,
@@ -684,4 +696,121 @@ func callIfDecoy(ctx context.Context, cfg *config, c Caller, tool string) (*tool
 		return nil, err
 	}
 	return &result, nil
+}
+
+// maxSchemaDepth bounds the walk below. A schema is target-controlled, so it
+// can nest arbitrarily; every other budget in detonate is explicit and this one
+// should be too.
+const maxSchemaDepth = 6
+
+// requiredNonStringArgs builds a minimal schema-valid value for each required
+// parameter that is not a string.
+//
+// Minimal, deliberately: an empty array rather than a fabricated element, false
+// rather than true, zero rather than a guess. The goal is a call that survives
+// validation so the tool actually runs — not a call that exercises the
+// parameter. Inventing plausible contents would be generating test data, which
+// is a different job with different risks: an array of fabricated edits handed
+// to edit_file would be asking a working tool to modify files and then judging
+// it on the result.
+func requiredNonStringArgs(schema json.RawMessage) map[string]any {
+	return requiredArgsAt(schema, 0)
+}
+
+func requiredArgsAt(schema json.RawMessage, depth int) map[string]any {
+	if len(schema) == 0 || depth >= maxSchemaDepth {
+		return nil
+	}
+
+	var s struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &s); err != nil || len(s.Required) == 0 {
+		return nil
+	}
+
+	out := make(map[string]any, len(s.Required))
+	for _, name := range s.Required {
+		raw, ok := s.Properties[name]
+		if !ok {
+			continue
+		}
+		if v, filled := minimalValue(raw, depth); filled {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// minimalValue returns the smallest schema-valid value for one property, and
+// whether it produced one. Strings report false: the probe set fills those, and
+// overwriting them with a placeholder would undo the decoy-aware paths.
+func minimalValue(raw json.RawMessage, depth int) (any, bool) {
+	var prop struct {
+		Type     string          `json:"type"`
+		Default  json.RawMessage `json:"default"`
+		MinItems int             `json:"minItems"`
+		Items    json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &prop); err != nil {
+		return nil, false
+	}
+
+	// A declared default is the author saying what a sane value looks like.
+	if len(prop.Default) > 0 {
+		var v any
+		if err := json.Unmarshal(prop.Default, &v); err == nil {
+			return v, true
+		}
+	}
+
+	switch prop.Type {
+	case "array":
+		items := make([]any, 0, prop.MinItems)
+		for i := 0; i < prop.MinItems; i++ {
+			if v, ok := minimalObject(prop.Items, depth+1); ok {
+				items = append(items, v)
+			}
+		}
+		return items, true
+	case "boolean":
+		return false, true
+	case "integer", "number":
+		return 0, true
+	case "object":
+		v, _ := minimalObject(raw, depth+1)
+		return v, true
+	default:
+		// Strings and untyped properties belong to the probe set.
+		return nil, false
+	}
+}
+
+func minimalObject(raw json.RawMessage, depth int) (map[string]any, bool) {
+	obj := map[string]any{}
+	for k, v := range requiredArgsAt(raw, depth) {
+		obj[k] = v
+	}
+	// Required strings inside a nested object still have to be present for the
+	// call to validate, and no decoy path reaches them.
+	var s struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &s); err == nil {
+		for _, name := range s.Required {
+			if _, taken := obj[name]; taken {
+				continue
+			}
+			var prop struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(s.Properties[name], &prop); err == nil &&
+				(prop.Type == "string" || prop.Type == "") {
+				obj[name] = ""
+			}
+		}
+	}
+	return obj, true
 }

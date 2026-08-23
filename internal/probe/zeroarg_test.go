@@ -128,3 +128,94 @@ func TestBenignCallRespectsEnumConstraints(t *testing.T) {
 		t.Fatalf("path = %v, want a decoy path", got)
 	}
 }
+
+// A required non-string parameter has to be present or the call fails schema
+// validation before the tool ever runs — reported as target_error and blamed on
+// the tool. edit_file requires "edits", an array, and only string parameters
+// were ever supplied.
+func TestRequiredNonStringParametersAreFilled(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type": "object",
+		"required": ["path", "edits", "count", "enabled"],
+		"properties": {
+			"path":    {"type": "string"},
+			"count":   {"type": "integer"},
+			"enabled": {"type": "boolean"},
+			"dryRun":  {"type": "boolean", "default": true},
+			"edits": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"required": ["oldText", "newText"],
+					"properties": {
+						"oldText": {"type": "string"},
+						"newText": {"type": "string"}
+					}
+				}
+			}
+		}
+	}`)
+
+	got := requiredNonStringArgs(schema)
+
+	// Strings belong to the probe set; overwriting them would undo the
+	// decoy-aware paths that make a benign call succeed at all.
+	if _, present := got["path"]; present {
+		t.Error("a required string was overwritten; the probe set owns those")
+	}
+
+	edits, ok := got["edits"].([]any)
+	if !ok {
+		t.Fatalf("edits = %#v, want an array", got["edits"])
+	}
+	// Empty, not fabricated. Minimal means the call survives validation so the
+	// tool runs — inventing edits would ask a working tool to modify files and
+	// then judge it on the result.
+	if len(edits) != 0 {
+		t.Errorf("edits = %v, want empty; minimal values must not be invented", edits)
+	}
+
+	if got["count"] != 0 {
+		t.Errorf("count = %v, want 0", got["count"])
+	}
+	if got["enabled"] != false {
+		t.Errorf("enabled = %v, want false", got["enabled"])
+	}
+	// A declared default is the author stating what a sane value looks like,
+	// and it wins over our guess — even though this one is not required.
+	if v, present := got["dryRun"]; present && v != true {
+		t.Errorf("dryRun = %v, want the schema default true", v)
+	}
+}
+
+// minItems means an empty array is not schema-valid, so one minimal element has
+// to be built or the call fails validation anyway.
+func TestArrayWithMinItemsGetsOneElement(t *testing.T) {
+	got := requiredNonStringArgs(json.RawMessage(`{
+		"type": "object",
+		"required": ["items"],
+		"properties": {
+			"items": {
+				"type": "array",
+				"minItems": 1,
+				"items": {
+					"type": "object",
+					"required": ["name"],
+					"properties": {"name": {"type": "string"}}
+				}
+			}
+		}
+	}`))
+
+	items, ok := got["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want exactly one element", got["items"])
+	}
+	el, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("element = %#v, want an object", items[0])
+	}
+	if _, present := el["name"]; !present {
+		t.Errorf("element is missing its required field: %#v", el)
+	}
+}

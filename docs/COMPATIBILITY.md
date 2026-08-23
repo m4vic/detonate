@@ -624,11 +624,12 @@ Follow-on to §3d. With `servers/src/filesystem` finally reachable, the remainin
 failures were measurable rather than hypothetical, and each turned out to be a
 distinct defect in how detonate builds arguments — not in the target.
 
-| Change | `pass` | `target_error` | `unsupported` |
-|---|---:|---:|---:|
-| Pre-built route only (§3d) | 8 | 6 | 2 |
-| Per-parameter shape | 12 | 2 | 2 |
-| Enum-aware benign values | **13** | **1** | 2 |
+| Change | `pass` | `target_error` | `unsupported` | Completeness |
+|---|---:|---:|---:|---|
+| Pre-built route only (§3d) | 8 | 6 | 2 | inconclusive |
+| Per-parameter shape | 12 | 2 | 2 | inconclusive |
+| Enum-aware benign values | 13 | 1 | 2 | inconclusive |
+| Required non-string parameters | **14** | **0** | 2 | **partial** |
 
 **Per-parameter shape.** One benign value cannot serve a whole filesystem
 server: six tools were directory operations handed a file path. The tool name
@@ -640,10 +641,19 @@ directory in the other.
 `sortBy: enum ["name","size"]`. Sending a path there made a working tool reject
 a benign call, and the tool took the blame as `target_error`.
 
-**The one remaining failure**, `edit_file`, is a different class again: it
-requires `edits`, an array. Detonate fills only string parameters, so a required
-field is simply absent. That needs structured input generation, not a better
-string.
+**Required non-string parameters.** `edit_file` requires `edits`, an array.
+Only string parameters were ever supplied, so a required field was simply absent
+and the call failed schema validation before the tool ran. Minimal schema-valid
+values are now built for required non-strings: an empty array rather than a
+fabricated element, `false` rather than `true`, a declared `default` where the
+author gave one. Deliberately minimal — the goal is a call that survives
+validation so the tool runs, not one that exercises the parameter. An array of
+invented edits would be asking a working tool to modify files and then judging
+it on the result.
+
+**All 14 tools now pass, and `target_error` is zero.** Every one of the eight
+original failures was a defect in how detonate built arguments. The server
+worked throughout.
 
 ### Why `complete` is not reachable here
 
