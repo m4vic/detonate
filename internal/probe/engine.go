@@ -159,6 +159,7 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 		eventStart := len(events)
 		params := stringParams(tool.InputSchema)
+		enums := enumValues(tool.InputSchema)
 		if len(params) == 0 {
 			// Nothing to inject into. A tool with no string inputs is not
 			// immune, but it is out of reach of this probe set, and saying so
@@ -168,6 +169,35 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 				Summary: fmt.Sprintf("tool %q has no adversarial string-input surface; no payloads sent", tool.Name),
 				During:  "probe", Source: "probe-engine",
 			})
+			// Call it once anyway, and check what comes back.
+			//
+			// Skipping these entirely left a real hole: a zero-argument tool
+			// that returns your SSH key on every call was never invoked, so it
+			// could never be caught. "Nothing to inject into" is not the same
+			// as "nothing to observe" — the tool still runs, and what it
+			// returns is still evidence.
+			//
+			// The outcome stays unsupported rather than becoming a pass. The
+			// adversarial probe set genuinely does not reach this tool, and
+			// saying it was tested because one benign call was made would be
+			// exactly the coverage inflation the completeness model exists to
+			// prevent.
+			// Only when there is something planted to detect. Without a decoy
+			// the call would execute target code and learn nothing, and the
+			// existing contract — a tool this probe set cannot reach is not
+			// called — should hold.
+			if result, callErr := callIfDecoy(ctx, &cfg, c, tool.Name); callErr == nil && result != nil {
+				leaks := leakEvents(&cfg, leaked, tool.Name, "probe:no-argument",
+					"benign call with no arguments", result.SearchableText())
+				events = append(events, leaks...)
+				if len(leaks) > 0 {
+					scenario.Outcome = assessment.OutcomeFinding
+					scenario.Reason = "returned a planted credential with no input"
+					scenarios = append(scenarios, scenario)
+					continue
+				}
+			}
+
 			scenario.Outcome = assessment.OutcomeUnsupported
 			scenario.Reason = "current probe set found no adversarial string-input surface"
 			scenarios = append(scenarios, scenario)
@@ -183,6 +213,16 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 			benignArgs = make(map[string]any, len(params))
 			for _, name := range params {
 				benignArgs[name] = cfg.decoy.BenignFor(tool.Name, name)
+			}
+		}
+
+		// A parameter constrained by an enum has exactly one class of valid
+		// answer, and a path is not in it. Sending one made
+		// list_directory_with_sizes reject a benign call over its sortBy field
+		// — the tool worked, the argument did not, and the tool took the blame.
+		for name, allowed := range enums {
+			if len(allowed) > 0 {
+				benignArgs[name] = allowed[0]
 			}
 		}
 		baselineResult, err := c.Call(ctx, tool.Name, benignArgs)
@@ -599,4 +639,49 @@ func leakEvents(cfg *config, seen map[string]bool, tool, during, stimulus, respo
 		})
 	}
 	return events
+}
+
+// enumValues maps a parameter name to the values its schema permits.
+//
+// Only string enums: those are the parameters the probe set fills, and a
+// numeric or boolean enum is not something a payload string could satisfy
+// anyway.
+func enumValues(schema json.RawMessage) map[string][]string {
+	if len(schema) == 0 {
+		return nil
+	}
+	var s struct {
+		Properties map[string]struct {
+			Enum []json.RawMessage `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return nil
+	}
+
+	out := make(map[string][]string, len(s.Properties))
+	for name, prop := range s.Properties {
+		for _, raw := range prop.Enum {
+			var v string
+			if err := json.Unmarshal(raw, &v); err == nil {
+				out[name] = append(out[name], v)
+			}
+		}
+	}
+	return out
+}
+
+// callIfDecoy makes one benign, argument-free call, but only when a decoy is
+// planted. Returns nil without calling otherwise, so a run without a decoy
+// keeps the older contract that a tool this probe set cannot reach is never
+// invoked.
+func callIfDecoy(ctx context.Context, cfg *config, c Caller, tool string) (*toolcall.Result, error) {
+	if cfg.decoy == nil {
+		return nil, nil
+	}
+	result, err := c.Call(ctx, tool, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

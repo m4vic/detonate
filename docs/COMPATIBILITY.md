@@ -618,6 +618,55 @@ a Python project, or any custom build is: build it in your CI as you already do,
 then scan with `--no-install` and an explicit `--cmd`. That route is now real
 and measured. It is not yet documented, which is the remaining gap.
 
+## 3e. Input shape and coverage — 2026-08-20
+
+Follow-on to §3d. With `servers/src/filesystem` finally reachable, the remaining
+failures were measurable rather than hypothetical, and each turned out to be a
+distinct defect in how detonate builds arguments — not in the target.
+
+| Change | `pass` | `target_error` | `unsupported` |
+|---|---:|---:|---:|
+| Pre-built route only (§3d) | 8 | 6 | 2 |
+| Per-parameter shape | 12 | 2 | 2 |
+| Enum-aware benign values | **13** | **1** | 2 |
+
+**Per-parameter shape.** One benign value cannot serve a whole filesystem
+server: six tools were directory operations handed a file path. The tool name
+has to decide, not the parameter name — the official server calls the argument
+`path` on both `read_file` and `list_directory`, meaning a file in one and a
+directory in the other.
+
+**Enum constraints.** `list_directory_with_sizes` declares
+`sortBy: enum ["name","size"]`. Sending a path there made a working tool reject
+a benign call, and the tool took the blame as `target_error`.
+
+**The one remaining failure**, `edit_file`, is a different class again: it
+requires `edits`, an array. Detonate fills only string parameters, so a required
+field is simply absent. That needs structured input generation, not a better
+string.
+
+### Why `complete` is not reachable here
+
+`assessment.completeness` returns `complete` only when every required scenario
+passes. Any `unsupported` caps the result at `partial`; any `target_error` makes
+it `inconclusive`. This server has two zero-argument tools, which the adversarial
+probe set cannot reach, so **`complete` is structurally unavailable for it** — no
+improvement to input generation can change that. That is blocker A3, and it is a
+property of the rule rather than a bug.
+
+### A hole found while checking that
+
+Tools with no string parameters were not being called **at all**, so a
+zero-argument tool that returns a credential on every invocation could never be
+detected. "Nothing to inject into" is not "nothing to observe": the tool still
+runs, and what it returns is still evidence.
+
+They are now called once, benignly, and the response is checked against the
+decoy — but only when a decoy is planted, since without one the call would
+execute target code and learn nothing. The outcome stays `unsupported` unless a
+secret comes back. Reporting a pass because one benign call succeeded would be
+the coverage inflation the completeness model exists to prevent.
+
 ## 4. Representative server corpus
 
 Use the official reference servers plus one target per packaging/transport
