@@ -158,9 +158,8 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 			ID: scenariodef.MCPToolID(tool.Name), Required: true,
 		}
 		eventStart := len(events)
-		params := stringParams(tool.InputSchema)
-		enums := enumValues(tool.InputSchema)
-		if len(params) == 0 {
+		leaves := stringLeaves(tool.InputSchema)
+		if len(leaves) == 0 {
 			// Nothing to inject into. A tool with no string inputs is not
 			// immune, but it is out of reach of this probe set, and saying so
 			// is better than implying it was tested.
@@ -208,22 +207,23 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		// A realistic benign value when the sandbox is furnished, chosen per
 		// parameter so a directory operation gets a directory and a file
 		// operation gets a file.
-		benignArgs := argsFor(params, benign)
-		if cfg.decoy != nil {
-			benignArgs = make(map[string]any, len(params))
-			for _, name := range params {
-				benignArgs[name] = cfg.decoy.BenignFor(tool.Name, name)
+		benignArgs := map[string]any{}
+		for _, l := range leaves {
+			value := benign
+			if cfg.decoy != nil {
+				// Chosen per parameter so a directory operation gets a
+				// directory and a file operation gets a file.
+				value = cfg.decoy.BenignFor(tool.Name, l.name)
 			}
-		}
-
-		// A parameter constrained by an enum has exactly one class of valid
-		// answer, and a path is not in it. Sending one made
-		// list_directory_with_sizes reject a benign call over its sortBy field
-		// — the tool worked, the argument did not, and the tool took the blame.
-		for name, allowed := range enums {
-			if len(allowed) > 0 {
-				benignArgs[name] = allowed[0]
+			// A parameter constrained by an enum has exactly one class of valid
+			// answer, and a path is not in it. Sending one made
+			// list_directory_with_sizes reject a benign call over its sortBy
+			// field — the tool worked, the argument did not, and the tool took
+			// the blame.
+			if len(l.enum) > 0 {
+				value = l.enum[0]
 			}
+			setLeaf(benignArgs, l.path, value)
 		}
 
 		// Required parameters the string probe set does not fill.
@@ -277,14 +277,36 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 			scenario.Outcome = assessment.OutcomeTargetError
 			scenario.Reason = "tool failed on a benign schema-valid call"
 		} else if baselineResult.IsError {
+			text := baselineResult.SearchableText()
+			// A tool that needs to write cannot run under a read-only rootfs,
+			// and that is the sandbox working rather than a defect in the tool
+			// — the same distinction isNetworkBlocked draws for egress. The
+			// official memory server persists its knowledge graph next to its
+			// entry point, so six of its eleven tools answered EROFS on a
+			// perfectly valid call and were recorded as broken. Blaming a
+			// working target for our own mount is a confident false accusation,
+			// which is worse than saying nothing.
+			summary := fmt.Sprintf("tool %q returned isError on a benign call", tool.Name)
+			if isSandboxDenied(text) {
+				summary = fmt.Sprintf(
+					"tool %q needs filesystem writes the sandbox denies; not probed", tool.Name)
+			}
 			events = append(events, trace.Event{
 				Kind: trace.KindProtocol, Severity: trace.SeverityInfo, At: time.Now(),
-				Summary: fmt.Sprintf("tool %q returned isError on a benign call", tool.Name),
+				Summary: summary,
 				During:  "probe:baseline", Source: "probe-engine",
 				Detail: map[string]any{
-					"evidence": clip(baselineResult.SearchableText(), 200),
+					"evidence": clip(text, 200),
 				},
 			})
+			if isSandboxDenied(text) {
+				// Every payload would hit the same wall, so probing this tool
+				// learns nothing about the tool.
+				scenario.Outcome = assessment.OutcomeUnsupported
+				scenario.Reason = "tool requires filesystem writes denied by the selected sandbox profile"
+				scenarios = append(scenarios, scenario)
+				continue
+			}
 			scenario.Outcome = assessment.OutcomeTargetError
 			scenario.Reason = "tool returned isError on a benign schema-valid call"
 		}
@@ -317,7 +339,7 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 				}
 
 				before := c.Stderr()
-				result, err := c.Call(ctx, tool.Name, argsFor(params, p.Value))
+				result, err := c.Call(ctx, tool.Name, argsForLeaves(leaves, p.Value))
 				after := c.Stderr()
 
 				probeEvents := pr.Evaluate(ctx, tool.Name, p, result, err, before, after, baseline)
@@ -435,7 +457,7 @@ func encodingPhrase(encoding string) string {
 func StringInputToolCount(tools []toolinfo.ToolInfo) int {
 	count := 0
 	for _, tool := range tools {
-		if len(stringParams(tool.InputSchema)) > 0 {
+		if len(stringLeaves(tool.InputSchema)) > 0 {
 			count++
 		}
 	}
@@ -489,49 +511,6 @@ func checkResponse(tool string, p Payload, resp, during string) *trace.Event {
 	return nil
 }
 
-// stringParams finds the string-typed inputs a tool accepts.
-//
-// Driven by the tool's own schema so probes are well-formed: a target can
-// legitimately reject malformed input, and a scanner that only ever sends
-// malformed input learns nothing about how the tool handles valid-but-hostile
-// values.
-func stringParams(schema json.RawMessage) []string {
-	if len(schema) == 0 {
-		return nil
-	}
-	var s struct {
-		Properties map[string]struct {
-			Type string `json:"type"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &s); err != nil {
-		return nil
-	}
-
-	var names []string
-	for name, prop := range s.Properties {
-		if prop.Type == "string" || prop.Type == "" { // untyped defaults to string
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-// argsFor fills every string parameter with the same value.
-//
-// All at once rather than one at a time: a tool that only mishandles its
-// third argument still gets caught, and the number of calls stays linear in
-// payloads rather than payloads times parameters. The cost is that a hit does
-// not say WHICH parameter was vulnerable, which is a follow-up question a
-// human can answer quickly once they know there is a hit at all.
-func argsFor(params []string, value string) map[string]any {
-	args := make(map[string]any, len(params))
-	for _, p := range params {
-		args[p] = value
-	}
-	return args
-}
-
 // isNetworkBlocked reports whether an error is the sandbox denying egress
 // rather than the tool misbehaving.
 //
@@ -552,6 +531,36 @@ func isNetworkBlocked(err error) bool {
 	} {
 		if strings.Contains(s, sig) {
 			return true
+		}
+	}
+	return false
+}
+
+// isSandboxDenied reports whether a tool's error is the sandbox refusing a
+// write rather than the tool misbehaving.
+//
+// The counterpart to isNetworkBlocked, and it exists for the same reason: the
+// read-only rootfs is deliberate, so a target that trips over it is not broken.
+// Reporting it as broken puts a false accusation in the report, and a report
+// that cries wolf about the scanner's own configuration is worth less than one
+// that stays quiet.
+func isSandboxDenied(text string) bool {
+	s := strings.ToLower(text)
+	for _, sig := range []string{
+		"erofs", "read-only file system", "read only file system",
+	} {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	// EACCES alone is ambiguous — a tool refusing to read /etc/shadow is
+	// working correctly, and that is a very different fact. Only pair it with
+	// an operation that is unmistakably a write.
+	if strings.Contains(s, "eacces") || strings.Contains(s, "permission denied") {
+		for _, w := range []string{"mkdir", "open '", "write", "unlink", "rename", "chmod"} {
+			if strings.Contains(s, w) {
+				return true
+			}
 		}
 	}
 	return false
@@ -651,36 +660,6 @@ func leakEvents(cfg *config, seen map[string]bool, tool, during, stimulus, respo
 		})
 	}
 	return events
-}
-
-// enumValues maps a parameter name to the values its schema permits.
-//
-// Only string enums: those are the parameters the probe set fills, and a
-// numeric or boolean enum is not something a payload string could satisfy
-// anyway.
-func enumValues(schema json.RawMessage) map[string][]string {
-	if len(schema) == 0 {
-		return nil
-	}
-	var s struct {
-		Properties map[string]struct {
-			Enum []json.RawMessage `json:"enum"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &s); err != nil {
-		return nil
-	}
-
-	out := make(map[string][]string, len(s.Properties))
-	for name, prop := range s.Properties {
-		for _, raw := range prop.Enum {
-			var v string
-			if err := json.Unmarshal(raw, &v); err == nil {
-				out[name] = append(out[name], v)
-			}
-		}
-	}
-	return out
 }
 
 // callIfDecoy makes one benign, argument-free call, but only when a decoy is

@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/m4vic/detonate/internal/assessment"
+)
 
 // The frozen contract.
 //
@@ -42,5 +46,43 @@ func TestFailureAndFindingsAreDistinct(t *testing.T) {
 	}
 	if exitIncomplete == exitOK {
 		t.Fatal("incomplete coverage shares an exit code with a clean result")
+	}
+}
+
+// A scan that assessed nothing must not exit 0.
+//
+// Measured on four real community MCP servers — blender-mcp, Gmail-MCP-Server,
+// mcp-playwright, mcp-atlassian. None ships an MCPB manifest, so static mode
+// had no inventory to read and every one returned not_assessed / inconclusive
+// and exit 0. A CI job reads 0 as "safe to merge", so the tool was reporting
+// green on four targets it had learned nothing about.
+//
+// Partial coverage is a different case and still exits 0: something was
+// genuinely assessed and nothing was found. The line is "was anything examined
+// at all", not "was everything examined".
+func TestAnUnassessedTargetDoesNotExitClean(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		risk           assessment.Risk
+		completeness   assessment.Completeness
+		failIncomplete bool
+		want           int
+	}{
+		{"nothing assessed", assessment.RiskNotAssessed, assessment.CompletenessInconclusive, false, exitIncomplete},
+		{"nothing assessed, flag set", assessment.RiskNotAssessed, assessment.CompletenessInconclusive, true, exitIncomplete},
+		{"partial coverage, nothing found", assessment.RiskNoFindings, assessment.CompletenessPartial, false, exitOK},
+		{"partial coverage, flag set", assessment.RiskNoFindings, assessment.CompletenessPartial, true, exitIncomplete},
+		{"complete and clean", assessment.RiskNoFindings, assessment.CompletenessComplete, false, exitOK},
+		{"harness broke", assessment.RiskNotAssessed, assessment.CompletenessFailed, false, exitFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := &App{failIncomplete: tc.failIncomplete}
+			got := app.exitForSummary(assessment.Summary{
+				Risk: tc.risk, Completeness: tc.completeness,
+			})
+			if got != tc.want {
+				t.Errorf("exit = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

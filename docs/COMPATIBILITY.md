@@ -788,3 +788,94 @@ requires:
 
 Modern `2026-07-28`, Streamable HTTP, and LLM-provider support may ship later,
 but unsupported paths must already fail honestly.
+
+---
+
+## 3f. Nested input schemas and sandbox attribution — 2026-08-23
+
+First measurement against a real third-party server reached through the
+pre-built route, and it exposed two defects that the fixture corpus could not.
+
+**Target:** `modelcontextprotocol/servers` → `src/memory`, built with
+`docker run --rm -v <repo>:/w -w /w/src/memory node:22-slim npm run build`
+(the monorepo root must be mounted; the package tsconfig extends `../../`), then
+`detonate dynamic <pkg> --cmd "node /target/dist/index.js" --no-install`.
+
+### Defect 1 — the probe set only saw the top level of a schema
+
+`stringParams` read `properties` one level deep. The memory server's tools take
+arrays of objects: `create_entities` carries `name`, `entityType`, and
+`observations`; `create_relations` carries `from`, `to`, `relationType`. All
+caller-controlled, none top-level.
+
+| | Before | After |
+|---|---:|---:|
+| Tools discovered | 11 | 11 |
+| Tools with a reachable string surface | 3 | **10** |
+| Reported "no adversarial string-input surface" | 8 | **1** |
+
+The one remaining is `read_graph`, which genuinely takes no input.
+
+Replaced by `stringLeaves`, which walks objects and arrays to `maxSchemaDepth`
+and caps at `maxStringLeaves` (32) — the schema is written by the target, so its
+size is the target's choice, and an unbounded walk is a denial of service
+against the scanner written in JSON.
+
+### Defect 2 — the sandbox's own restrictions were blamed on the target
+
+With the tools finally reachable, six returned `isError` on a valid call:
+
+```
+EROFS: read-only file system, open '/target/dist/memory.jsonl'
+```
+
+The memory server persists its knowledge graph next to its entry point, and the
+sandbox mounts the target read-only on purpose. detonate recorded all six as
+`target_error` — "the tool is broken on valid input" — which is a confident
+false accusation about a working server, caused entirely by our own mount.
+
+This is the same distinction `isNetworkBlocked` already drew for egress, applied
+to writes. Added `isSandboxDenied`; the outcome is now `unsupported` with the
+reason naming the sandbox profile.
+
+| Outcome | Before | After |
+|---|---:|---:|
+| `unsupported` (sandbox denied writes) | 0 | **5** |
+| `target_error` | 6 | **1** |
+
+The remaining `target_error` is `add_observations`, which fails because the
+entity it references does not exist — a stateful-ordering limitation, not a
+misattribution.
+
+`EACCES` alone is deliberately not enough: a tool refusing to read
+`/etc/shadow` is working correctly, and that is a very different fact. It counts
+only when paired with an unmistakable write verb.
+
+### Defect 3 — a target nothing was learned about exited 0
+
+Static mode over four community servers — `ahujasid/blender-mcp`,
+`GongRzhe/Gmail-MCP-Server`, `executeautomation/mcp-playwright`,
+`sooperset/mcp-atlassian`. None ships an MCPB `manifest.json`, so all four
+returned `not_assessed` / `inconclusive`, and **all four exited 0**.
+
+A CI job reads 0 as "safe to merge". Collapsing "found nothing" into "looked at
+nothing" in the one signal CI gates on undoes the point of keeping risk and
+completeness independent.
+
+`exitForSummary` now returns 4 when risk is `not_assessed`. This is narrower
+than `--fail-incomplete`, which fails on any coverage short of complete:
+**partial coverage still exits 0**, because something was genuinely assessed and
+nothing was found. The line is "was anything examined at all".
+
+| Target | Before | After |
+|---|---:|---:|
+| four community servers, no manifest | 0 | **4** |
+| `testdata/action/poisoned` | 3 | 3 |
+| `testdata/honest` | 0 | 0 |
+| `testdata/thief` | 3 | 3 |
+
+### Standing limitation
+
+The memory server's write-dependent tools remain unprobed under the default
+profile. Reaching them needs a writable workspace the target can persist into,
+which is a sandbox-profile change and is **not** implemented.

@@ -337,18 +337,18 @@ func TestIsNetworkBlocked(t *testing.T) {
 }
 
 func TestStringParams(t *testing.T) {
-	got := stringParams(schema("path", "mode"))
+	got := leafNames(stringLeaves(schema("path", "mode")))
 	if len(got) != 2 {
 		t.Fatalf("got %v, want 2 string params", got)
 	}
 
-	if p := stringParams(json.RawMessage(`{"type":"object","properties":{"n":{"type":"number"}}}`)); len(p) != 0 {
+	if p := stringLeaves(json.RawMessage(`{"type":"object","properties":{"n":{"type":"number"}}}`)); len(p) != 0 {
 		t.Errorf("numeric params should not be probed with string payloads, got %v", p)
 	}
-	if p := stringParams(nil); len(p) != 0 {
+	if p := stringLeaves(nil); len(p) != 0 {
 		t.Errorf("nil schema = %v, want none", p)
 	}
-	if p := stringParams(json.RawMessage(`not json`)); len(p) != 0 {
+	if p := stringLeaves(json.RawMessage(`not json`)); len(p) != 0 {
 		t.Errorf("malformed schema must not panic or invent params, got %v", p)
 	}
 }

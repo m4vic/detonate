@@ -582,8 +582,11 @@ func TestTextReportShowsUnsupportedAcquisitionWithoutATrace(t *testing.T) {
 		Message: "workspace prepare cannot be replayed safely",
 	}}
 
-	if code := app.report(nil); code != exitOK {
-		t.Fatalf("exit = %d, want 0 without --fail-incomplete", code)
+	// Nothing was assessed, so this must not read as clean even though no
+	// findings were raised and --fail-incomplete was not passed. Exit 0 is what
+	// a pipeline treats as "safe to merge".
+	if code := app.report(nil); code != exitIncomplete {
+		t.Fatalf("exit = %d, want 4 for a target nothing was learned about", code)
 	}
 	for _, want := range []string{
 		"COMPLETENESS: inconclusive",
