@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -222,8 +223,24 @@ func TestLayoutIsDeterministicButSecretsAreNot(t *testing.T) {
 	}
 }
 
-func TestKeyFilesArePrivateMode(t *testing.T) {
-	if os.Getenv("OS") == "Windows_NT" {
+// This test used to require 0600, for realism: a real ~/.ssh/id_rsa is 0600.
+//
+// That was the wrong requirement, and it hid a bug rather than preventing one.
+// The sandbox runs as uid 1000 while the files are planted by whoever ran
+// detonate, so ownership never matches and 0600 makes the decoy unreadable by
+// the only process meant to read it. Realism that stops the target opening the
+// file is not realism, it is a broken fixture — a thief that respects
+// permissions it was never granted is not a threat model.
+//
+// It went unchallenged because the skip below meant it never ran on the
+// author's machine. Its first execution was the CI run that failed this PR.
+//
+// What is worth asserting is the opposite: readable by anyone, writable by
+// nobody else. A decoy the target can rewrite is useless as evidence, because
+// the token in the report could then have come from the target rather than
+// from us. See TestPlantedFilesAreReadableByAnotherUser for the readable half.
+func TestKeyFilesAreNotWritableByTheTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not meaningful on this host")
 	}
 	env := plant(t)
@@ -232,8 +249,13 @@ func TestKeyFilesArePrivateMode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if perm := info.Mode().Perm(); perm != 0o600 {
-			t.Fatalf("%s mode = %o, want 600", rel, perm)
+		perm := info.Mode().Perm()
+		if perm&0o022 != 0 {
+			t.Errorf("%s mode = %04o; the target could rewrite the decoy, so a token "+
+				"in the report would no longer prove the target read ours", rel, perm)
+		}
+		if perm&0o004 == 0 {
+			t.Errorf("%s mode = %04o; the sandbox user cannot read it", rel, perm)
 		}
 	}
 }

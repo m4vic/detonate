@@ -946,3 +946,22 @@ with an info-level summary of what was planted, so when the leak was absent the
 test reported `severity = info` rather than "the key was never stolen" — the
 right failure for the wrong reason, and it cost time. The control now selects
 the event carrying a nonce and says which of the two things went wrong.
+
+### The conflicting assertion
+
+The second CI run failed too, on `TestKeyFilesArePrivateMode` — an existing
+test that required exactly the `0600` this fix removes.
+
+It had **never executed**. It skipped itself on Windows, which is the only
+platform development happened on, so its first ever run was the CI job that
+failed this branch. A test asserting the wrong requirement, never run, is worse
+than no test: it reads as coverage.
+
+Replaced with `TestKeyFilesAreNotWritableByTheTarget`, which asserts what
+actually matters — readable by anyone, writable by nobody else. A decoy the
+target can rewrite is useless as evidence, because a token appearing in the
+report could then have come from the target rather than from us.
+
+A sweep for other tests carrying the same blind spot found no further cases:
+the only Windows skips remaining are the two POSIX-mode tests, and both now run
+on Linux in CI.
