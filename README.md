@@ -92,6 +92,37 @@ without blocking anyone, then turn the gate on.
 
 The job exits 3, the step fails, and both findings appear in the Security tab.
 
+### If detonate cannot build your project
+
+Detonate refuses two kinds of acquisition on purpose: monorepo workspaces that
+need a repository-root lockfile, and Python projects whose build backend could
+run while the network is up. Both refusals are deliberate, and both would
+otherwise stop the scan.
+
+You do not need detonate to solve either, because **your CI has already built the
+project**. Point it at the built tree and skip acquisition:
+
+```yaml
+- run: npm ci && npm run build          # you already do this
+
+- uses: m4vic/detonate@v1
+  with:
+    mode: dynamic
+    args: >-
+      --no-install
+      --cmd "node /target/dist/index.js /home/detonate/workspace"
+```
+
+Your source is mounted read-only at `/target`, and the sandbox home — where the
+credential decoys live — is `/home/detonate`. A server that takes an allowed
+directory should be given `/home/detonate/workspace`, which is what makes its
+file tools reachable.
+
+Measured: `modelcontextprotocol/servers/src/filesystem` fails acquisition
+outright, and through this route it launches, enumerates all 14 tools and probes
+12 of them. Details in
+[COMPATIBILITY.md](docs/COMPATIBILITY.md#3d-the-pre-built-route--2026-08-20).
+
 ### How much static mode can actually see
 
 Static mode reads the tool inventory an [MCPB](https://github.com/modelcontextprotocol/mcpb)

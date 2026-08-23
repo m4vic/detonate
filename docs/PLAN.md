@@ -93,11 +93,11 @@ server today, and it is the most important item in this plan.
 The four causes are not detection problems; three are acquisition gaps and one is
 a coverage-accounting rule:
 
-- **A0. Monorepo workspace acquisition unsupported** — takes out three of the four
-  reference servers at once, because `modelcontextprotocol/servers` is one
-  workspace.
-- **A1. Python acquisition unsupported** — a deliberate safety refusal that
-  removes every Python server.
+- **A0. Monorepo workspace acquisition unsupported** — ~~takes out three of the
+  four reference servers~~ **CLOSED 2026-08-20** by the pre-built route, without
+  implementing workspace acquisition.
+- **A1. Python acquisition unsupported** — **CLOSED 2026-08-20** by the same
+  route. The safety refusal stands; authors build in their own CI instead.
 - **A2. Servers needing runtime config** report every tool as `target_error`.
 - **A3. A zero-argument tool is permanently `unsupported`**, capping completeness
   for any server that has one.
@@ -116,13 +116,24 @@ Sizing them is the first task of week two, before anything else is committed to.
       crash, teardown failure — and none yields exit 0; and every target in the
       corpus that reaches no verdict exits non-zero.
 
-- [ ] **7a. Size the acquisition gaps A0-A2 before committing to them.** Cheapest
-      first: an author's CI already builds their project, so a supported
-      "dependencies are already installed, just scan it" path (`--no-install`
-      plus an explicit `--cmd`) may cover A0 and A1 without implementing monorepo
-      or Python acquisition at all. Test that before building anything.
-      — *check:* at least one `modelcontextprotocol/servers` package reaches a
-      real verdict by some documented route.
+- [x] **7a. Size the acquisition gaps. Done 2026-08-20 — A0 and A1 are closed
+      without implementing either.** An author's CI already builds their project,
+      so the supported answer is `--no-install` plus an explicit `--cmd`. One
+      defect blocked that route: `policy.Image` was only ever set from the
+      acquisition result, so skipping install left a Node server on the Python
+      image and it died with `exec: "node": executable file not found`. Fixed.
+      — *verified:* `servers/src/filesystem`, which fails acquisition outright,
+      now launches, enumerates 14 tools and probes 12 — 8 pass, 6 target_error,
+      2 unsupported. The first `modelcontextprotocol/servers` package to reach
+      real dynamic testing. Documented in the README.
+
+- [ ] **7b. Per-parameter benign inputs.** The six remaining failures on that
+      server are directory-shaped tools handed a file path — `list_directory`,
+      `directory_tree`, `create_directory`, `search_files`. One benign string
+      cannot satisfy both shapes, so the same value is wrong for half the tools.
+      This is the smallest useful slice of schema-driven generation and it is now
+      the largest remaining coverage gap.
+      — *check:* `servers/src/filesystem` reaches `complete`.
 
 - [ ] **8. Verified teardown before success is reported.**
       — *check:* zero `detonate-*` containers or volumes remain after any scan,
