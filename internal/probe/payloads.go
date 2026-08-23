@@ -149,10 +149,24 @@ var payloads = []Payload{
 		LeakMarkers: []string{"DETONATE_INJECTION_MARKER"},
 	},
 	{
-		Category:    CategoryTemplate,
-		Value:       "{{7*7}}",
+		Category: CategoryTemplate,
+		// 31337 * 31337 = 982007569.
+		//
+		// The classic probe is {{7*7}} looking for "49", and it is unusable
+		// against real servers: "49" is two digits, so it matches any response
+		// carrying a timestamp, an id, a count, or a price. Measured on a real
+		// registry server, a benign error reading
+		// `"timestamp": "2026-08-23T13:15:54.497Z"` was reported as CRITICAL
+		// server-side template injection, because ".497" contains "49". One
+		// report of that scan contained 33 incidental occurrences of "49" and
+		// zero of the product below.
+		//
+		// A marker has to be a string the target could not plausibly have
+		// produced on its own, for the same reason the credential decoys carry
+		// a 128-bit nonce: evidence nobody can argue with.
+		Value:       "{{31337*31337}}",
 		Why:         "server-side template injection; a tool that renders this evaluates user input",
-		LeakMarkers: []string{"49"},
+		LeakMarkers: []string{"982007569"},
 	},
 	{
 		Category: CategoryTemplate,

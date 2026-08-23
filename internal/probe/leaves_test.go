@@ -291,3 +291,56 @@ func TestADeadSessionStopsTheRun(t *testing.T) {
 			"an unreached tool from a clean one")
 	}
 }
+
+// A leak marker has to be a string the target could not plausibly have produced
+// on its own.
+//
+// The classic template probe is {{7*7}} looking for "49". Against real servers
+// that is unusable: two digits match any response carrying a timestamp, an id,
+// a count, or a price. A benign error reading
+// `"timestamp": "2026-08-23T13:15:54.497Z"` was reported as CRITICAL
+// server-side template injection because ".497" contains "49".
+func TestLeakMarkersAreNotAccidentallyCommon(t *testing.T) {
+	// Ordinary, entirely benign server output.
+	benign := []string{
+		`{"error":"unknown id","timestamp":"2026-08-23T13:15:54.497Z"}`,
+		`{"count":149,"page":2}`,
+		`{"price":"49.99","currency":"USD"}`,
+		`{"requestId":"a49f21c0-1111-2222-3333-444455556666"}`,
+	}
+
+	// Length is the wrong test — "uid=" is four characters and excellent
+	// evidence, because ordinary JSON does not contain it. Specificity is what
+	// matters: a marker must not appear in output the target produces anyway.
+	for _, p := range payloads {
+		for _, marker := range p.LeakMarkers {
+			for _, b := range benign {
+				if strings.Contains(b, marker) {
+					t.Errorf("marker %q for payload %q appears in benign output %s; "+
+						"every response of that shape becomes a finding",
+						marker, p.Value, b)
+				}
+			}
+			// A bare run of digits is the specific trap: numbers are what
+			// servers emit. Anything shorter than a value that could not arise
+			// by chance is not evidence.
+			if isAllDigits(marker) && len(marker) < 6 {
+				t.Errorf("payload %q uses numeric marker %q: too few digits to be "+
+					"distinguishable from an id, a count, or a timestamp",
+					p.Value, marker)
+			}
+		}
+	}
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
