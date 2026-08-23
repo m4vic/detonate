@@ -175,13 +175,17 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 
 		baseline := c.Stderr()
-		// A realistic benign value when the sandbox is furnished, so a tool
-		// that reads files gets something that actually exists.
-		benignValue := benign
+		// A realistic benign value when the sandbox is furnished, chosen per
+		// parameter so a directory operation gets a directory and a file
+		// operation gets a file.
+		benignArgs := argsFor(params, benign)
 		if cfg.decoy != nil {
-			benignValue = cfg.decoy.BenignInput()
+			benignArgs = make(map[string]any, len(params))
+			for _, name := range params {
+				benignArgs[name] = cfg.decoy.BenignFor(tool.Name, name)
+			}
 		}
-		baselineResult, err := c.Call(ctx, tool.Name, argsFor(params, benignValue))
+		baselineResult, err := c.Call(ctx, tool.Name, benignArgs)
 		if err != nil {
 			// A tool that reaches an external host cannot be probed here,
 			// because the sandbox denies the network on purpose. That is the

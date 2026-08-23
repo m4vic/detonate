@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -156,6 +157,40 @@ func Plant(dir, containerHome string) (*Environment, error) {
 func (e *Environment) BenignInput() string {
 	return e.ContainerHome + "/workspace/notes.txt"
 }
+
+// dirParam matches a parameter name that unambiguously wants a directory.
+var dirParam = regexp.MustCompile(`(?i)(^|[_-])(dir|dirs|directory|directories|folder|folders)($|[_-])`)
+
+// dirTool matches a tool name whose operation is directory-shaped.
+//
+// The tool name is needed because the parameter name is often not enough: the
+// official MCP filesystem server calls the argument "path" on both read_file
+// and list_directory, meaning a file in one and a directory in the other. Only
+// the operation disambiguates them.
+var dirTool = regexp.MustCompile(`(?i)(^|[_-])(dir|directory|directories|folder|tree|list|ls|search|find|walk|glob)($|[_-]|$)`)
+
+// BenignFor is the benign value for one parameter of one tool.
+//
+// A single benign string is wrong for half of a filesystem server: handing a
+// file path to list_directory makes a working tool answer isError, and the
+// whole tool is then written off as target_error. Measured on
+// servers/src/filesystem, six of fourteen tools failed for exactly this reason
+// — they were directory operations given a file.
+//
+// The parameter name decides when it is explicit; otherwise the tool's own name
+// does. Both fall back to the file path, because most tools take files.
+func (e *Environment) BenignFor(tool, param string) string {
+	if dirParam.MatchString(param) {
+		return e.WorkspaceDir()
+	}
+	if dirTool.MatchString(tool) {
+		return e.WorkspaceDir()
+	}
+	return e.BenignInput()
+}
+
+// WorkspaceDir is the decoy's ordinary, secret-free working directory.
+func (e *Environment) WorkspaceDir() string { return e.ContainerHome + "/workspace" }
 
 // Match reports every planted token found in text, in any encoding it checks.
 //
