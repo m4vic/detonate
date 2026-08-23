@@ -19,6 +19,46 @@ permissions:
   contents: read
 
 jobs:
+  # What every real user actually runs, and the one path nothing exercised.
+  #
+  # The three jobs below use `uses: ./` with `version: source`, which builds
+  # from the checked-out tree. That tests the action's logic, but it skips the
+  # entire published route: resolving `m4vic/detonate@v0`, resolving `latest`
+  # against the releases API, downloading the archive GoReleaser named,
+  # verifying it against checksums.txt, and uploading SARIF to code scanning.
+  # `version: latest` is the default, so that untested path is the default path.
+  #
+  # This job deliberately tests the RELEASE rather than the pull request. If it
+  # fails, the published action is broken for everyone right now, which is worth
+  # knowing regardless of what the branch changed.
+  published:
+    name: Published action installs and uploads SARIF
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # No setup-go: proving the released binary needs no toolchain is part of
+      # the claim. A user following the README has Docker and nothing else.
+      - name: Scan with the published action
+        id: scan
+        uses: m4vic/detonate@v0
+        with:
+          target: testdata/action/benign
+          # version is left at its default, "latest", on purpose: that is the
+          # download-and-verify path, and it is what every user gets.
+          upload-sarif: 'true'
+
+      - name: Assert
+        shell: bash
+        run: |
+          set -euo pipefail
+          detonate --version
+          [ "${{ steps.scan.outputs.exit-code }}" = "0" ]             || { echo "published action did not exit 0 on a clean target"; exit 1; }
+          [ -f detonate.sarif ] || { echo "no SARIF written"; exit 1; }
+
   # The action must pass a clean target without complaint.
   benign:
     name: Benign target exits 0
