@@ -193,7 +193,7 @@ detonate dynamic ./my-server --cmd "node /target/dist/index.js" --no-install
 
 ---
 
-## What's new in 0.4.0
+## What's new in 0.4
 
 - **Credential decoys.** The sandbox is furnished with plausible SSH keys, cloud
   credentials, a `.env`, a `.netrc`, a GitHub token, and shell history — each
@@ -216,6 +216,12 @@ detonate dynamic ./my-server --cmd "node /target/dist/index.js" --no-install
   the evidence), and bidi overrides. Deterministic, no model involved.
 - **A GitHub Action**, a total scan budget (15 min default), and `--help` for
   every subcommand.
+
+`0.4.1` fixes three false-positive generators found by the first corpus run
+against real registry servers: a dead connection reported once per remaining
+tool, a two-digit template marker that matched timestamps, and a shadowing rule
+that flagged honest sequencing documentation. One 682-tool server went from
+**949 findings to 4**.
 
 Full detail in the [changelog](CHANGELOG.md).
 

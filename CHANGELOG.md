@@ -3,6 +3,56 @@
 All notable user-visible changes are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) once versioned prereleases begin.
 
+## v0.4.1 — 2026-08-23
+
+First corpus run against servers written by people who have never seen
+detonate, taken from the official MCP registry. Fixtures are written by the same
+author as the rules, so this class of defect was structurally invisible until
+now. All three of these shipped in v0.4.0.
+
+### Fixed
+
+- **One dead socket was reported as 935 findings.** A 682-tool server returned
+  949 findings in total. A payload killed the server process, and every
+  subsequent call — across every remaining tool — returned
+  `connection closed: client is closing: EOF`, each recorded as that tool
+  crashing under hostile input. The first crash is kept, because a payload that
+  kills the target *is* the result; what stops is treating the corpse as
+  evidence about tools that were never reached. The scan now halts and reports
+  how many tools went unprobed. That server went from 949 findings to 4.
+- **A two-digit leak marker.** The template-injection probe sent `{{7*7}}` and
+  searched responses for `"49"`, so a benign error carrying
+  `"timestamp": "2026-08-23T13:15:54.497Z"` was reported as CRITICAL
+  server-side template injection — `.497` contains `49`. One report from that
+  scan held 33 incidental occurrences. The payload is now `{{31337*31337}}`
+  matched against `982007569`, the same standard the credential decoys already
+  meet with a 128-bit nonce.
+- **Tool shadowing fired on ordinary documentation**, for two separate reasons.
+  A directive anywhere in a description paired with a tool name anywhere else in
+  it, which on a server whose 682 tools all share a prefix is close to
+  guaranteed — and two of three findings displayed evidence that did not contain
+  the trigger at all. Both must now appear in the same sentence, and the
+  evidence is that sentence.
+
+### Changed
+
+- **Redirection and sequencing are no longer the same finding.** A description
+  that supersedes or suppresses another tool ("call this **instead of**
+  `get_weather`") remains a CRITICAL finding. A description that orders calls
+  within one workflow ("**always call** `read_docx` **before** any
+  accept/reject/reply") is now an observation to confirm. A real registry server
+  ships exactly that sentence as a correctness constraint and was reported
+  CRITICAL for it. Structurally the two are identical and only intent separates
+  them — capability is not malice, the same lesson `internal/skill` learned when
+  flagging 30 of 59 known-good skills.
+
+### Added
+
+- `scripts/find-targets.py`, which finds servers detonate can actually probe by
+  reading the official registry. Of the first 400 entries, 289 are remote-only
+  (an endpoint someone else operates, with no code to sandbox), 3 require API
+  keys, and 33 are probeable.
+
 ## v0.4.0 — 2026-08-23
 
 ### Added
