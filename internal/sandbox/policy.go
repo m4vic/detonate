@@ -160,5 +160,12 @@ func tmpfsMounts(size string) map[string]string {
 	}
 }
 
-// containerHome is the home directory given to a sandboxed target.
-const containerHome = "/home/detonate"
+// ContainerHome is the home directory given to a sandboxed target.
+//
+// Exported because a caller that furnishes a decoy has to mount it exactly
+// here: mounting anywhere else would leave the empty tmpfs home in place and
+// the target would never find the planted secrets.
+const ContainerHome = "/home/detonate"
+
+// containerHome is the unexported alias the rest of this package already used.
+const containerHome = ContainerHome

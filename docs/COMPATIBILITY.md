@@ -1,6 +1,7 @@
 # Detonate compatibility and live test record
 
-Last verified: 2026-08-13. Rows that retain older evidence say so explicitly.
+Last verified: 2026-08-20 (section 3a). Earlier sections retain their 2026-08-13
+evidence and say so explicitly.
 
 This document separates observed results from planned support. A passing row
 only supports the exact claim in its “coverage” column.
@@ -349,6 +350,333 @@ Conclusion:
 - This does not validate a full MCP agent loop, prompt-injection resistance, or
   deterministic security judgment.
 
+## 3a. Static-mode corpus run — 2026-08-20
+
+First measurement of `internal/toolscan` + `internal/staticinv` against real
+public servers rather than fixtures written by the same author as the rules.
+
+**Corpus:** every package in `modelcontextprotocol/servers` (7) and every example
+in `modelcontextprotocol/mcpb` (6), shallow-cloned 2026-08-20. Static mode only;
+Docker was unavailable on the host, so the dynamic path is **not** measured here.
+
+### Reach — which targets static mode can assess at all
+
+| Group | Targets | Complete verdict | Inconclusive |
+|---|---:|---:|---:|
+| `modelcontextprotocol/servers` | 7 | 0 | 7 |
+| `modelcontextprotocol/mcpb` examples | 6 | 5 | 1 |
+| **Total** | **13** | **5 (38%)** | **8 (62%)** |
+
+The seven reference servers — the most widely used MCP servers there are — ship
+no MCPB `manifest.json`, so static mode has no inventory to analyze and correctly
+reports `not_assessed` / `inconclusive` rather than a clean-looking result.
+`hello-world-uv` has a manifest but omits the optional `tools` array, which is
+the same honest outcome for a different reason.
+
+**This is the headline limitation of static mode today**, and it is a fact about
+coverage, not about detection: on the 38% it can read, it read them correctly.
+
+### Precision — false positives on real tool metadata
+
+| | |
+|---|---:|
+| Targets analyzed | 5 |
+| Real tool descriptions analyzed | 27 |
+| Findings raised | **0** |
+| False positives | **0** |
+
+Tool counts: `calculator-rust` 2, `chrome-applescript` 10,
+`file-manager-python` 3, `file-system-node` 11, `hello-world-node` 1. Every SARIF
+result emitted was `level: note` — observations, not findings.
+
+**Qualification, and it matters:** 27 descriptions from official example bundles
+is a small and unusually well-behaved sample. Published reference examples are
+the friendliest possible corpus; a random sample of community servers is a much
+harder test and has not been run. This supports "the rules do not fire on
+well-written metadata" and nothing stronger. The ~78% false-positive rate
+measured across MCP scanners in arXiv 2607.11086 is not yet a like-for-like
+comparison.
+
+### Scan time
+
+| | |
+|---|---:|
+| Typical target | 44–75 ms |
+| Slowest (`servers/everything`) | 2,011 ms |
+
+Well inside the 5-minute budget the plan sets for a per-PR gate. Dynamic-mode
+timing is unmeasured.
+
+## 3b. Dynamic-mode corpus run — 2026-08-20
+
+Same corpus, dynamic mode, on real Docker (server 29.7.2). This is the mode that
+carries detonate's actual differentiator, and it is the first time it has been
+measured against a spread of real public servers rather than one known-good
+example.
+
+**Result: 0 of 6 targets reached a complete verdict, and all six exited 0.**
+
+| Target | Risk | Completeness | Time | Why |
+|---|---|---|---:|---|
+| `mcpb/hello-world-node` | no_findings | partial | 12s | its one tool takes no string input |
+| `mcpb/file-system-node` | no_findings | inconclusive | 13s | 12 of 14 tools returned `isError` on a benign call |
+| `servers/time` | not_assessed | inconclusive | 0s | Python acquisition unsupported |
+| `servers/memory` | not_assessed | inconclusive | 0s | monorepo workspace acquisition unsupported |
+| `servers/filesystem` | not_assessed | inconclusive | 0s | monorepo workspace acquisition unsupported |
+| `servers/sequentialthinking` | not_assessed | inconclusive | 0s | monorepo workspace acquisition unsupported |
+
+### The four blockers, in order of how much they cost
+
+1. **Monorepo workspace acquisition is unsupported.** Three of four reference
+   servers fail here — `pipeline.acquire` reports the package relies on a
+   repository-root lockfile and a workspace prepare step. The whole
+   `modelcontextprotocol/servers` repository is one workspace, so this single gap
+   takes out the best-known MCP servers in existence.
+2. **Python acquisition is unsupported.** `safe acquisition of pyproject.toml is
+   not supported yet: resolving a local Python project may execute its build
+   backend while the network is enabled.` This is a deliberate safety refusal,
+   not a bug — but it means no Python server can be scanned dynamically.
+3. **Servers that need runtime configuration report every tool as
+   `target_error`.** `file-system-node` grants no directories inside the sandbox,
+   so 12 of its 14 tools fail a benign schema-valid call. Detonate reports this
+   honestly; the effect is still that a working server yields no verdict.
+4. **A zero-argument tool can never be "complete".** Its scenario is
+   `unsupported` — "no adversarial string-input surface" — which is accurate but
+   permanently caps completeness for any server that has one.
+
+### What this means
+
+Escalating from static to dynamic currently gives **less**, not more:
+`file-system-node` reports `complete` statically and `inconclusive` dynamically,
+because dynamic selects 14 scenarios it cannot finish where static selected one
+it could.
+
+Every one of these exits 0. A CI gate on default settings would pass all six
+while assessing none — which is exactly the failure the plan's fourth
+"done" condition forbids, now demonstrated rather than hypothesised.
+
+The Action therefore keeps `mode: static` as its default. Dynamic is the mode
+with the higher ceiling and, today, the lower floor.
+
+## 3c. Decoy verification — 2026-08-20
+
+First end-to-end proof that the credential decoy works: planted on the host,
+mounted into a real container, read by a real MCP server over stdio, and caught
+on the way out. Real Docker (server 29.7.2).
+
+Two fixtures, deliberately one of each. A scanner exercised only against
+malicious targets will happily call everything malicious.
+
+| Fixture | Behaviour | Risk | Completeness | Exit |
+|---|---|---|---|---:|
+| `testdata/thief` | returns `~/.ssh/id_rsa` from any tool call | dangerous (2 findings) | complete | **3** |
+| `testdata/honest` | reads only `~/workspace`, refuses escapes | no_findings | complete | **0** |
+
+**Positive control.** The leak was caught on the *benign* baseline call at
++15ms — the server did not need to be attacked to leak — and again by the
+path-traversal probe. Evidence carries the nonce:
+
+```
+[CRITICAL] tool "read_file" returned the contents of /home/detonate/.ssh/id_rsa
+   evidence : planted secret /home/detonate/.ssh/id_rsa returned
+              base64-encoded (nonce 2baddbb1e99182ef2634b85ec37b3866)
+```
+
+The nonce is 128 bits of entropy generated for that scan alone, so the value
+existed nowhere else. That is what makes the finding unarguable rather than
+suggestive.
+
+**Negative control.** The honest server asserts the bounded proven-negative:
+
+```
+RISK: no_findings
+COMPLETENESS: complete
+Coverage: 3/3 scenario(s) completed
+  - planted 6 credential decoys in the sandbox; none were returned by any tool
+```
+
+Two defects were found by running these rather than by reasoning about them, and
+both were ours rather than the targets':
+
+1. The decoy finding rendered no evidence line, because the renderers print
+   `evidence` and the nonce sat in a field nobody displays. The proof existed and
+   no reader could see it.
+2. The benign baseline call used the fixed string `"hello"`, which is not a
+   filename, so a correct file-reading server answered `isError` and its tool was
+   written off as `target_error` — completeness dropped for our defect, not
+   theirs. This is a component of blocker A2. The decoy plants real files, so
+   there is now a correct answer to give.
+
+The first version of `testdata/honest` crashed on hostile input and was flagged
+eleven times. Those were **true positives** — a server that dies on malformed
+input is a real defect — and the guard went into the fixture, not the rule.
+
+### Corpus re-run with the decoy — the honest scorecard
+
+Re-run on 2026-08-20 after the decoy and the realistic benign baseline landed.
+**The corpus outcome did not change.** Still 0 of 6 reaching a complete verdict,
+for exactly the same four reasons: three acquisition gaps and one
+coverage-accounting rule. Furnishing the sandbox does not fix a server that
+never starts.
+
+| Target | Before | After |
+|---|---|---|
+| `hello-world-node` | partial | partial |
+| `file-system-node` | inconclusive | inconclusive |
+| `time`, `memory`, `filesystem`, `sequentialthinking` | inconclusive (0s) | inconclusive (0s) |
+
+Where it *did* move is inside the one server that starts. Blocker A2 was
+misdiagnosed as "servers needing runtime config"; the real cause is narrower and
+splits in two:
+
+1. **Startup configuration.** The official filesystem server takes its permitted
+   directories as launch arguments. Detonate started it with none, so every tool
+   answered "Access denied" regardless of input. Passing
+   `--cmd "node /target/server/index.js /home/detonate/workspace"` grants it the
+   decoy workspace. This needs no new feature — the flag already exists.
+2. **Path shape.** Even then, a *relative* benign value (`notes.txt`) was still
+   denied, because a server comparing against an allowed directory resolves an
+   absolute path first. The benign input is now an absolute path inside the decoy
+   workspace.
+
+Measured effect on `file-system-node`, 14 tools:
+
+| | `pass` | `target_error` | `unsupported` |
+|---|---:|---:|---:|
+| Before | 1 | 12 | 2 |
+| Workspace granted, relative path | 2 | 12 | 2 |
+| Workspace granted, **absolute path** | **6** | **8** | 2 |
+
+Four tools moved from "written off as broken" to genuinely exercised. The
+remaining eight are write, edit, create, move and media tools, which need input
+shapes a single benign string cannot supply — that is the schema-driven
+generation work, not a configuration problem.
+
+Completeness stays `inconclusive` because eight tools still fail, so the verdict
+is unchanged. The number that moved is coverage, and it moved because two of our
+own defects were removed, not because the target changed.
+
+## 3d. The pre-built route — 2026-08-20
+
+Blockers A0 and A1 are acquisition refusals: detonate will not resolve a
+monorepo workspace, and will not resolve a Python project whose build backend
+could run while the network is up. Both are deliberate. Both take out real
+servers.
+
+An author does not need us to solve either, because **their CI has already built
+the project**. The question was whether detonate could scan a tree that is
+already installed and compiled. It could not, for one reason nobody had noticed.
+
+### The defect
+
+`policy.Image` was only ever set from the acquisition result. With
+`--no-install` the target stayed on the default **Python** image, so a Node
+server died at launch:
+
+```
+exec: "node": executable file not found in $PATH
+```
+
+The one route available to an author with their own build was silently broken.
+Fixed by consulting `acquire.Detect` for the ecosystem even when the install
+stage is skipped — detection only reads a manifest, so asking which runtime a
+target needs costs nothing regardless of who installed its dependencies.
+
+### Result
+
+`servers/src/filesystem`, one of the three reference servers that previously
+failed acquisition in 0 seconds. Built inside `node:22-slim` exactly as CI would
+(`npm install --no-workspaces && npm run build`), then scanned with:
+
+```
+detonate dynamic ./src/filesystem --no-install   --cmd "node /target/dist/index.js /home/detonate/workspace"
+```
+
+| | Before | After |
+|---|---|---|
+| Outcome | acquisition unsupported, 0s | launched, enumerated, probed |
+| Tools discovered | 0 | 14 |
+| Tools probed | 0 | 12 |
+| `pass` | 0 | **8** |
+| `target_error` | — | 6 |
+| `unsupported` | — | 2 |
+
+Risk `no_findings`; completeness stays `inconclusive` because six tools still
+fail. **This is the first `modelcontextprotocol/servers` package ever to reach
+real dynamic testing.**
+
+The remaining six are the directory-shaped tools — `list_directory`,
+`directory_tree`, `create_directory`, `search_files` — which need a directory
+path where the benign value supplies a file path. One benign string cannot
+satisfy both shapes, which is a precise statement of why schema-driven input
+generation is the next real coverage work rather than a nice-to-have.
+
+### What this means for A0 and A1
+
+Neither needs to be implemented for 1.0. The supported answer for a monorepo,
+a Python project, or any custom build is: build it in your CI as you already do,
+then scan with `--no-install` and an explicit `--cmd`. That route is now real
+and measured. It is not yet documented, which is the remaining gap.
+
+## 3e. Input shape and coverage — 2026-08-20
+
+Follow-on to §3d. With `servers/src/filesystem` finally reachable, the remaining
+failures were measurable rather than hypothetical, and each turned out to be a
+distinct defect in how detonate builds arguments — not in the target.
+
+| Change | `pass` | `target_error` | `unsupported` | Completeness |
+|---|---:|---:|---:|---|
+| Pre-built route only (§3d) | 8 | 6 | 2 | inconclusive |
+| Per-parameter shape | 12 | 2 | 2 | inconclusive |
+| Enum-aware benign values | 13 | 1 | 2 | inconclusive |
+| Required non-string parameters | **14** | **0** | 2 | **partial** |
+
+**Per-parameter shape.** One benign value cannot serve a whole filesystem
+server: six tools were directory operations handed a file path. The tool name
+has to decide, not the parameter name — the official server calls the argument
+`path` on both `read_file` and `list_directory`, meaning a file in one and a
+directory in the other.
+
+**Enum constraints.** `list_directory_with_sizes` declares
+`sortBy: enum ["name","size"]`. Sending a path there made a working tool reject
+a benign call, and the tool took the blame as `target_error`.
+
+**Required non-string parameters.** `edit_file` requires `edits`, an array.
+Only string parameters were ever supplied, so a required field was simply absent
+and the call failed schema validation before the tool ran. Minimal schema-valid
+values are now built for required non-strings: an empty array rather than a
+fabricated element, `false` rather than `true`, a declared `default` where the
+author gave one. Deliberately minimal — the goal is a call that survives
+validation so the tool runs, not one that exercises the parameter. An array of
+invented edits would be asking a working tool to modify files and then judging
+it on the result.
+
+**All 14 tools now pass, and `target_error` is zero.** Every one of the eight
+original failures was a defect in how detonate built arguments. The server
+worked throughout.
+
+### Why `complete` is not reachable here
+
+`assessment.completeness` returns `complete` only when every required scenario
+passes. Any `unsupported` caps the result at `partial`; any `target_error` makes
+it `inconclusive`. This server has two zero-argument tools, which the adversarial
+probe set cannot reach, so **`complete` is structurally unavailable for it** — no
+improvement to input generation can change that. That is blocker A3, and it is a
+property of the rule rather than a bug.
+
+### A hole found while checking that
+
+Tools with no string parameters were not being called **at all**, so a
+zero-argument tool that returns a credential on every invocation could never be
+detected. "Nothing to inject into" is not "nothing to observe": the tool still
+runs, and what it returns is still evidence.
+
+They are now called once, benignly, and the response is checked against the
+decoy — but only when a decoy is planted, since without one the call would
+execute target code and learn nothing. The outcome stays `unsupported` unless a
+secret comes back. Reporting a pass because one benign call succeeded would be
+the coverage inflation the completeness model exists to prevent.
+
 ## 4. Representative server corpus
 
 Use the official reference servers plus one target per packaging/transport
@@ -460,3 +788,180 @@ requires:
 
 Modern `2026-07-28`, Streamable HTTP, and LLM-provider support may ship later,
 but unsupported paths must already fail honestly.
+
+---
+
+## 3f. Nested input schemas and sandbox attribution — 2026-08-23
+
+First measurement against a real third-party server reached through the
+pre-built route, and it exposed two defects that the fixture corpus could not.
+
+**Target:** `modelcontextprotocol/servers` → `src/memory`, built with
+`docker run --rm -v <repo>:/w -w /w/src/memory node:22-slim npm run build`
+(the monorepo root must be mounted; the package tsconfig extends `../../`), then
+`detonate dynamic <pkg> --cmd "node /target/dist/index.js" --no-install`.
+
+### Defect 1 — the probe set only saw the top level of a schema
+
+`stringParams` read `properties` one level deep. The memory server's tools take
+arrays of objects: `create_entities` carries `name`, `entityType`, and
+`observations`; `create_relations` carries `from`, `to`, `relationType`. All
+caller-controlled, none top-level.
+
+| | Before | After |
+|---|---:|---:|
+| Tools discovered | 11 | 11 |
+| Tools with a reachable string surface | 3 | **10** |
+| Reported "no adversarial string-input surface" | 8 | **1** |
+
+The one remaining is `read_graph`, which genuinely takes no input.
+
+Replaced by `stringLeaves`, which walks objects and arrays to `maxSchemaDepth`
+and caps at `maxStringLeaves` (32) — the schema is written by the target, so its
+size is the target's choice, and an unbounded walk is a denial of service
+against the scanner written in JSON.
+
+### Defect 2 — the sandbox's own restrictions were blamed on the target
+
+With the tools finally reachable, six returned `isError` on a valid call:
+
+```
+EROFS: read-only file system, open '/target/dist/memory.jsonl'
+```
+
+The memory server persists its knowledge graph next to its entry point, and the
+sandbox mounts the target read-only on purpose. detonate recorded all six as
+`target_error` — "the tool is broken on valid input" — which is a confident
+false accusation about a working server, caused entirely by our own mount.
+
+This is the same distinction `isNetworkBlocked` already drew for egress, applied
+to writes. Added `isSandboxDenied`; the outcome is now `unsupported` with the
+reason naming the sandbox profile.
+
+| Outcome | Before | After |
+|---|---:|---:|
+| `unsupported` (sandbox denied writes) | 0 | **5** |
+| `target_error` | 6 | **1** |
+
+The remaining `target_error` is `add_observations`, which fails because the
+entity it references does not exist — a stateful-ordering limitation, not a
+misattribution.
+
+`EACCES` alone is deliberately not enough: a tool refusing to read
+`/etc/shadow` is working correctly, and that is a very different fact. It counts
+only when paired with an unmistakable write verb.
+
+### Defect 3 — a target nothing was learned about exited 0
+
+Static mode over four community servers — `ahujasid/blender-mcp`,
+`GongRzhe/Gmail-MCP-Server`, `executeautomation/mcp-playwright`,
+`sooperset/mcp-atlassian`. None ships an MCPB `manifest.json`, so all four
+returned `not_assessed` / `inconclusive`, and **all four exited 0**.
+
+A CI job reads 0 as "safe to merge". Collapsing "found nothing" into "looked at
+nothing" in the one signal CI gates on undoes the point of keeping risk and
+completeness independent.
+
+`exitForSummary` now returns 4 when risk is `not_assessed`. This is narrower
+than `--fail-incomplete`, which fails on any coverage short of complete:
+**partial coverage still exits 0**, because something was genuinely assessed and
+nothing was found. The line is "was anything examined at all".
+
+| Target | Before | After |
+|---|---:|---:|
+| four community servers, no manifest | 0 | **4** |
+| `testdata/action/poisoned` | 3 | 3 |
+| `testdata/honest` | 0 | 0 |
+| `testdata/thief` | 3 | 3 |
+
+### Standing limitation
+
+The memory server's write-dependent tools remain unprobed under the default
+profile. Reaching them needs a writable workspace the target can persist into,
+which is a sandbox-profile change and is **not** implemented.
+
+---
+
+## 3g. The decoy was invisible on Linux — 2026-08-23
+
+Found by the first CI run on a real Linux runner. `TestDecoyCatchesAServerThat
+StealsTheSSHKey` — the positive control for the entire evidence mechanism —
+failed with `decoy finding severity = "info", want critical`.
+
+### What was actually wrong
+
+Every planted decoy was written mode `0600`. The sandbox runs as uid 1000
+(`sandbox.Policy`). The files are created by whoever ran detonate — uid 1001 on
+a GitHub runner, some other number on a laptop — so POSIX ownership never
+matches and `0600` grants nothing to the reader.
+
+Verified directly:
+
+```
+$ docker run --rm alpine sh -c '... chown 1001 ... chmod 600 ...'
+--- as another uid, mode 0600:  cat: Permission denied
+--- same file at 0644:          PRIVATE-KEY-TOKEN
+```
+
+So on Linux the decoy was planted, mounted, and **unreadable by the target**. A
+thieving server could not open the key it was being tempted with, nothing
+leaked, and the scan reported a clean result it had not earned.
+
+### Why it survived this long
+
+Docker Desktop on Windows and macOS serves bind mounts through a VM that ignores
+POSIX ownership, so every local run could read the files regardless of mode.
+Every measurement in §3c through §3f was taken on Windows. The mechanism has
+only ever been proven on the one platform where the permission model does not
+apply.
+
+`0600` was chosen for realism — a real `~/.ssh/id_rsa` is `0600`. That realism
+is worth nothing if the target cannot open the file: a thief that respects
+permissions it was never granted is not a threat model, it is a broken fixture.
+
+### The fix
+
+- Files are planted `0644`, directories `0755`.
+- Both are applied with an explicit `Chmod` **after** creation, because
+  `os.WriteFile` and `os.MkdirAll` mask the mode they are given by the process
+  umask: asking for `0644` under `umask 077` still yields `0600`.
+- `internal/decoy` now asserts the requirement without Docker, on every
+  platform where POSIX modes exist, so the next regression fails in a unit test
+  rather than in someone's pipeline.
+
+Mutation-checked: reverting `fileMode` to `0o600` fails both new tests, naming
+`.env`, `.netrc`, and `.ssh/id_rsa` individually.
+
+### What this changes about earlier sections
+
+Every dynamic-mode "no credential was returned" result recorded before this
+date was measured on Windows, where the decoy was readable. Those results stand
+for what they measured. **No proven-negative result had been demonstrated on
+Linux at all** until this fix — the platform CI and most users run on.
+
+### The other half of the failure
+
+The control took whichever decoy-sourced event came first. A run always ends
+with an info-level summary of what was planted, so when the leak was absent the
+test reported `severity = info` rather than "the key was never stolen" — the
+right failure for the wrong reason, and it cost time. The control now selects
+the event carrying a nonce and says which of the two things went wrong.
+
+### The conflicting assertion
+
+The second CI run failed too, on `TestKeyFilesArePrivateMode` — an existing
+test that required exactly the `0600` this fix removes.
+
+It had **never executed**. It skipped itself on Windows, which is the only
+platform development happened on, so its first ever run was the CI job that
+failed this branch. A test asserting the wrong requirement, never run, is worse
+than no test: it reads as coverage.
+
+Replaced with `TestKeyFilesAreNotWritableByTheTarget`, which asserts what
+actually matters — readable by anyone, writable by nobody else. A decoy the
+target can rewrite is useless as evidence, because a token appearing in the
+report could then have come from the target rather than from us.
+
+A sweep for other tests carrying the same blind spot found no further cases:
+the only Windows skips remaining are the two POSIX-mode tests, and both now run
+on Linux in CI.

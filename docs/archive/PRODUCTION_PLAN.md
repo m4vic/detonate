@@ -6,7 +6,7 @@ This is the execution plan for making Detonate safe enough to promote beyond
 an experimental local CLI. It complements, rather than replaces,
 [ROADMAP.md](ROADMAP.md), [TASKS.md](TASKS.md),
 [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md), and
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## Scope and production bar
 

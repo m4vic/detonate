@@ -15,11 +15,11 @@ your question is answered.
 |---|---|
 | **ROADMAP.md** (this) | What ships when, and in what order |
 | [TASKS.md](TASKS.md) | The checklist, keyed to versions here |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Invariants a change must not break |
+| [ARCHITECTURE.md](../ARCHITECTURE.md) | Invariants a change must not break |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Component-level how, per phase |
 | [RESEARCH_PLAN.md](RESEARCH_PLAN.md) | Why the canary/capability/benchmark work exists |
 | [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) | Release and promotion contract |
-| [COMPATIBILITY.md](COMPATIBILITY.md) | Verified live results |
+| [COMPATIBILITY.md](../COMPATIBILITY.md) | Verified live results |
 
 This document supersedes the R0-R5 release-train table in
 PRODUCTION_READINESS.md §4. The definitions of "production-ready" and
@@ -33,7 +33,7 @@ that number changes only on a breaking field change — never merely because the
 CLI released.
 
 - `0.x` — no stability promise on flags or report fields. Breaking changes are
-  allowed within a minor bump and must appear in [CHANGELOG.md](../CHANGELOG.md).
+  allowed within a minor bump and must appear in [CHANGELOG.md](../../CHANGELOG.md).
 - `1.0` — flags, exit codes, and `schema_version` become stable.
 - Exit codes are frozen **now**, ahead of everything else, because a CI gate
   that changes meaning is worse than one that fails:

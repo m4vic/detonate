@@ -760,6 +760,22 @@ func (a *App) exitForSummary(summary assessment.Summary) int {
 	if summary.Completeness == assessment.CompletenessFailed {
 		return exitFailure
 	}
+	// Nothing was assessed, so there is nothing to be clean about.
+	//
+	// Exit 0 means "no findings", and a pipeline reads it as "safe to merge".
+	// When risk is not_assessed there were no findings only because nothing was
+	// examined — measured on four real community MCP servers, every one of
+	// which ships no MCPB manifest and so returned not_assessed, inconclusive,
+	// and exit 0. Collapsing "found nothing" into "looked at nothing" in the
+	// one signal CI gates on would undo the whole point of keeping risk and
+	// completeness independent.
+	//
+	// This is deliberately narrower than --fail-incomplete, which fails on any
+	// coverage short of complete. Partial coverage still exits 0: something was
+	// genuinely assessed and nothing was found.
+	if summary.Risk == assessment.RiskNotAssessed {
+		return exitIncomplete
+	}
 	if a.failIncomplete && summary.Completeness != assessment.CompletenessComplete {
 		return exitIncomplete
 	}

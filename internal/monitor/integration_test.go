@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m4vic/detonate/internal/dockertest"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/trace"
 )
@@ -80,16 +81,11 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":r["id"],"result":{"tools":TOOLS}})
 `
 
+// requireDocker delegates to the shared gate so that this package cannot
+// drift from the others on what "Docker is available" means.
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not on PATH")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
-		t.Skip("docker daemon not running")
-	}
+	dockertest.Require(t)
 }
 
 // runServerInSandbox runs a server script in the sandbox and returns its
@@ -114,7 +110,7 @@ func runServerInSandboxFor(t *testing.T, script string, maxWait time.Duration) s
 	p.Timeout = 60 * time.Second
 
 	if err := sandbox.EnsureImage(context.Background(), p.Image); err != nil {
-		t.Skipf("cannot pull sandbox image: %v", err)
+		dockertest.Unavailable(t, "cannot pull sandbox image: %v", err)
 	}
 
 	name, err := sandbox.NewName()

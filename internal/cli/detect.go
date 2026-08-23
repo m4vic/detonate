@@ -9,6 +9,7 @@ import (
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/fetch"
 	"github.com/m4vic/detonate/internal/skill"
+	"github.com/m4vic/detonate/internal/staticinv"
 )
 
 // Target auto-detection: work out what the user pointed at.
@@ -127,6 +128,40 @@ func detectDir(dir string) (Detected, error) {
 	}
 
 	m := acquire.Detect(dir)
+
+	// An MCPB manifest is a definitive statement that this directory IS an MCP
+	// server — stronger evidence than any entry-point guess, because the target
+	// declared it rather than us inferring it.
+	//
+	// Checked before the guessing path for a concrete reason: a bundle keeps its
+	// code under server/, which matches none of the guessed filenames, so an
+	// MCPB bundle with a perfectly good manifest was reported as "no
+	// recognisable entry point" and refused. That made the declared tool list
+	// unreachable for exactly the targets that publish one.
+	bundle := staticinv.Extract(dir)
+	if bundle.Source == staticinv.SourceMCPBManifest {
+		d := Detected{
+			Kind: KindMCP, Dir: dir,
+			// A declared command is preferred, but its absence does not
+			// downgrade the detection: static analysis needs no command, and
+			// dynamic mode already asks for --cmd when one is missing.
+			Command: bundle.StartCommand("/target"),
+			Why:     "MCPB manifest.json declares an MCP server",
+		}
+		if d.Command == "" {
+			if declared := m.StartCommand(); declared != "" {
+				d.Command = declared
+			} else {
+				d.Command = guessCommand(dir)
+			}
+		}
+		if m.Ecosystem != acquire.EcosystemNone {
+			d.NeedsInstall = true
+			d.Manifest = m.File
+			d.Why += fmt.Sprintf(", plus %s to install", m.File)
+		}
+		return d, nil
+	}
 
 	cmd := guessCommand(dir)
 	// A package.json with no obvious entry file still names its start command

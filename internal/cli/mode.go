@@ -12,6 +12,8 @@ import (
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/fetch"
 	"github.com/m4vic/detonate/internal/skill"
+	"github.com/m4vic/detonate/internal/staticinv"
+	"github.com/m4vic/detonate/internal/toolscan"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
@@ -21,6 +23,39 @@ const modeUsage = `Usage:
   detonate report <bundle-dir>            Render a saved result offline
   detonate combined <target>               Not available in alpha
 `
+
+// helpRequested reports whether the user asked for help rather than a scan.
+//
+// `detonate static --help` used to treat "--help" as a path and answer
+// "static scan: C:\...\--help does not exist". Asking a CLI for help is the
+// first thing anyone does, and a tool that answers with a file-not-found error
+// about a flag looks broken before it has done anything.
+func helpRequested(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "help":
+			return true
+		}
+	}
+	return false
+}
+
+// printModeUsage prints one mode's usage and the options it accepts.
+func (a *App) printModeUsage(name, summary string) {
+	fmt.Fprintf(a.Stdout, "Usage:\n  detonate %s <target> [options]\n\n%s\n\nOptions:\n",
+		name, summary)
+
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(a.Stdout)
+	var opt scanOptions
+	bindScanFlags(fs, &opt)
+	fs.PrintDefaults()
+
+	fmt.Fprint(a.Stdout, "\nExit codes:\n"+
+		"  0  clean            3  findings\n"+
+		"  1  scan failed      4  incomplete coverage\n"+
+		"  2  usage or environment problem\n")
+}
 
 // modeArgs separates the one target from the options that follow it.
 //
@@ -59,6 +94,13 @@ func (a *App) modeArgs(name string, args []string) (string, scanOptions, bool) {
 }
 
 func (a *App) runStatic(ctx context.Context, args []string) int {
+	if helpRequested(args) {
+		a.printModeUsage("static",
+			"Inspect a target without executing any of its code. Needs no Docker.\n"+
+				"Reads prompts, skill instructions, and the tool inventory an MCPB\n"+
+				"bundle declares in manifest.json.")
+		return exitOK
+	}
 	input, opt, ok := a.modeArgs("static", args)
 	if !ok {
 		return exitUsage
@@ -81,6 +123,13 @@ func (a *App) runStatic(ctx context.Context, args []string) int {
 }
 
 func (a *App) runDynamic(ctx context.Context, args []string) int {
+	if helpRequested(args) {
+		a.printModeUsage("dynamic",
+			"Run the target inside a Docker sandbox (network off, read-only root,\n"+
+				"non-root) and report what it actually did. Credential decoys are\n"+
+				"planted in the sandbox home, so a tool that returns one is caught.")
+		return exitOK
+	}
 	input, opt, ok := a.modeArgs("dynamic", args)
 	if !ok {
 		return exitUsage
@@ -234,12 +283,65 @@ func (a *App) scanStaticMCP(detected Detected) int {
 	if a.scanTarget == "" {
 		a.scanTarget = detected.Dir
 	}
-	a.scanScenarios = []assessment.ScenarioResult{{
+
+	// Recover whatever inventory the target declares, then analyze it with the
+	// same rules dynamic mode uses. Static mode previously returned
+	// `unsupported` unconditionally, which meant the one path a user without
+	// Docker can reach produced no verdict at all.
+	inv := staticinv.Extract(detected.Dir)
+	a.scanTools = inv.Tools
+
+	if len(inv.Tools) == 0 {
+		// Nothing to analyze. This stays `unsupported` — the honest outcome —
+		// but now names the specific reason instead of claiming the analysis
+		// does not exist.
+		fmt.Fprintf(a.Stderr, "  no static tool inventory: %s\n", inv.Reason)
+		a.scanScenarios = []assessment.ScenarioResult{{
+			ID:       "mcp.static-inventory",
+			Required: true,
+			Outcome:  assessment.OutcomeUnsupported,
+			Reason:   inv.Reason + "; run dynamic mode for the sandboxed probe path",
+		}}
+		return a.report(tr)
+	}
+
+	findings := toolscan.Analyze(inv.Tools)
+	for _, ev := range findings {
+		tr.Add(ev)
+	}
+
+	outcome := assessment.OutcomePass
+	for _, ev := range findings {
+		if ev.Severity == trace.SeverityCritical || ev.Severity == trace.SeverityNotable {
+			outcome = assessment.OutcomeFinding
+			break
+		}
+	}
+
+	fmt.Fprintf(a.Stdout, "  analyzed %d declared tool(s) from %s\n",
+		len(inv.Tools), inv.Source)
+
+	scenarios := []assessment.ScenarioResult{{
 		ID:       "mcp.static-inventory",
 		Required: true,
-		Outcome:  assessment.OutcomeUnsupported,
-		Reason:   "MCP static source analysis is not implemented; run dynamic mode for the current sandboxed probe path",
+		Outcome:  outcome,
 	}}
+
+	// An inventory the target admits is a lower bound cannot support a complete
+	// verdict. Recorded as a separate unsupported scenario so risk and
+	// completeness stay independent: the tools we DID see were genuinely
+	// analyzed (above), and the ones we could not see reduce completeness here
+	// rather than quietly downgrading the finding.
+	if !inv.Complete {
+		scenarios = append(scenarios, assessment.ScenarioResult{
+			ID:       "mcp.static-inventory-coverage",
+			Required: true,
+			Outcome:  assessment.OutcomeUnsupported,
+			Reason:   inv.Reason,
+		})
+	}
+
+	a.scanScenarios = scenarios
 	return a.report(tr)
 }
 

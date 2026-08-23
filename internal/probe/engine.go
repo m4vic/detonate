@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/decoy"
 	"github.com/m4vic/detonate/internal/monitor"
 	scenariodef "github.com/m4vic/detonate/internal/scenario"
 	"github.com/m4vic/detonate/internal/toolcall"
@@ -119,18 +121,45 @@ func GetDefaultProbes() []Probe {
 
 // RunWithResults probes every tool and records one terminal scenario result
 // per tool, including tools that cannot be reached by the current payload set.
-func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration) Result {
+// Option configures a probe run. Variadic so the existing four-argument calls
+// keep working; a decoy is not required to probe.
+type Option func(*config)
+
+type config struct {
+	decoy *decoy.Environment
+}
+
+// WithDecoy makes the engine check every tool response for planted secrets.
+//
+// This is the strongest evidence detonate can produce. A payload finding says a
+// response looked wrong; a decoy hit says a token that existed only inside this
+// sandbox came back out of a tool call, which has no benign explanation.
+func WithDecoy(e *decoy.Environment) Option {
+	return func(c *config) { c.decoy = e }
+}
+
+func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, timeout time.Duration, opts ...Option) Result {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	var events []trace.Event
 	var scenarios []assessment.ScenarioResult
 	probes := GetDefaultProbes()
+
+	// Reported once per tool+token. A traversal payload set can pull the same
+	// key back thirteen times, and thirteen copies of one fact is not thirteen
+	// findings.
+	leaked := map[string]bool{}
 
 	for i, tool := range tools {
 		scenario := assessment.ScenarioResult{
 			ID: scenariodef.MCPToolID(tool.Name), Required: true,
 		}
 		eventStart := len(events)
-		params := stringParams(tool.InputSchema)
-		if len(params) == 0 {
+		leaves := stringLeaves(tool.InputSchema)
+		if len(leaves) == 0 {
 			// Nothing to inject into. A tool with no string inputs is not
 			// immune, but it is out of reach of this probe set, and saying so
 			// is better than implying it was tested.
@@ -139,6 +168,35 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 				Summary: fmt.Sprintf("tool %q has no adversarial string-input surface; no payloads sent", tool.Name),
 				During:  "probe", Source: "probe-engine",
 			})
+			// Call it once anyway, and check what comes back.
+			//
+			// Skipping these entirely left a real hole: a zero-argument tool
+			// that returns your SSH key on every call was never invoked, so it
+			// could never be caught. "Nothing to inject into" is not the same
+			// as "nothing to observe" — the tool still runs, and what it
+			// returns is still evidence.
+			//
+			// The outcome stays unsupported rather than becoming a pass. The
+			// adversarial probe set genuinely does not reach this tool, and
+			// saying it was tested because one benign call was made would be
+			// exactly the coverage inflation the completeness model exists to
+			// prevent.
+			// Only when there is something planted to detect. Without a decoy
+			// the call would execute target code and learn nothing, and the
+			// existing contract — a tool this probe set cannot reach is not
+			// called — should hold.
+			if result, callErr := callIfDecoy(ctx, &cfg, c, tool.Name); callErr == nil && result != nil {
+				leaks := leakEvents(&cfg, leaked, tool.Name, "probe:no-argument",
+					"benign call with no arguments", result.SearchableText())
+				events = append(events, leaks...)
+				if len(leaks) > 0 {
+					scenario.Outcome = assessment.OutcomeFinding
+					scenario.Reason = "returned a planted credential with no input"
+					scenarios = append(scenarios, scenario)
+					continue
+				}
+			}
+
 			scenario.Outcome = assessment.OutcomeUnsupported
 			scenario.Reason = "current probe set found no adversarial string-input surface"
 			scenarios = append(scenarios, scenario)
@@ -146,7 +204,40 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 
 		baseline := c.Stderr()
-		baselineResult, err := c.Call(ctx, tool.Name, argsFor(params, benign))
+		// A realistic benign value when the sandbox is furnished, chosen per
+		// parameter so a directory operation gets a directory and a file
+		// operation gets a file.
+		benignArgs := map[string]any{}
+		for _, l := range leaves {
+			value := benign
+			if cfg.decoy != nil {
+				// Chosen per parameter so a directory operation gets a
+				// directory and a file operation gets a file.
+				value = cfg.decoy.BenignFor(tool.Name, l.name)
+			}
+			// A parameter constrained by an enum has exactly one class of valid
+			// answer, and a path is not in it. Sending one made
+			// list_directory_with_sizes reject a benign call over its sortBy
+			// field — the tool worked, the argument did not, and the tool took
+			// the blame.
+			if len(l.enum) > 0 {
+				value = l.enum[0]
+			}
+			setLeaf(benignArgs, l.path, value)
+		}
+
+		// Required parameters the string probe set does not fill.
+		//
+		// edit_file requires "edits", an array. Only string parameters were
+		// ever supplied, so a required field was simply absent and the call
+		// failed schema validation before the tool ran — reported as
+		// target_error, blamed on the tool, caused by us.
+		for name, value := range requiredNonStringArgs(tool.InputSchema) {
+			if _, taken := benignArgs[name]; !taken {
+				benignArgs[name] = value
+			}
+		}
+		baselineResult, err := c.Call(ctx, tool.Name, benignArgs)
 		if err != nil {
 			// A tool that reaches an external host cannot be probed here,
 			// because the sandbox denies the network on purpose. That is the
@@ -186,17 +277,46 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 			scenario.Outcome = assessment.OutcomeTargetError
 			scenario.Reason = "tool failed on a benign schema-valid call"
 		} else if baselineResult.IsError {
+			text := baselineResult.SearchableText()
+			// A tool that needs to write cannot run under a read-only rootfs,
+			// and that is the sandbox working rather than a defect in the tool
+			// — the same distinction isNetworkBlocked draws for egress. The
+			// official memory server persists its knowledge graph next to its
+			// entry point, so six of its eleven tools answered EROFS on a
+			// perfectly valid call and were recorded as broken. Blaming a
+			// working target for our own mount is a confident false accusation,
+			// which is worse than saying nothing.
+			summary := fmt.Sprintf("tool %q returned isError on a benign call", tool.Name)
+			if isSandboxDenied(text) {
+				summary = fmt.Sprintf(
+					"tool %q needs filesystem writes the sandbox denies; not probed", tool.Name)
+			}
 			events = append(events, trace.Event{
 				Kind: trace.KindProtocol, Severity: trace.SeverityInfo, At: time.Now(),
-				Summary: fmt.Sprintf("tool %q returned isError on a benign call", tool.Name),
+				Summary: summary,
 				During:  "probe:baseline", Source: "probe-engine",
 				Detail: map[string]any{
-					"evidence": clip(baselineResult.SearchableText(), 200),
+					"evidence": clip(text, 200),
 				},
 			})
+			if isSandboxDenied(text) {
+				// Every payload would hit the same wall, so probing this tool
+				// learns nothing about the tool.
+				scenario.Outcome = assessment.OutcomeUnsupported
+				scenario.Reason = "tool requires filesystem writes denied by the selected sandbox profile"
+				scenarios = append(scenarios, scenario)
+				continue
+			}
 			scenario.Outcome = assessment.OutcomeTargetError
 			scenario.Reason = "tool returned isError on a benign schema-valid call"
 		}
+		// A benign call that returns a planted secret is worse than a hostile
+		// one that does: the tool did not need to be attacked to leak.
+		if err == nil {
+			events = append(events, leakEvents(&cfg, leaked, tool.Name, "probe:baseline",
+				"benign", baselineResult.SearchableText())...)
+		}
+
 		baseline = c.Stderr() // after the benign call: this is "normal"
 
 		for _, pr := range probes {
@@ -219,11 +339,17 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 				}
 
 				before := c.Stderr()
-				result, err := c.Call(ctx, tool.Name, argsFor(params, p.Value))
+				result, err := c.Call(ctx, tool.Name, argsForLeaves(leaves, p.Value))
 				after := c.Stderr()
 
 				probeEvents := pr.Evaluate(ctx, tool.Name, p, result, err, before, after, baseline)
 				events = append(events, probeEvents...)
+
+				if err == nil {
+					events = append(events, leakEvents(&cfg, leaked, tool.Name,
+						"probe:"+string(p.Category), clip(p.Value, 80),
+						result.SearchableText())...)
+				}
 
 				if ctx.Err() != nil {
 					scenario.Outcome = assessment.OutcomeTimeout
@@ -244,7 +370,86 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		}
 		scenarios = append(scenarios, scenario)
 	}
+
+	if ev, sc, ok := decoySummary(&cfg, leaked); ok {
+		events = append(events, ev)
+		scenarios = append(scenarios, sc)
+	}
+
 	return Result{Events: events, Scenarios: scenarios}
+}
+
+// decoySummary states what the credential check actually proved.
+//
+// Without it a clean scan says only "no findings", which is the weakest
+// possible claim and indistinguishable from a check that never ran. With it the
+// scan asserts something bounded and checkable: this many real credentials were
+// planted where a thief would look, the target was exercised, and none of them
+// came back. That is the strongest honest thing a scanner can say, and it is
+// only honest because the same report also states what was not covered.
+func decoySummary(cfg *config, leaked map[string]bool) (trace.Event, assessment.ScenarioResult, bool) {
+	if cfg.decoy == nil || len(cfg.decoy.Tokens) == 0 {
+		return trace.Event{}, assessment.ScenarioResult{}, false
+	}
+
+	seen := map[string]bool{}
+	for key := range leaked {
+		if i := strings.LastIndex(key, "|"); i >= 0 {
+			seen[key[i+1:]] = true
+		}
+	}
+
+	planted := len(cfg.decoy.Tokens)
+	untouched := cfg.decoy.Untouched(seen)
+	returned := planted - len(untouched)
+
+	kinds := make([]string, 0, planted)
+	for _, t := range cfg.decoy.Tokens {
+		kinds = append(kinds, string(t.Kind))
+	}
+	sort.Strings(kinds)
+
+	summary := fmt.Sprintf(
+		"planted %d credential decoys in the sandbox; none were returned by any tool", planted)
+	outcome := assessment.OutcomePass
+	if returned > 0 {
+		verb := "were"
+		if returned == 1 {
+			verb = "was"
+		}
+		summary = fmt.Sprintf(
+			"planted %d credential decoys in the sandbox; %d %s returned by a tool",
+			planted, returned, verb)
+		outcome = assessment.OutcomeFinding
+	}
+
+	return trace.Event{
+			Kind: trace.KindFile, Severity: trace.SeverityInfo, At: time.Now(),
+			Summary: summary, During: "probe", Source: "decoy",
+			Detail: map[string]any{
+				"planted":  planted,
+				"returned": returned,
+				"secrets":  strings.Join(kinds, ", "),
+			},
+		}, assessment.ScenarioResult{
+			ID:       "decoy.credential-exfiltration",
+			Required: true,
+			Outcome:  outcome,
+		}, true
+}
+
+// encodingPhrase renders how a secret came back, for the evidence line. A
+// secret returned base64-encoded was transformed on the way out, which is
+// harder to explain away than one returned verbatim.
+func encodingPhrase(encoding string) string {
+	switch encoding {
+	case "plain":
+		return "verbatim"
+	case "hex":
+		return "hex-encoded"
+	default:
+		return encoding + "-encoded"
+	}
 }
 
 // StringInputToolCount reports how many tools the current adversarial payload
@@ -252,7 +457,7 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 func StringInputToolCount(tools []toolinfo.ToolInfo) int {
 	count := 0
 	for _, tool := range tools {
-		if len(stringParams(tool.InputSchema)) > 0 {
+		if len(stringLeaves(tool.InputSchema)) > 0 {
 			count++
 		}
 	}
@@ -306,49 +511,6 @@ func checkResponse(tool string, p Payload, resp, during string) *trace.Event {
 	return nil
 }
 
-// stringParams finds the string-typed inputs a tool accepts.
-//
-// Driven by the tool's own schema so probes are well-formed: a target can
-// legitimately reject malformed input, and a scanner that only ever sends
-// malformed input learns nothing about how the tool handles valid-but-hostile
-// values.
-func stringParams(schema json.RawMessage) []string {
-	if len(schema) == 0 {
-		return nil
-	}
-	var s struct {
-		Properties map[string]struct {
-			Type string `json:"type"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &s); err != nil {
-		return nil
-	}
-
-	var names []string
-	for name, prop := range s.Properties {
-		if prop.Type == "string" || prop.Type == "" { // untyped defaults to string
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-// argsFor fills every string parameter with the same value.
-//
-// All at once rather than one at a time: a tool that only mishandles its
-// third argument still gets caught, and the number of calls stays linear in
-// payloads rather than payloads times parameters. The cost is that a hit does
-// not say WHICH parameter was vulnerable, which is a follow-up question a
-// human can answer quickly once they know there is a hit at all.
-func argsFor(params []string, value string) map[string]any {
-	args := make(map[string]any, len(params))
-	for _, p := range params {
-		args[p] = value
-	}
-	return args
-}
-
 // isNetworkBlocked reports whether an error is the sandbox denying egress
 // rather than the tool misbehaving.
 //
@@ -369,6 +531,36 @@ func isNetworkBlocked(err error) bool {
 	} {
 		if strings.Contains(s, sig) {
 			return true
+		}
+	}
+	return false
+}
+
+// isSandboxDenied reports whether a tool's error is the sandbox refusing a
+// write rather than the tool misbehaving.
+//
+// The counterpart to isNetworkBlocked, and it exists for the same reason: the
+// read-only rootfs is deliberate, so a target that trips over it is not broken.
+// Reporting it as broken puts a false accusation in the report, and a report
+// that cries wolf about the scanner's own configuration is worth less than one
+// that stays quiet.
+func isSandboxDenied(text string) bool {
+	s := strings.ToLower(text)
+	for _, sig := range []string{
+		"erofs", "read-only file system", "read only file system",
+	} {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	// EACCES alone is ambiguous — a tool refusing to read /etc/shadow is
+	// working correctly, and that is a very different fact. Only pair it with
+	// an operation that is unmistakably a write.
+	if strings.Contains(s, "eacces") || strings.Contains(s, "permission denied") {
+		for _, w := range []string{"mkdir", "open '", "write", "unlink", "rename", "chmod"} {
+			if strings.Contains(s, w) {
+				return true
+			}
 		}
 	}
 	return false
@@ -425,4 +617,179 @@ func clip(s string, max int) string {
 		return string(r[:max]) + "..."
 	}
 	return s
+}
+
+// leakEvents reports planted secrets found in a tool's response.
+//
+// The nonce goes in the evidence because that is what makes the finding
+// checkable by someone who does not trust the scanner: they can confirm the
+// value never existed outside this scan. It is deliberately NOT part of any
+// fingerprint — the token changes every run, so including it would make two
+// scans of an unchanged target look like two different findings.
+func leakEvents(cfg *config, seen map[string]bool, tool, during, stimulus, response string) []trace.Event {
+	if cfg.decoy == nil || response == "" {
+		return nil
+	}
+
+	var events []trace.Event
+	for _, hit := range cfg.decoy.Match(response) {
+		key := tool + "|" + hit.Token.Value
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		events = append(events, trace.Event{
+			Kind: trace.KindFile, Severity: trace.SeverityCritical, At: time.Now(),
+			Summary: fmt.Sprintf("tool %q returned the contents of %s", tool, hit.Token.Path),
+			During:  during, Source: "decoy",
+			Detail: map[string]any{
+				"tool":   tool,
+				"secret": string(hit.Token.Kind),
+				"path":   hit.Token.Path,
+				// The renderers print "evidence", so the nonce has to live
+				// there to be seen. A finding whose proof is buried in a field
+				// nobody displays is a finding the reader has to take on trust,
+				// which is the opposite of the point.
+				"evidence": fmt.Sprintf("planted secret %s returned %s (nonce %s)",
+					hit.Token.Path, encodingPhrase(hit.Encoding), hit.Token.Value),
+				"encoding": hit.Encoding,
+				"stimulus": stimulus,
+				"nonce":    hit.Token.Value,
+			},
+		})
+	}
+	return events
+}
+
+// callIfDecoy makes one benign, argument-free call, but only when a decoy is
+// planted. Returns nil without calling otherwise, so a run without a decoy
+// keeps the older contract that a tool this probe set cannot reach is never
+// invoked.
+func callIfDecoy(ctx context.Context, cfg *config, c Caller, tool string) (*toolcall.Result, error) {
+	if cfg.decoy == nil {
+		return nil, nil
+	}
+	result, err := c.Call(ctx, tool, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// maxSchemaDepth bounds the walk below. A schema is target-controlled, so it
+// can nest arbitrarily; every other budget in detonate is explicit and this one
+// should be too.
+const maxSchemaDepth = 6
+
+// requiredNonStringArgs builds a minimal schema-valid value for each required
+// parameter that is not a string.
+//
+// Minimal, deliberately: an empty array rather than a fabricated element, false
+// rather than true, zero rather than a guess. The goal is a call that survives
+// validation so the tool actually runs — not a call that exercises the
+// parameter. Inventing plausible contents would be generating test data, which
+// is a different job with different risks: an array of fabricated edits handed
+// to edit_file would be asking a working tool to modify files and then judging
+// it on the result.
+func requiredNonStringArgs(schema json.RawMessage) map[string]any {
+	return requiredArgsAt(schema, 0)
+}
+
+func requiredArgsAt(schema json.RawMessage, depth int) map[string]any {
+	if len(schema) == 0 || depth >= maxSchemaDepth {
+		return nil
+	}
+
+	var s struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &s); err != nil || len(s.Required) == 0 {
+		return nil
+	}
+
+	out := make(map[string]any, len(s.Required))
+	for _, name := range s.Required {
+		raw, ok := s.Properties[name]
+		if !ok {
+			continue
+		}
+		if v, filled := minimalValue(raw, depth); filled {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// minimalValue returns the smallest schema-valid value for one property, and
+// whether it produced one. Strings report false: the probe set fills those, and
+// overwriting them with a placeholder would undo the decoy-aware paths.
+func minimalValue(raw json.RawMessage, depth int) (any, bool) {
+	var prop struct {
+		Type     string          `json:"type"`
+		Default  json.RawMessage `json:"default"`
+		MinItems int             `json:"minItems"`
+		Items    json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &prop); err != nil {
+		return nil, false
+	}
+
+	// A declared default is the author saying what a sane value looks like.
+	if len(prop.Default) > 0 {
+		var v any
+		if err := json.Unmarshal(prop.Default, &v); err == nil {
+			return v, true
+		}
+	}
+
+	switch prop.Type {
+	case "array":
+		items := make([]any, 0, prop.MinItems)
+		for i := 0; i < prop.MinItems; i++ {
+			if v, ok := minimalObject(prop.Items, depth+1); ok {
+				items = append(items, v)
+			}
+		}
+		return items, true
+	case "boolean":
+		return false, true
+	case "integer", "number":
+		return 0, true
+	case "object":
+		v, _ := minimalObject(raw, depth+1)
+		return v, true
+	default:
+		// Strings and untyped properties belong to the probe set.
+		return nil, false
+	}
+}
+
+func minimalObject(raw json.RawMessage, depth int) (map[string]any, bool) {
+	obj := map[string]any{}
+	for k, v := range requiredArgsAt(raw, depth) {
+		obj[k] = v
+	}
+	// Required strings inside a nested object still have to be present for the
+	// call to validate, and no decoy path reaches them.
+	var s struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &s); err == nil {
+		for _, name := range s.Required {
+			if _, taken := obj[name]; taken {
+				continue
+			}
+			var prop struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(s.Properties[name], &prop); err == nil &&
+				(prop.Type == "string" || prop.Type == "") {
+				obj[name] = ""
+			}
+		}
+	}
+	return obj, true
 }

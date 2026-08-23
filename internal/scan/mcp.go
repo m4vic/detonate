@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/decoy"
 	"github.com/m4vic/detonate/internal/mcpdriver"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/probe"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/scenario"
+	"github.com/m4vic/detonate/internal/toolscan"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
@@ -127,6 +130,23 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		}
 	}
 
+	// Pick the runtime image even when acquisition is skipped.
+	//
+	// The image was only ever set from the install result, so --no-install left
+	// the target on the default Python image and a Node server died with
+	// `exec: "node": executable file not found in $PATH`. That silently broke
+	// the one route an author with their own build has: their CI already ran
+	// `npm ci` and compiled, so they skip our acquisition and hand us a ready
+	// tree — and we started it on the wrong runtime.
+	//
+	// Detection is cheap and reads only a manifest, so it costs nothing to ask
+	// which runtime a target needs regardless of who installed its dependencies.
+	if !req.Stages.Install && absDir != "" {
+		if m := acquire.Detect(absDir); m.Ecosystem != acquire.EcosystemNone {
+			policy.Image = acquire.ImageFor(m.Ecosystem, policy.Image)
+		}
+	}
+
 	// Always sandboxed. There is no host-execution path reachable from here:
 	// the unsandboxed EnumerateTools still exists for our own tests, but
 	// shipping a way to reach it would recreate exactly the
@@ -149,6 +169,21 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		if installed != nil && res.Trace != nil {
 			res.Trace.Events = append(installed.Events, res.Trace.Events...)
 		}
+
+		// The same inventory analysis the probing path runs. Wiring it into
+		// only one of the two would mean a poisoned description is caught or
+		// missed depending on whether probes happened to be enabled — and the
+		// metadata is identical either way. This path is the one a user reaches
+		// with probing off, which is exactly when metadata is all there is.
+		if findings := toolscan.Analyze(res.Tools); len(findings) > 0 {
+			if res.Trace == nil {
+				res.Trace = newTrace(tgt.Reference)
+			}
+			for _, ev := range findings {
+				res.Trace.Add(ev)
+			}
+		}
+
 		scenarios = append(scenarios, assessment.ScenarioResult{
 			ID: "mcp.inventory", Required: true, Outcome: assessment.OutcomePass,
 		})
@@ -164,6 +199,34 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 			Tools: res.Tools, Trace: res.Trace,
 			Scenarios: scenarios, Reference: tgt.Reference,
 		}, nil
+	}
+
+	// Furnish the sandbox before the target starts.
+	//
+	// An empty home is not a neutral environment, it is an untestable one: a
+	// target with nothing to read cannot demonstrate that it reads things it
+	// should not. The decoy is writable so a server that stores state under ~
+	// still behaves normally, and it is deleted with the scan.
+	var den *decoy.Environment
+	decoyDir, decoyErr := os.MkdirTemp("", "detonate-decoy-")
+	if decoyErr == nil {
+		defer os.RemoveAll(decoyDir)
+		if planted, plantErr := decoy.Plant(decoyDir, sandbox.ContainerHome); plantErr == nil {
+			den = planted
+			mounts = append(mounts, sandbox.Mount{
+				HostPath:      decoyDir,
+				ContainerPath: sandbox.ContainerHome,
+				ReadOnly:      false,
+			})
+		} else {
+			decoyErr = plantErr
+		}
+	}
+	if decoyErr != nil {
+		// Not fatal: a scan without a decoy is a weaker scan, not a wrong one.
+		// It must be visible rather than silent, though, or the report would
+		// imply a leak check that never ran.
+		p.step("  could not furnish the sandbox decoy; credential-leak checks are disabled")
 	}
 
 	// Probing keeps the session open: a tool only reveals what it does when it
@@ -201,6 +264,18 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		tr.Add(ev)
 	}
 
+	// What the inventory itself says, independent of anything the server does.
+	// The metadata was already being collected and rendered; nothing read it
+	// until now, which left the highest-leverage MCP attack surface — a
+	// description the model obeys and the installer never reads — unexamined.
+	//
+	// Pure and inventory-only, so it needs no sandbox and cannot be affected by
+	// probe ordering. It runs here rather than after probing so that a poisoned
+	// description is reported even when probing is skipped entirely.
+	for _, ev := range toolscan.Analyze(tools) {
+		tr.Add(ev)
+	}
+
 	probeable := probe.StringInputToolCount(tools)
 	if probeable == 0 {
 		p.step(fmt.Sprintf("  %d tool(s) expose no adversarial string-input surface; no payloads sent",
@@ -216,7 +291,11 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// re-scan of the whole stderr buffer afterwards: it re-flagged the
 	// expected, blocked network noise from every API-backed tool as a critical
 	// finding, which turned a clean Notion server into "dangerous".
-	probeResult := probe.RunWithResults(ctx, sess, tools, 0)
+	var probeOpts []probe.Option
+	if den != nil {
+		probeOpts = append(probeOpts, probe.WithDecoy(den))
+	}
+	probeResult := probe.RunWithResults(ctx, sess, tools, 0, probeOpts...)
 	for _, ev := range probeResult.Events {
 		tr.Add(ev)
 	}

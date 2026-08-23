@@ -1,0 +1,127 @@
+name: Action
+
+# Proves action.yml works before anyone is told to depend on it.
+#
+# A GitHub Action is the one artifact whose bugs land in other people's
+# pipelines, and it cannot be unit tested — the only way to know it works is to
+# run it on a runner. So the action is exercised here in both directions: a
+# benign target that must pass, and a poisoned one that must fail. An action
+# that only ever gets tested on clean inputs will happily pass everything.
+
+on:
+  push:
+    branches: [main]
+    paths: ['action.yml', '.github/workflows/action-test.yml', 'testdata/action/**', 'internal/**', 'cmd/**']
+  pull_request:
+    paths: ['action.yml', '.github/workflows/action-test.yml', 'testdata/action/**', 'internal/**', 'cmd/**']
+
+permissions:
+  contents: read
+
+jobs:
+  # The action must pass a clean target without complaint.
+  benign:
+    name: Benign target exits 0
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Scan benign fixture
+        id: scan
+        uses: ./
+        with:
+          target: testdata/action/benign
+          version: source
+          # Nothing to upload to on a fork or a read-only token, and the upload
+          # path is not what this job is testing.
+          upload-sarif: 'false'
+
+      - name: Assert
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "exit-code=${{ steps.scan.outputs.exit-code }}"
+          echo "risk=${{ steps.scan.outputs.risk }}"
+          echo "completeness=${{ steps.scan.outputs.completeness }}"
+
+          [ "${{ steps.scan.outputs.exit-code }}" = "0" ] \
+            || { echo "expected exit 0"; exit 1; }
+          [ "${{ steps.scan.outputs.risk }}" = "no_findings" ] \
+            || { echo "expected risk=no_findings"; exit 1; }
+          [ "${{ steps.scan.outputs.completeness }}" = "complete" ] \
+            || { echo "expected completeness=complete"; exit 1; }
+          [ -f detonate.sarif ] || { echo "no SARIF written"; exit 1; }
+
+  # The important direction. A gate that cannot fail is not a gate.
+  poisoned:
+    name: Poisoned target fails the job
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Scan poisoned fixture
+        id: scan
+        continue-on-error: true
+        uses: ./
+        with:
+          target: testdata/action/poisoned
+          version: source
+          upload-sarif: 'false'
+
+      - name: Assert the job would have failed
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "outcome=${{ steps.scan.outcome }}"
+          echo "exit-code=${{ steps.scan.outputs.exit-code }}"
+          echo "risk=${{ steps.scan.outputs.risk }}"
+
+          [ "${{ steps.scan.outcome }}" = "failure" ] \
+            || { echo "the action did NOT fail on a poisoned target"; exit 1; }
+          [ "${{ steps.scan.outputs.exit-code }}" = "3" ] \
+            || { echo "expected detonate exit 3 (findings)"; exit 1; }
+          [ "${{ steps.scan.outputs.risk }}" = "dangerous" ] \
+            || { echo "expected risk=dangerous"; exit 1; }
+
+          # SARIF must exist even on a failing scan — findings are exactly what
+          # should reach the Security tab.
+          [ -f detonate.sarif ] || { echo "no SARIF written on a failing scan"; exit 1; }
+          grep -q '"detonateRisk"' detonate.sarif \
+            || { echo "SARIF is missing detonate run properties"; exit 1; }
+
+  # fail-on: never must report without failing, or "report-only" adoption is
+  # impossible for a team that wants to see findings before enforcing them.
+  report-only:
+    name: fail-on never reports without failing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Scan poisoned fixture without gating
+        id: scan
+        uses: ./
+        with:
+          target: testdata/action/poisoned
+          version: source
+          fail-on: never
+          upload-sarif: 'false'
+
+      - name: Assert
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "${{ steps.scan.outputs.exit-code }}" = "3" ] \
+            || { echo "expected detonate to still report exit 3"; exit 1; }
+          echo "reported findings without failing the job, as intended"

@@ -1,0 +1,245 @@
+name: 'Detonate — MCP server & Agent Skill test'
+description: >-
+  Test your MCP server or Agent Skill before you publish it. Runs the target in a
+  locked sandbox and reports what it actually did, with a CI-gateable exit code
+  and SARIF for the GitHub Security tab.
+author: 'm4vic'
+
+branding:
+  icon: 'shield'
+  color: 'orange'
+
+inputs:
+  target:
+    description: 'Path or git URL to scan.'
+    required: false
+    default: '.'
+
+  mode:
+    description: >-
+      "static" inspects without executing the target and always completes.
+      "dynamic" runs the target in a Docker sandbox and enumerates its real
+      tools — a fuller verdict, but it needs the server to actually start
+      (dependencies, env vars, config). Start with static; move to dynamic once
+      you have confirmed your server starts in CI.
+    required: false
+    default: 'static'
+
+  version:
+    description: >-
+      Detonate release to run, e.g. "v0.3.0-alpha.1", or "latest" to resolve the
+      newest release. Pin it for reproducible CI.
+
+      "source" builds from the checked-out repository instead of downloading a
+      release. That exists so this action can be tested against unreleased code
+      — including by detonate's own CI, which otherwise could only ever verify
+      the action against the previous release. Needs Go on the runner.
+    required: false
+    default: 'latest'
+
+  fail-on:
+    description: >-
+      When to fail the job. "findings" fails on exit 3. "incomplete" also fails
+      when required coverage was not reached (exit 4) — the strict setting.
+      "never" reports without failing. A scan that errors (exit 1) or is
+      misconfigured (exit 2) always fails, because neither produced a verdict.
+    required: false
+    default: 'findings'
+
+  sarif-file:
+    description: 'Where to write SARIF.'
+    required: false
+    default: 'detonate.sarif'
+
+  upload-sarif:
+    description: >-
+      Upload the SARIF to GitHub code scanning so findings appear in the
+      Security tab and inline on pull requests. Needs `security-events: write`.
+      Upload failure warns but never fails the job — the scan result is what
+      matters.
+    required: false
+    default: 'true'
+
+  args:
+    description: 'Extra flags passed through to detonate, e.g. "--path packages/server".'
+    required: false
+    default: ''
+
+outputs:
+  exit-code:
+    description: 'Detonate exit code: 0 clean, 1 error, 2 usage, 3 findings, 4 incomplete.'
+    value: ${{ steps.scan.outputs.exit-code }}
+  sarif-file:
+    description: 'Path to the SARIF file that was written.'
+    value: ${{ steps.scan.outputs.sarif-file }}
+  risk:
+    description: 'Reported risk, e.g. no_findings, suspicious, dangerous, not_assessed.'
+    value: ${{ steps.scan.outputs.risk }}
+  completeness:
+    description: 'Reported completeness: complete, partial, inconclusive, or failed.'
+    value: ${{ steps.scan.outputs.completeness }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install detonate
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        repo="m4vic/detonate"
+        version="$INPUT_VERSION"
+
+        if [ "$version" = "source" ]; then
+          echo "building detonate from the checked-out source"
+          go build -o "${RUNNER_TEMP}/detonate" ./cmd/detonate
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/detonate" --version
+          exit 0
+        fi
+
+        if [ "$version" = "latest" ]; then
+          # Body captured first, then parsed. Piping curl straight into
+          # `grep -m1` makes grep exit on the first match and close the pipe;
+          # curl then dies writing to it (exit 23) and `set -o pipefail` fails
+          # the whole step, so resolving "latest" broke every single time.
+          body=$(curl -sSfL "https://api.github.com/repos/${repo}/releases/latest")
+          version=$(echo "$body" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+          if [ -z "$version" ]; then
+            echo "::error::could not resolve the latest detonate release; pin \`version:\` instead"
+            exit 1
+          fi
+          echo "resolved latest release: ${version}"
+        fi
+
+        case "$(uname -m)" in
+          x86_64)          arch=amd64 ;;
+          aarch64|arm64)   arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture $(uname -m)"; exit 1 ;;
+        esac
+
+        # GoReleaser strips the leading v from the archive name.
+        bare="${version#v}"
+        asset="detonate_${bare}_linux_${arch}.tar.gz"
+        base="https://github.com/${repo}/releases/download/${version}"
+
+        tmp="$(mktemp -d)"
+        curl -sSfL -o "${tmp}/${asset}" "${base}/${asset}"
+        curl -sSfL -o "${tmp}/checksums.txt" "${base}/checksums.txt"
+
+        # Verify before extracting. A release artifact is fetched over the
+        # network into a job that then runs it; checking the published checksum
+        # is the cheapest guard against a corrupted or swapped download, and a
+        # tool that tells other people to verify their supply chain should not
+        # skip its own.
+        ( cd "${tmp}" && grep " ${asset}\$" checksums.txt | sha256sum -c - )
+
+        tar -xzf "${tmp}/${asset}" -C "${tmp}"
+        install -m 0755 "${tmp}/detonate" "${RUNNER_TEMP}/detonate"
+        echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+
+        "${RUNNER_TEMP}/detonate" --version
+
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_ARGS: ${{ inputs.args }}
+      run: |
+        set -uo pipefail
+
+        case "$INPUT_MODE" in
+          static|dynamic) ;;
+          *) echo "::error::mode must be \"static\" or \"dynamic\", got \"${INPUT_MODE}\""; exit 1 ;;
+        esac
+        case "$INPUT_FAIL_ON" in
+          findings|incomplete|never) ;;
+          *) echo "::error::fail-on must be findings, incomplete, or never"; exit 1 ;;
+        esac
+
+        strict=""
+        if [ "$INPUT_FAIL_ON" = "incomplete" ]; then
+          strict="--fail-incomplete"
+        fi
+
+        # Text to the log for a human, SARIF to a file for GitHub. Detonate
+        # computes the same exit code for every format.
+        set +e
+        detonate "$INPUT_MODE" "$INPUT_TARGET" \
+          --format sarif --out "$INPUT_SARIF_FILE" \
+          $strict $INPUT_ARGS
+        code=$?
+        set -e
+
+        echo "exit-code=${code}" >> "$GITHUB_OUTPUT"
+        echo "sarif-file=${INPUT_SARIF_FILE}" >> "$GITHUB_OUTPUT"
+
+        risk=""
+        completeness=""
+        if [ -f "$INPUT_SARIF_FILE" ]; then
+          risk=$(grep -o '"detonateRisk"[[:space:]]*:[[:space:]]*"[^"]*"' "$INPUT_SARIF_FILE" \
+                 | head -1 | cut -d'"' -f4 || true)
+          completeness=$(grep -o '"detonateCompleteness"[[:space:]]*:[[:space:]]*"[^"]*"' "$INPUT_SARIF_FILE" \
+                 | head -1 | cut -d'"' -f4 || true)
+        fi
+        echo "risk=${risk}" >> "$GITHUB_OUTPUT"
+        echo "completeness=${completeness}" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### Detonate"
+          echo
+          echo "| | |"
+          echo "|---|---|"
+          echo "| Target | \`${INPUT_TARGET}\` |"
+          echo "| Mode | ${INPUT_MODE} |"
+          echo "| Risk | ${risk:-unknown} |"
+          echo "| Completeness | ${completeness:-unknown} |"
+          echo "| Exit code | ${code} |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Never let a scan that reached no verdict look like a pass. This is the
+        # action's half of detonate's own rule that risk and completeness are
+        # independent: "nothing was found" and "almost nothing was checked" must
+        # not render the same in CI either.
+        if [ "$completeness" != "complete" ] && [ -n "$completeness" ]; then
+          echo "::warning::detonate completeness is '${completeness}', not 'complete' — this run did not fully assess the target. In static mode that usually means the target declares no tools statically; try 'mode: dynamic' for a real verdict, or 'fail-on: incomplete' to gate on it."
+        fi
+
+        # A report-only run annotates as a warning, not an error. Red errors on a
+        # green job train people to ignore red.
+        level="error"
+        if [ "$INPUT_FAIL_ON" = "never" ]; then level="warning"; fi
+
+        case "$code" in
+          0) echo "detonate: clean"; exit 0 ;;
+          3)
+            echo "::${level}::detonate found issues (exit 3, risk=${risk:-unknown})"
+            [ "$INPUT_FAIL_ON" = "never" ] && exit 0
+            exit 1 ;;
+          4)
+            echo "::${level}::detonate could not reach required coverage (exit 4)"
+            [ "$INPUT_FAIL_ON" = "never" ] && exit 0
+            exit 1 ;;
+          2)
+            echo "::error::detonate usage or environment error (exit 2) — check the action inputs"
+            exit 1 ;;
+          *)
+            echo "::error::detonate failed (exit ${code}) and produced no verdict"
+            exit 1 ;;
+        esac
+
+    - name: Upload SARIF
+      # Runs even when the scan failed the job: findings are exactly what should
+      # reach the Security tab.
+      if: ${{ always() && inputs.upload-sarif == 'true' && hashFiles(inputs.sarif-file) != '' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: detonate

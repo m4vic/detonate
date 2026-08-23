@@ -6,7 +6,7 @@ This document turns published MCP-security research into concrete detonate
 work. It layers onto the release trains in
 [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md); it does not replace them.
 Component-level work stays in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
-and invariants in [ARCHITECTURE.md](ARCHITECTURE.md).
+and invariants in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 Nothing here is shipped. Every item is a proposal with a stated gate.
 

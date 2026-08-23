@@ -31,18 +31,39 @@ const banner = `
  +----------------------------------------------------------------------------+
  |                                                                            |
  |   ___  ____ _____ ___  _   _    _  _____ _____                             |
- |  |  _ \| ____|_   _/ _ \| \ | |  / \|_   _| ____|                            |
- |  | | | |  _|   | || | | |  \| | / _ \ | | |  _|                              |
- |  | |_| | |___  | || |_| | |\  |/ ___ \| | | |___                             |
- |  |____/|_____| |_| \___/|_| \_/_/   \_\_| |_____|                            |
+ |  |  _ \| ____|_   _/ _ \| \ | |  / \|_   _| ____|                          |
+ |  | | | |  _|   | || | | |  \| | / _ \ | | |  _|                            |
+ |  | |_| | |___  | || |_| | |\  |/ ___ \| | | |___                           |
+ |  |____/|_____| |_| \___/|_| \_/_/   \_\_| |_____|                          |
  |                                                                            |
  |  Dynamic Sandbox for Untrusted AI Tools & MCP Servers |{{VERSION_LINE}}|
  +----------------------------------------------------------------------------+
 `
 
+// bannerVersionWidth is the space the banner leaves for a version string.
+//
+// Derived from the box, not chosen: the version line is 59 characters without
+// its placeholder, the rules are 79 wide, and the format contributes one
+// leading space. Change the box and this has to change with it, which is why
+// there is a test that renders the banner and checks every line matches.
+const bannerVersionWidth = 19
+
 func bannerText() string {
-	versionLine := fmt.Sprintf(" %-17s", Version)
-	return strings.Replace(banner, "{{VERSION_LINE}}", versionLine, 1)
+	// Sized to the box rather than to a guess.
+	//
+	// A tagged release is short ("v1.0.0"), but a build from an untagged commit
+	// carries a Go pseudo-version — v0.3.0-alpha.1.0.20260823072109-cdea562a6b57
+	// — which is longer than the field it was being formatted into and pushed
+	// the right border off the screen. A banner that only lines up on release
+	// builds is one nobody sees lined up while developing it.
+	const field = bannerVersionWidth
+
+	v := Version
+	if len(v) > field {
+		v = v[:field-1] + "…"
+	}
+	return strings.Replace(banner, "{{VERSION_LINE}}",
+		fmt.Sprintf(" %-*s", field, v), 1)
 }
 
 // entryPoints are the filenames an MCP server's entry point usually has,

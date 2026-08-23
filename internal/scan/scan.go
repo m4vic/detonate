@@ -14,6 +14,7 @@ package scan
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/m4vic/detonate/internal/assessment"
@@ -56,7 +57,27 @@ type Request struct {
 	MountDir string
 
 	Stages Stages
+
+	// Budget is the ceiling on the whole scan. Zero means DefaultBudget; a
+	// negative value disables the ceiling, which is for interactive debugging
+	// and should never be what CI runs.
+	Budget time.Duration
 }
+
+// DefaultBudget bounds a whole scan.
+//
+// Per-phase timeouts already existed in about twenty places, and none of them
+// bounded the total: a target that stalled just under every individual limit,
+// or a pipeline that looped between phases, could run until something else
+// killed it. In CI that is worse than a failure, because a job that hangs
+// blocks a queue and gets the tool removed rather than debugged.
+//
+// Fifteen minutes is well past the slowest observed real scan — dependency
+// acquisition plus probing on a fourteen-tool server runs in about thirty
+// seconds — while staying under the default job timeout on common CI runners,
+// so detonate reports the timeout itself instead of being killed and leaving no
+// verdict at all.
+const DefaultBudget = 15 * time.Minute
 
 // Report is everything one scan observed.
 //
@@ -143,10 +164,54 @@ func harnessError(phase, code string, retryable bool, err error) error {
 // failed inside it, so a caller can report which phase died without matching
 // on error strings.
 func Run(ctx context.Context, req Request, p Progress) (*Report, error) {
+	budget := req.Budget
+	if budget == 0 {
+		budget = DefaultBudget
+	}
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+
+	report, err := runKind(ctx, req, p)
+
+	// A scan killed by its own ceiling must say so, and must not look like a
+	// pass. Checked after the run rather than instead of it: the pipeline may
+	// have produced real evidence before the deadline, and throwing that away
+	// would lose findings that were already proven.
+	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return withBudgetExceeded(report, req, budget), nil
+	}
+	return report, err
+}
+
+func runKind(ctx context.Context, req Request, p Progress) (*Report, error) {
 	if req.Target.Kind == target.KindMCP {
 		return runMCP(ctx, req, p)
 	}
 	return runSkill(ctx, req, p)
+}
+
+// withBudgetExceeded records the ceiling as a failed required scenario, so
+// completeness collapses and no exit path can report success.
+func withBudgetExceeded(report *Report, req Request, budget time.Duration) *Report {
+	if report == nil {
+		report = &Report{Reference: req.Target.Reference}
+	}
+	reason := "scan exceeded its total budget of " + budget.String()
+
+	report.Scenarios = append(report.Scenarios, assessment.ScenarioResult{
+		ID:       "pipeline.budget",
+		Required: true,
+		Outcome:  assessment.OutcomeTimeout,
+		Reason:   reason,
+	})
+	report.Failures = append(report.Failures, Failure{
+		Phase: "budget", Code: "scan_budget_exceeded",
+		Message: reason, Retryable: true,
+	})
+	return report
 }
 
 // newTrace starts an evidence record for a target. Elapsed times in every

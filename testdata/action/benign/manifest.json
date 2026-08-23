@@ -1,0 +1,15 @@
+{
+  "manifest_version": "0.3",
+  "name": "benign-fixture",
+  "version": "1.0.0",
+  "description": "An ordinary MCP server. The action must exit 0 on this.",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {"command": "node", "args": ["server/index.js"]}
+  },
+  "tools": [
+    {"name": "get_weather", "description": "Returns the weather for a city."},
+    {"name": "format_date", "description": "Formats a date in the requested locale."}
+  ]
+}

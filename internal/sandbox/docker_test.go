@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/m4vic/detonate/internal/dockertest"
 )
 
 // Integration tests against a real Docker daemon.
@@ -20,16 +22,11 @@ import (
 // Skipped automatically when Docker is unavailable so the suite still runs on
 // a machine without it.
 
+// requireDocker delegates to the shared gate so that this package cannot
+// drift from the others on what "Docker is available" means.
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath(dockerBinary); err != nil {
-		t.Skip("docker not on PATH")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := exec.CommandContext(ctx, dockerBinary, "info").Run(); err != nil {
-		t.Skip("docker daemon not running")
-	}
+	dockertest.Require(t)
 }
 
 // runInSandbox starts a container running a shell command and returns its

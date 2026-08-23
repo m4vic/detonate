@@ -188,7 +188,7 @@ Run before every tag, at every version:
 - [ ] `go test -count=1 -race ./...` green
 - [ ] Clean-archive build on all three platforms
 - [ ] No invariant in [ROADMAP.md](ROADMAP.md) weakened
-- [ ] [CHANGELOG.md](../CHANGELOG.md) updated, breaking changes named
+- [ ] [CHANGELOG.md](../../CHANGELOG.md) updated, breaking changes named
 - [ ] **A version tag matches its section's checkboxes above.** Added
       2026-08-12 after `v0.2.0` was cut with none of this section's canary
       items checked — the tag stopped meaning "this milestone shipped" and
