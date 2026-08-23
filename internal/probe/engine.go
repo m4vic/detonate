@@ -345,6 +345,42 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 				probeEvents := pr.Evaluate(ctx, tool.Name, p, result, err, before, after, baseline)
 				events = append(events, probeEvents...)
 
+				// The target is gone. Evaluate above already recorded the crash
+				// that killed it, which is the real finding; everything after
+				// this point would be the same dead socket reported once per
+				// remaining tool.
+				if isSessionDead(err) {
+					if hasFinding(events[eventStart:]) {
+						scenario.Outcome = assessment.OutcomeFinding
+						scenario.Reason = "the target process died under this payload"
+					} else {
+						scenario.Outcome = assessment.OutcomeTargetError
+						scenario.Reason = "the target process died under this payload"
+					}
+					scenarios = append(scenarios, scenario)
+					events = append(events, trace.Event{
+						Kind: trace.KindProtocol, Severity: trace.SeverityInfo, At: time.Now(),
+						Summary: fmt.Sprintf(
+							"the target stopped responding after %q; %d tool(s) were never probed",
+							tool.Name, len(tools)-i-1),
+						During: "probe", Source: "probe-engine",
+						Detail: map[string]any{"evidence": clip(err.Error(), 200)},
+					})
+					for _, pending := range tools[i+1:] {
+						scenarios = append(scenarios, assessment.ScenarioResult{
+							ID:       scenariodef.MCPToolID(pending.Name),
+							Required: true,
+							Outcome:  assessment.OutcomeSkipped,
+							Reason:   "the target process died before this tool was probed",
+						})
+					}
+					if ev, sc, ok := decoySummary(&cfg, leaked); ok {
+						events = append(events, ev)
+						scenarios = append(scenarios, sc)
+					}
+					return Result{Events: events, Scenarios: scenarios}
+				}
+
 				if err == nil {
 					events = append(events, leakEvents(&cfg, leaked, tool.Name,
 						"probe:"+string(p.Category), clip(p.Value, 80),
@@ -561,6 +597,39 @@ func isSandboxDenied(text string) bool {
 			if strings.Contains(s, w) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isSessionDead reports whether the MCP transport itself is gone, as opposed to
+// one call failing.
+//
+// This is the difference between a finding and 790 of them. Measured on a real
+// registry server with 682 tools: one payload killed the server process, and
+// every subsequent call — across every remaining tool — returned
+// "connection closed: calling \"tools/call\": client is closing: EOF". Each was
+// recorded as that tool crashing under hostile input, so a single real event
+// became ~790 findings attributed to tools that were never exercised at all.
+//
+// A report like that is worse than no report. Anyone who points a scanner at
+// their server and receives 949 findings, nearly all of them the same dead
+// socket, uninstalls the scanner — and they are right to.
+//
+// The first crash is kept: a payload that kills the target IS the result. What
+// stops is pretending the corpse tells us anything about the tools we never
+// reached.
+func isSessionDead(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"client is closing", "connection closed", "use of closed network connection",
+		"broken pipe", "file already closed", "server closed", "eof",
+	} {
+		if strings.Contains(s, sig) {
+			return true
 		}
 	}
 	return false

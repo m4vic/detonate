@@ -1,10 +1,15 @@
 package probe
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/toolinfo"
 )
 
 // The exact schema that exposed the hole: the official memory server's
@@ -230,5 +235,59 @@ func TestSandboxDenialIsNotTheTargetsFault(t *testing.T) {
 		if isSandboxDenied(s) {
 			t.Errorf("isSandboxDenied(%q) = true, want false", s)
 		}
+	}
+}
+
+// One dead socket is one event, not one finding per remaining tool.
+//
+// Measured on a real registry server with 682 tools: a payload killed the
+// server process, and every subsequent call returned "client is closing: EOF".
+// Each was recorded as that tool crashing under hostile input, turning one real
+// event into ~790 findings against tools that were never exercised.
+func TestADeadSessionStopsTheRun(t *testing.T) {
+	// The third call kills the server; nothing after it can succeed.
+	c := &fakeCaller{
+		failAfter: 3,
+		failWith:  errors.New(`connection closed: calling "tools/call": client is closing: EOF`),
+	}
+
+	tools := []toolinfo.ToolInfo{
+		{Name: "a", InputSchema: json.RawMessage(`{"properties":{"p":{"type":"string"}}}`)},
+		{Name: "b", InputSchema: json.RawMessage(`{"properties":{"p":{"type":"string"}}}`)},
+		{Name: "c", InputSchema: json.RawMessage(`{"properties":{"p":{"type":"string"}}}`)},
+	}
+
+	result := RunWithResults(context.Background(), c, tools, 0)
+
+	var crashes int
+	for _, ev := range result.Events {
+		if strings.Contains(ev.Summary, "crashed on") {
+			crashes++
+		}
+	}
+	if crashes > 1 {
+		t.Errorf("%d crash findings from one dead session; the corpse is not evidence "+
+			"about tools that were never reached", crashes)
+	}
+
+	var skipped int
+	for _, sc := range result.Scenarios {
+		if sc.Outcome == assessment.OutcomeSkipped {
+			skipped++
+		}
+	}
+	if skipped == 0 {
+		t.Error("no tool was reported as unreached, so the report claims coverage it does not have")
+	}
+
+	var explained bool
+	for _, ev := range result.Events {
+		if strings.Contains(ev.Summary, "stopped responding") {
+			explained = true
+		}
+	}
+	if !explained {
+		t.Error("the report does not say the target died, so a reader cannot tell " +
+			"an unreached tool from a clean one")
 	}
 }

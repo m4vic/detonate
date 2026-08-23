@@ -21,15 +21,22 @@ type fakeCaller struct {
 	result  func(tool string, args map[string]any) toolcall.Result
 	// fail, when set, returns an error for every call — the shape of a tool
 	// that cannot run in the sandbox, e.g. one that needs network egress.
-	fail   error
-	stderr string
-	calls  []string
+	fail error
+	// failAfter, when set, makes every call from the Nth onward return
+	// failWith. A server that dies mid-scan does not politely resume.
+	failAfter int
+	failWith  error
+	stderr    string
+	calls     []string
 }
 
 func (f *fakeCaller) Call(_ context.Context, tool string, args map[string]any) (toolcall.Result, error) {
 	f.calls = append(f.calls, tool)
 	if f.fail != nil {
 		return toolcall.Result{}, f.fail
+	}
+	if f.failWith != nil && len(f.calls) >= f.failAfter {
+		return toolcall.Result{}, f.failWith
 	}
 	if f.result != nil {
 		return f.result(tool, args), nil
