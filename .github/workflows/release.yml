@@ -3,7 +3,12 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Full versions only. The floating major tag (v0) is moved onto each
+      # release so `uses: m4vic/detonate@v0` keeps working, and it is pushed as
+      # a tag like any other — under 'v*' that second push would run GoReleaser
+      # again and publish a duplicate release named "v0".
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 permissions:
   contents: write
