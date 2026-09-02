@@ -15,6 +15,22 @@ import (
 // Outcome is the terminal state of one test scenario.
 type Outcome string
 
+// The outcomes are grouped by what they say about coverage, which is what
+// completeness below scores them on:
+//
+//   - Pass and Finding are the only conclusive outcomes. Reaching either one
+//     means the target was actually examined, which is also the precondition
+//     for risk being anything other than not_assessed.
+//   - Skipped and Unsupported never ran. They shrink coverage without casting
+//     doubt on whatever else did run.
+//   - Timeout and TargetError started and reached no conclusion, so the
+//     coverage question itself is left unanswered rather than merely narrowed.
+//   - HarnessError and TeardownError are detonate's own failures. They are
+//     never attributable to the target, and they invalidate the run instead of
+//     scoring against it.
+//
+// Adding an outcome means deciding which group it joins in completeness, whose
+// default case rejects an unrecognized value rather than guessing at one.
 const (
 	OutcomePass          Outcome = "pass"
 	OutcomeFinding       Outcome = "finding"
@@ -37,6 +53,15 @@ type ScenarioResult struct {
 // Risk is the security result derived from observed evidence.
 type Risk string
 
+// RiskNotAssessed is the only value here that is not a statement about the
+// target. It means no scenario ever reached a conclusion, so reporting "no
+// findings" would be describing the scanner's silence rather than the target's
+// behavior. Keeping it distinct from RiskNoFindings is what stops an
+// unexamined target from reading as a clean one.
+//
+// Which of these values may end in a zero exit is decided in exactly one
+// place, exitForSummary in internal/cli. It is not restated here, so the two
+// files cannot drift apart.
 const (
 	RiskNotAssessed Risk = "not_assessed"
 	RiskNoFindings  Risk = "no_findings"
@@ -47,6 +72,15 @@ const (
 // Completeness says whether the selected scenario set actually ran.
 type Completeness string
 
+// The values are ordered by how much doubt they cast on the accompanying risk.
+// Complete and partial both mean something was genuinely examined and the
+// result describes the target. Inconclusive means required scenarios began
+// without finishing, so no coverage claim can be made either way. Failed means
+// detonate itself broke, which says nothing about the target at all.
+//
+// Nothing here is a security verdict: a target can be complete and dangerous,
+// or inconclusive and harmless. Consumers are required to read this alongside
+// Risk, never instead of it.
 const (
 	CompletenessComplete     Completeness = "complete"
 	CompletenessPartial      Completeness = "partial"

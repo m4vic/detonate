@@ -21,6 +21,10 @@ import (
 	"path/filepath"
 )
 
+// Kind is which of the two executable input shapes a Target holds. It is what
+// lets the pipeline stay input-agnostic: stages branch on it only at the few
+// points where an MCP server and a skill directory genuinely differ, and a new
+// executable kind is added here rather than throughout the pipeline.
 type Kind string
 
 const (

@@ -1,3 +1,16 @@
+// Package monitor turns what a sandboxed target wrote to stderr into evidence.
+//
+// It is the cheapest of detonate's observation tiers and the only one needing
+// no instrumentation of the target: the sandbox denies an action, the target's
+// runtime complains in text, and that complaint is the record of what it tried
+// to do. Events produced here carry Source "container-stderr", so a reader can
+// tell how strong the observation behind a finding is.
+//
+// The contract a caller must respect is that silence is not safety. A target
+// that swallows its own exceptions writes nothing, so an empty result means
+// "this tier saw nothing" and never "the target behaved well". Only a tier
+// that observes syscalls rather than error text can support the stronger
+// claim.
 package monitor
 
 import (
