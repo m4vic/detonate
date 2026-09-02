@@ -776,6 +776,22 @@ func (a *App) exitForSummary(summary assessment.Summary) int {
 	if summary.Risk == assessment.RiskNotAssessed {
 		return exitIncomplete
 	}
+	// Inconclusive coverage is the same failure wearing a different hat.
+	//
+	// Risk goes to no_findings as soon as any one scenario concludes, so a scan
+	// where two tools pass and the third times out — or kills the target,
+	// leaving the rest skipped — carries a clean risk beside coverage that
+	// could not be established. That is exactly the crash case the v0.4.1
+	// corpus run produced, and it was exiting 0.
+	//
+	// Partial stays clean and that distinction is the whole rule: partial means
+	// the coverage question was answered and the answer was "some of it",
+	// inconclusive means required scenarios started and never finished, so
+	// there is no answer to report. A verdict nobody could reach must not be
+	// delivered as a pass.
+	if summary.Completeness == assessment.CompletenessInconclusive {
+		return exitIncomplete
+	}
 	if a.failIncomplete && summary.Completeness != assessment.CompletenessComplete {
 		return exitIncomplete
 	}
