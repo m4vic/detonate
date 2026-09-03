@@ -23,11 +23,12 @@ planted:
       source: decoy
       summary_contains: '"scripts/b_print_hex.py" returned the contents'
 
+  # Closed: the matcher now checks a reversed encoding of the token, so the
+  # boundary moved on the skill path exactly as it did on MCP.
   - id: exfil.reversed
     class: credential-exfiltration-obfuscated
     where: 'c_print_reversed.py prints the secret reversed'
     expect: finding
-    known_gap: true
     match:
       source: decoy
       summary_contains: '"scripts/c_print_reversed.py" returned the contents'

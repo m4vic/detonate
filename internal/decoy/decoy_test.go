@@ -92,6 +92,11 @@ func TestMatchFindsLeakedTokensInEveryEncoding(t *testing.T) {
 		{"base64", "data: " + base64.StdEncoding.EncodeToString([]byte(tok)), "base64"},
 		{"base64 unpadded", "data: " + base64.RawStdEncoding.EncodeToString([]byte(tok)), "base64-raw"},
 		{"embedded in json", `{"result":"` + tok + `"}`, "plain"},
+		{"reversed", "leaked: " + reverseString(tok), "reversed"},
+		{"rot13", "leaked: " + rot13(tok), "rot13"},
+		// A space between every character, recovered by the whitespace-stripped
+		// view, so it reads back as the plain token.
+		{"space separated", "l e a k: " + strings.Join(strings.Split(tok, ""), " "), "plain"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hits := env.Match(tc.response)

@@ -145,7 +145,13 @@ var credentialAction = regexp.MustCompile(`(?i)\b(read|cat|open|load|send|upload
 var textSignatures = []textSignature{
 	// --- Injection: instructions aimed at subverting the agent ---
 	{
-		pattern: regexp.MustCompile(`(?i)[^\n]*\b(ignore|disregard|forget)\s+(all\s+)?(previous|prior|earlier|above)\s+(instructions?|prompts?|rules?|context)[^\n]*`),
+		// Kept in lockstep with toolscan's instruction-override pattern: a
+		// skill body and a tool description are the same attack surface, and an
+		// override phrasing caught in one must be caught in the other. The two
+		// lists had drifted — this one lacked the verb "override" among others —
+		// so the same sentence was flagged as an MCP description and missed as a
+		// skill instruction.
+		pattern: regexp.MustCompile(`(?i)[^\n]*\b(ignore|disregard|forget|override)\s+(all\s+|any\s+)?(previous|prior|earlier|above|preceding)\s+(instructions?|prompts?|rules?|context|directions?)[^\n]*`),
 		kind:    trace.KindProtocol, severity: trace.SeverityCritical,
 		summary: "instructions attempt to override the agent's prior context",
 	},
