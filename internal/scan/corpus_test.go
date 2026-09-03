@@ -155,37 +155,89 @@ func assertScore(t *testing.T, gt groundTruth, detected, missed []string) {
 	}
 }
 
-func TestCorpusEvilMCP(t *testing.T) {
+// TestCorpus discovers every fixture under testdata/corpus, runs the real
+// pipeline over it, and scores detected-against-planted.
+//
+// Discovery is by directory, not a hardcoded list, so growing the corpus is
+// adding a fixture folder with a ground-truth.yaml — no test code changes. That
+// is the whole workflow: each new evasion someone can think of becomes a
+// fixture, the ones detonate misses land as recorded gaps, and closing a gap is
+// a detector change that flips the fixture from red to green.
+func TestCorpus(t *testing.T) {
 	dockertest.Require(t)
 
-	gt, dir := loadGroundTruth(t, "evil-mcp")
-	report, err := Run(context.Background(), Request{
-		Target:   target.Target{Kind: target.KindMCP, Reference: gt.Command},
-		MountDir: dir,
-		Stages:   Stages{Probe: true},
-	}, nil)
-	if err != nil {
-		t.Fatalf("scan: %v", err)
+	fixtures := discoverFixtures(t)
+	if len(fixtures) == 0 {
+		t.Fatal("no corpus fixtures discovered")
 	}
 
-	detected, missed := scoreCorpus(t, gt, report)
-	assertScore(t, gt, detected, missed)
+	for _, name := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			gt, dir := loadGroundTruth(t, name)
+			report := runFixture(t, gt, dir)
+			detected, missed := scoreCorpus(t, gt, report)
+			assertScore(t, gt, detected, missed)
+		})
+	}
 }
 
-func TestCorpusEvilSkill(t *testing.T) {
-	dockertest.Require(t)
+// discoverFixtures returns the corpus fixture directory names, sorted.
+func discoverFixtures(t *testing.T) []string {
+	t.Helper()
 
-	gt, dir := loadGroundTruth(t, "evil-skill")
-	report, err := Run(context.Background(), Request{
-		Target: target.Target{Kind: target.KindSkill, Reference: dir},
-		Stages: Stages{RunScripts: true},
-	}, nil)
+	root, err := filepath.Abs(filepath.Join("..", "..", "testdata", "corpus"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, e.Name(), "ground-truth.yaml")); err == nil {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// runFixture runs one fixture through the pipeline according to its kind.
+func runFixture(t *testing.T, gt groundTruth, dir string) *Report {
+	t.Helper()
+
+	var req Request
+	switch gt.Kind {
+	case "mcp":
+		if gt.Command == "" {
+			t.Fatalf("%s: mcp fixture declares no command", gt.Fixture)
+		}
+		req = Request{
+			Target:   target.Target{Kind: target.KindMCP, Reference: gt.Command},
+			MountDir: dir,
+			Stages:   Stages{Probe: true},
+		}
+	case "skill":
+		req = Request{
+			Target: target.Target{Kind: target.KindSkill, Reference: dir},
+			Stages: Stages{RunScripts: true},
+		}
+	default:
+		t.Fatalf("%s: unknown kind %q", gt.Fixture, gt.Kind)
+	}
+
+	report, err := Run(context.Background(), req, nil)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-
-	detected, missed := scoreCorpus(t, gt, report)
-	assertScore(t, gt, detected, missed)
+	return report
 }
 
 // The corpus is only meaningful in both directions: a scanner that flags
