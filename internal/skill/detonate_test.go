@@ -15,7 +15,7 @@ import (
 func TestDetonateScriptsWithResultsRecordsUnsupportedInterpreter(t *testing.T) {
 	sk := Skill{Scripts: []string{"scripts/helper.rb"}}
 	result := DetonateScriptsWithResults(
-		context.Background(), t.TempDir(), sk, sandbox.DefaultPolicy(),
+		context.Background(), t.TempDir(), sk, sandbox.DefaultPolicy(), nil,
 	)
 
 	if len(result.Scenarios) != 1 {
@@ -48,7 +48,7 @@ func TestDetonateScriptsWithResultsRecordsNonZeroExit(t *testing.T) {
 		dockertest.Unavailable(t, "sandbox image unavailable: %v", err)
 	}
 	result := DetonateScriptsWithResults(
-		ctx, dir, Skill{Scripts: []string{script}}, policy,
+		ctx, dir, Skill{Scripts: []string{script}}, policy, nil,
 	)
 	if got := result.Scenarios[0].Outcome; got != assessment.OutcomeTargetError {
 		t.Fatalf("outcome = %q, want target_error (%+v)", got, result.Scenarios[0])

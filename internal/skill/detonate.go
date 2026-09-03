@@ -1,13 +1,17 @@
 package skill
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/decoy"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/sandbox"
 	scenariodef "github.com/m4vic/detonate/internal/scenario"
@@ -28,8 +32,12 @@ import (
 // costs a container per script but keeps attribution exact, which is the whole
 // value of the result — "this skill did something" is far less useful than
 // "extract.py tried to resolve a hostname".
-func DetonateScripts(ctx context.Context, dir string, sk Skill, policy sandbox.Policy) []trace.Event {
-	return DetonateScriptsWithResults(ctx, dir, sk, policy).Events
+//
+// den is the decoy furnished into every script's home, if the caller planted
+// one; nil disables the credential-leak check entirely rather than checking
+// against nothing.
+func DetonateScripts(ctx context.Context, dir string, sk Skill, policy sandbox.Policy, den *decoy.Environment) []trace.Event {
+	return DetonateScriptsWithResults(ctx, dir, sk, policy, den).Events
 }
 
 // DetonationResult preserves both the evidence and whether each bundled
@@ -47,9 +55,15 @@ func DetonateScriptsWithResults(
 	dir string,
 	sk Skill,
 	policy sandbox.Policy,
+	den *decoy.Environment,
 ) DetonationResult {
 	var events []trace.Event
 	var scenarios []assessment.ScenarioResult
+
+	// Keyed "script|token" so the same secret returned by two scripts is
+	// still counted once per script, matching how the MCP probe path keys
+	// leaks per tool.
+	leaked := map[string]bool{}
 
 	for _, script := range sk.Scripts {
 		scenario := assessment.ScenarioResult{
@@ -67,12 +81,18 @@ func DetonateScriptsWithResults(
 			scenarios = append(scenarios, scenario)
 			continue
 		}
-		scriptEvents, outcome, reason := runScriptWithOutcome(ctx, dir, script, cmd, policy)
+		scriptEvents, outcome, reason := runScriptWithOutcome(ctx, dir, script, cmd, policy, den, leaked)
 		events = append(events, scriptEvents...)
 		scenario.Outcome = outcome
 		scenario.Reason = reason
 		scenarios = append(scenarios, scenario)
 	}
+
+	if ev, sc, ok := decoySummary(den, leaked); ok {
+		events = append(events, ev)
+		scenarios = append(scenarios, sc)
+	}
+
 	return DetonationResult{Events: events, Scenarios: scenarios}
 }
 
@@ -81,8 +101,8 @@ func DetonateScriptsWithResults(
 // or doing something it was not asked to do, and both are results.
 const scriptTimeout = 30 * time.Second
 
-func runScript(ctx context.Context, dir, script string, argv []string, policy sandbox.Policy) []trace.Event {
-	events, _, _ := runScriptWithOutcome(ctx, dir, script, argv, policy)
+func runScript(ctx context.Context, dir, script string, argv []string, policy sandbox.Policy, den *decoy.Environment) []trace.Event {
+	events, _, _ := runScriptWithOutcome(ctx, dir, script, argv, policy, den, map[string]bool{})
 	return events
 }
 
@@ -91,6 +111,8 @@ func runScriptWithOutcome(
 	dir, script string,
 	argv []string,
 	policy sandbox.Policy,
+	den *decoy.Environment,
+	leaked map[string]bool,
 ) ([]trace.Event, assessment.Outcome, string) {
 	p := policy
 	p.Timeout = scriptTimeout
@@ -106,6 +128,16 @@ func runScriptWithOutcome(
 		// the evidence disagree with the artifact on disk.
 		ReadOnly: true,
 	}}
+	if den != nil {
+		// Same mount point the MCP path uses: it replaces the empty tmpfs
+		// home, so a script that reads ~/.ssh/id_rsa finds the planted decoy
+		// instead of nothing.
+		mounts = append(mounts, sandbox.Mount{
+			HostPath:      den.HostDir,
+			ContainerPath: den.ContainerHome,
+			ReadOnly:      false,
+		})
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, scriptTimeout+30*time.Second)
 	defer cancel()
@@ -119,10 +151,13 @@ func runScriptWithOutcome(
 			Detail: map[string]any{"evidence": err.Error()},
 		}}, assessment.OutcomeTargetError, err.Error()
 	}
-	// Drain stdout so the script is not blocked writing into a full pipe, and
-	// wait for it to finish or hit its budget.
+	// Drain stdout into a buffer instead of discarding it: a script that
+	// returns a planted secret on stdout (its normal "result" channel, unlike
+	// an MCP tool's structured response) has to be caught the same way a tool
+	// response is.
+	var stdout bytes.Buffer
 	done := make(chan struct{})
-	go func() { _, _ = io.ReadAll(c.Stdout()); close(done) }()
+	go func() { _, _ = io.Copy(&stdout, c.Stdout()); close(done) }()
 	timedOut := false
 	select {
 	case <-done:
@@ -135,10 +170,18 @@ func runScriptWithOutcome(
 		exitErr = c.ExitError()
 	}
 	during := "skill-detonation:" + script
-	events := monitor.Analyze(c.Stderr(), during)
+	stderr := c.Stderr()
 	if err := c.Close(); err != nil {
-		return events, assessment.OutcomeTeardownError, err.Error()
+		return monitor.Analyze(stderr, during), assessment.OutcomeTeardownError, err.Error()
 	}
+	// Close tears the container down, which closes the stdout pipe and lets
+	// the drain goroutine above finish even when it timed out. Waiting here,
+	// rather than reading the buffer immediately, is what makes that read
+	// race-free.
+	<-done
+
+	events := monitor.Analyze(stderr, during)
+	events = append(events, decoyLeakEvents(den, leaked, script, stdout.String()+stderr)...)
 
 	// A script that merely EXISTS and runs is worth noting even when it
 	// misbehaves in no detectable way, because a reader deciding whether to
@@ -163,6 +206,114 @@ func runScriptWithOutcome(
 		}
 	}
 	return events, assessment.OutcomePass, ""
+}
+
+// decoyLeakEvents reports any planted secret found in a script's combined
+// stdout and stderr, in the same shape probe's decoy check uses for MCP tool
+// responses — critical severity, one event per token, keyed so the same
+// secret is not reported twice for the same script.
+func decoyLeakEvents(den *decoy.Environment, seen map[string]bool, script, output string) []trace.Event {
+	if den == nil || output == "" {
+		return nil
+	}
+
+	var events []trace.Event
+	for _, hit := range den.Match(output) {
+		key := script + "|" + hit.Token.Value
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		events = append(events, trace.Event{
+			Kind: trace.KindFile, Severity: trace.SeverityCritical, At: time.Now(),
+			Summary: fmt.Sprintf("bundled script %q returned the contents of %s", script, hit.Token.Path),
+			During:  "skill-detonation:" + script, Source: "decoy",
+			Detail: map[string]any{
+				"script": script,
+				"secret": string(hit.Token.Kind),
+				"path":   hit.Token.Path,
+				// The renderers print "evidence", so the nonce has to live
+				// there to be seen. A finding whose proof is buried in a field
+				// nobody displays is a finding the reader has to take on trust,
+				// which is the opposite of the point.
+				"evidence": fmt.Sprintf("planted secret %s returned %s (nonce %s)",
+					hit.Token.Path, encodingPhrase(hit.Encoding), hit.Token.Value),
+				"encoding": hit.Encoding,
+				"nonce":    hit.Token.Value,
+			},
+		})
+	}
+	return events
+}
+
+// decoySummary states what the credential check actually proved, mirroring
+// probe's decoySummary for MCP tools. It always runs once per skill, not per
+// script, so a skill with ten clean scripts and one thief reports exactly one
+// coverage line rather than ten.
+func decoySummary(den *decoy.Environment, leaked map[string]bool) (trace.Event, assessment.ScenarioResult, bool) {
+	if den == nil || len(den.Tokens) == 0 {
+		return trace.Event{}, assessment.ScenarioResult{}, false
+	}
+
+	seen := map[string]bool{}
+	for key := range leaked {
+		if i := strings.LastIndex(key, "|"); i >= 0 {
+			seen[key[i+1:]] = true
+		}
+	}
+
+	planted := len(den.Tokens)
+	untouched := den.Untouched(seen)
+	returned := planted - len(untouched)
+
+	kinds := make([]string, 0, planted)
+	for _, t := range den.Tokens {
+		kinds = append(kinds, string(t.Kind))
+	}
+	sort.Strings(kinds)
+
+	summary := fmt.Sprintf(
+		"planted %d credential decoys in the sandbox; none were returned by any bundled script", planted)
+	outcome := assessment.OutcomePass
+	if returned > 0 {
+		verb := "were"
+		if returned == 1 {
+			verb = "was"
+		}
+		summary = fmt.Sprintf(
+			"planted %d credential decoys in the sandbox; %d %s returned by a bundled script",
+			planted, returned, verb)
+		outcome = assessment.OutcomeFinding
+	}
+
+	return trace.Event{
+		Kind: trace.KindFile, Severity: trace.SeverityInfo, At: time.Now(),
+		Summary: summary, During: "skill-detonation", Source: "decoy",
+		Detail: map[string]any{
+			"planted":  planted,
+			"returned": returned,
+			"secrets":  strings.Join(kinds, ", "),
+		},
+	}, assessment.ScenarioResult{
+		ID:       "decoy.credential-exfiltration",
+		Required: true,
+		Outcome:  outcome,
+	}, true
+}
+
+// encodingPhrase renders how a secret came back, for the evidence line. A
+// secret returned base64-encoded was transformed on the way out, which is
+// harder to explain away than one returned verbatim.
+func encodingPhrase(encoding string) string {
+	switch encoding {
+	case "plain":
+		return "verbatim"
+	case "hex":
+		return "hex-encoded"
+	default:
+		return encoding + "-encoded"
+	}
 }
 
 // interpreterFor maps a script to the command that runs it inside the sandbox.
