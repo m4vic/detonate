@@ -3,8 +3,10 @@ package scan
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/decoy"
 	"github.com/m4vic/detonate/internal/sandbox"
 	"github.com/m4vic/detonate/internal/scenario"
 	"github.com/m4vic/detonate/internal/skill"
@@ -55,7 +57,28 @@ func runSkill(ctx context.Context, req Request, p Progress) (*Report, error) {
 	// indistinguishable from one that formats a table.
 	if req.Stages.RunScripts && len(sk.Scripts) > 0 {
 		p.step(fmt.Sprintf("  running %d bundled script(s) in the sandbox...", len(sk.Scripts)))
-		detonation := skill.DetonateScriptsWithResults(ctx, dir, sk, sandbox.DefaultPolicy())
+
+		// Furnish the sandbox before any script runs, same reasoning as the
+		// MCP path: an empty home cannot show a script reading things it
+		// should not, and the decoy is writable so a script that writes
+		// under ~ still behaves normally. Deleted with the scan.
+		var den *decoy.Environment
+		decoyDir, decoyErr := os.MkdirTemp("", "detonate-decoy-")
+		if decoyErr == nil {
+			defer os.RemoveAll(decoyDir)
+			if planted, plantErr := decoy.Plant(decoyDir, sandbox.ContainerHome); plantErr == nil {
+				den = planted
+			} else {
+				decoyErr = plantErr
+			}
+		}
+		if decoyErr != nil {
+			// Not fatal: a scan without a decoy is a weaker scan, not a
+			// wrong one, but it must be visible rather than silent.
+			p.step("  could not furnish the sandbox decoy; credential-leak checks are disabled")
+		}
+
+		detonation := skill.DetonateScriptsWithResults(ctx, dir, sk, sandbox.DefaultPolicy(), den)
 		for _, ev := range detonation.Events {
 			tr.Add(ev)
 		}
