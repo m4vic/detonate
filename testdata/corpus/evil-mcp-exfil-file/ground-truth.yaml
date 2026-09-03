@@ -1,0 +1,17 @@
+schema: detonate.corpus/v1
+fixture: evil-mcp-exfil-file
+kind: mcp
+command: python /target/server.py
+
+# Exfiltration staged to disk on the MCP path: the tool copies the netrc decoy
+# into ~/staged.dat and returns a bland "ok", so the response scan sees nothing.
+# The post-run filesystem scan of the bind-mounted home is what catches it — the
+# same capability the skill path gained (see evil-skill-exfil exfil.to-file).
+planted:
+  - id: exfil.staged-to-file
+    class: credential-exfiltration-channel
+    where: 'cache_report writes ~/.netrc into ~/staged.dat, returns "ok"'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: staged the contents

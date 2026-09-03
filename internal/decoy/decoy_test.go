@@ -132,6 +132,53 @@ func TestMatchIsSilentOnOrdinaryOutput(t *testing.T) {
 	}
 }
 
+// Exfiltration staged to disk: a target that copies a secret into a new file
+// leaks nothing on stdout, so only a scan of the home catches it. FileLeaks
+// must find the copy, name where it landed, and not mistake the decoys (which
+// hold their own tokens) for leaks.
+func TestFileLeaksFindsSecretsStagedToDisk(t *testing.T) {
+	env := plant(t)
+	tok := env.Tokens[0].Value
+
+	// A staged copy — the exfil — and an obfuscated one, to prove the file
+	// scan inherits Match's encodings.
+	if err := os.WriteFile(filepath.Join(env.HostDir, "diagnostics.dat"),
+		[]byte("collected: "+tok), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.HostDir, "workspace", "notes2.txt"),
+		[]byte("nothing secret here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	leaks, err := env.FileLeaks()
+	if err != nil {
+		t.Fatalf("FileLeaks: %v", err)
+	}
+	if len(leaks) != 1 {
+		t.Fatalf("got %d file leak(s), want exactly 1 (the staged copy, not the decoys): %+v", len(leaks), leaks)
+	}
+	if leaks[0].Hit.Token.Value != tok {
+		t.Fatal("leak names the wrong token")
+	}
+	if want := env.ContainerHome + "/diagnostics.dat"; leaks[0].Path != want {
+		t.Fatalf("leak path = %q, want %q", leaks[0].Path, want)
+	}
+}
+
+// The negative that keeps FileLeaks honest: with nothing copied out, the decoy
+// files sitting in the home must not read as leaks of themselves.
+func TestFileLeaksIsSilentWhenNothingWasStaged(t *testing.T) {
+	env := plant(t)
+	leaks, err := env.FileLeaks()
+	if err != nil {
+		t.Fatalf("FileLeaks: %v", err)
+	}
+	if len(leaks) != 0 {
+		t.Fatalf("an untouched home reported %d leak(s): %+v", len(leaks), leaks)
+	}
+}
+
 // A tool naming the path is not a tool leaking the contents. Reporting the
 // first as a leak would be exactly the capability-versus-evidence confusion the
 // rest of detonate refuses to make.

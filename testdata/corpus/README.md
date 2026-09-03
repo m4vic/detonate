@@ -37,11 +37,12 @@ Run `go test ./internal/scan -run TestCorpus -v` for the live numbers.
 | `evil-mcp` | MCP | 11 / 12 | breadth: exfil, five poisoning shapes, unicode, shadowing, traversal, egress |
 | `evil-mcp-encoding` | MCP | 5 / 6 | credential-exfil **encoding** robustness |
 | `evil-mcp-injection` | MCP | 2 / 6 | description-injection **phrasing** robustness |
+| `evil-mcp-exfil-file` | MCP | 1 / 1 | exfil staged to disk instead of returned |
 | `evil-skill` | Skill | 10 / 10 | breadth: injection, permission mismatch, script exfil |
 | `evil-skill-obfuscated` | Skill | 1 / 4 | skill-injection **phrasing** robustness + signature-list alignment |
-| `evil-skill-exfil` | Skill | 3 / 4 | exfil **channel** robustness (encoding + write-to-file) |
+| `evil-skill-exfil` | Skill | 4 / 4 | exfil **channel** robustness (encoding + write-to-file) |
 
-Total: **32 / 42 detected, 10 recorded gaps, 0 findings on the honest twins.**
+Total: **34 / 43 detected, 9 recorded gaps, 0 findings on the honest twins.**
 
 The honest twins already in the repo — `testdata/honest` and
 `testdata/benign-formatter` — are the control, and `TestCorpusHonestTwinsStay
@@ -66,6 +67,11 @@ working on.
   was aligned with toolscan's, which already had the verb "override" (and
   `any`, `preceding`, `directions`). The same override sentence is now caught as
   both a skill instruction and an MCP description.
+- **Write-to-file exfiltration.** After the target runs, the writable home is
+  scanned for planted tokens sitting in files that are not the decoys
+  themselves — a secret copied somewhere new. Wired into both surfaces (the
+  skill script path and the MCP probe path), so staging a secret to disk instead
+  of returning it no longer leaks unseen.
 
 ### Open
 
@@ -79,10 +85,6 @@ working on.
 - **Injection phrasing.** The instruction/description regexes match a fixed verb
   and noun list. Synonyms ("set aside the earlier directions"), passive voice,
   homoglyphs, and base64-with-a-decode-nudge step outside it.
-- **Write-to-file exfiltration.** The decoy scan reads stdout and stderr, not
-  the sandbox filesystem, so a script that stages a secret to a file and prints
-  nothing is unseen — though the writable home was furnished to make a
-  post-run diff possible.
 
 ## Expectation classes
 
