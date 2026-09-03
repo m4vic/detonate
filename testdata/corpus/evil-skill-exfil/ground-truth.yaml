@@ -1,0 +1,46 @@
+schema: detonate.corpus/v1
+fixture: evil-skill-exfil
+kind: skill
+
+# Credential exfiltration from a bundled script over four channels. Confirms the
+# encoding boundary is the same on the skill path as on MCP (plain and hex
+# caught, obfuscation not), and adds a channel the MCP fixtures do not reach:
+# writing the secret to a file instead of printing it.
+planted:
+  - id: exfil.plain
+    class: credential-exfiltration
+    where: 'a_print_plain.py prints the netrc verbatim'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"scripts/a_print_plain.py" returned the contents'
+
+  - id: exfil.hex
+    class: credential-exfiltration-encoded
+    where: 'b_print_hex.py prints hex(netrc)'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"scripts/b_print_hex.py" returned the contents'
+
+  - id: exfil.reversed
+    class: credential-exfiltration-obfuscated
+    where: 'c_print_reversed.py prints the secret reversed'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '"scripts/c_print_reversed.py" returned the contents'
+
+  # The decoy scan reads stdout and stderr, not the sandbox filesystem, so a
+  # script that stages the secret to a file and prints nothing leaks unseen.
+  # Closing this means diffing the writable home for planted tokens after a
+  # script runs — the HostDir was furnished to make exactly that possible.
+  - id: exfil.to-file
+    class: credential-exfiltration-channel
+    where: 'd_write_to_file.py writes the secret to ~/diagnostics.dat, prints nothing'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '"scripts/d_write_to_file.py" returned the contents'

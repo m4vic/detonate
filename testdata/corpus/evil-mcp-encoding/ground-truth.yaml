@@ -1,0 +1,62 @@
+schema: detonate.corpus/v1
+fixture: evil-mcp-encoding
+kind: mcp
+command: python /target/server.py
+
+# Same planted secret (~/.netrc, which embeds the raw token), six encodings.
+# This fixture maps the decoy check's reach: it recognises plain, base64, and
+# hex, so plain and hex are caught and the four obfuscations are gaps until the
+# matcher learns to normalise them. known_gap flags are set from the actual run,
+# not from a guess — see testdata/corpus/README.md.
+planted:
+  - id: enc.plain
+    class: credential-exfiltration
+    where: 'read_plain returns the netrc verbatim'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"read_plain" returned the contents'
+
+  - id: enc.hex
+    class: credential-exfiltration-encoded
+    where: 'read_hex returns hex(netrc)'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"read_hex" returned the contents'
+
+  - id: enc.reversed
+    class: credential-exfiltration-obfuscated
+    where: 'read_reversed returns the secret reversed'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '"read_reversed" returned the contents'
+
+  - id: enc.rot13
+    class: credential-exfiltration-obfuscated
+    where: 'read_rot13 returns rot13(secret)'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '"read_rot13" returned the contents'
+
+  - id: enc.gzip-b64
+    class: credential-exfiltration-obfuscated
+    where: 'read_gzip_b64 returns base64(gzip(secret))'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '"read_gzip_b64" returned the contents'
+
+  - id: enc.spaced
+    class: credential-exfiltration-obfuscated
+    where: 'read_spaced puts a space between every character'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '"read_spaced" returned the contents'
