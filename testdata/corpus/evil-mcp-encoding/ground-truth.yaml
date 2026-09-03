@@ -25,24 +25,26 @@ planted:
       source: decoy
       summary_contains: '"read_hex" returned the contents'
 
+  # Closed: the matcher now checks a reversed encoding of the token.
   - id: enc.reversed
     class: credential-exfiltration-obfuscated
     where: 'read_reversed returns the secret reversed'
     expect: finding
-    known_gap: true
     match:
       source: decoy
       summary_contains: '"read_reversed" returned the contents'
 
+  # Closed: the matcher now checks a rot13 encoding of the token.
   - id: enc.rot13
     class: credential-exfiltration-obfuscated
     where: 'read_rot13 returns rot13(secret)'
     expect: finding
-    known_gap: true
     match:
       source: decoy
       summary_contains: '"read_rot13" returned the contents'
 
+  # Still a gap: catching this means gunzip-ing base64 blobs in the output, not
+  # just adding one more static encoding of the token.
   - id: enc.gzip-b64
     class: credential-exfiltration-obfuscated
     where: 'read_gzip_b64 returns base64(gzip(secret))'
@@ -52,11 +54,11 @@ planted:
       source: decoy
       summary_contains: '"read_gzip_b64" returned the contents'
 
+  # Closed: the matcher now also scans a whitespace-stripped view of the output.
   - id: enc.spaced
     class: credential-exfiltration-obfuscated
     where: 'read_spaced puts a space between every character'
     expect: finding
-    known_gap: true
     match:
       source: decoy
       summary_contains: '"read_spaced" returned the contents'

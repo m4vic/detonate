@@ -35,11 +35,14 @@ Run `go test ./internal/scan -run TestCorpus -v` for the live numbers.
 | Fixture | Kind | Detected / planted | What it probes |
 |---|---|---|---|
 | `evil-mcp` | MCP | 11 / 12 | breadth: exfil, five poisoning shapes, unicode, shadowing, traversal, egress |
-| `evil-mcp-encoding` | MCP | 2 / 6 | credential-exfil **encoding** robustness |
+| `evil-mcp-encoding` | MCP | 5 / 6 | credential-exfil **encoding** robustness |
 | `evil-mcp-injection` | MCP | 2 / 6 | description-injection **phrasing** robustness |
+| `evil-mcp-exfil-file` | MCP | 1 / 1 | exfil staged to disk instead of returned |
 | `evil-skill` | Skill | 10 / 10 | breadth: injection, permission mismatch, script exfil |
-| `evil-skill-obfuscated` | Skill | 1 / 5 | skill-injection **phrasing** robustness |
-| `evil-skill-exfil` | Skill | 2 / 4 | exfil **channel** robustness (encoding + write-to-file) |
+| `evil-skill-obfuscated` | Skill | 1 / 4 | skill-injection **phrasing** robustness + signature-list alignment |
+| `evil-skill-exfil` | Skill | 4 / 4 | exfil **channel** robustness (encoding + write-to-file) |
+
+Total: **34 / 43 detected, 9 recorded gaps, 0 findings on the honest twins.**
 
 The honest twins already in the repo — `testdata/honest` and
 `testdata/benign-formatter` — are the control, and `TestCorpusHonestTwinsStay
@@ -49,25 +52,39 @@ everything would score perfectly above.
 ## Gaps this corpus has surfaced
 
 Recorded, not hidden — an evasion nobody has written down is one nobody is
-working on:
+working on.
 
-- **Output-transform exfiltration.** The decoy matcher recognises plain,
-  base64, and hex. A tool or script that reverses, rot13s, gzips, or
-  space-separates a secret on the way out leaks undetected.
+### Closed
+
+- **Output-transform exfiltration (partial).** The decoy matcher now also
+  checks a reversed and a rot13 encoding of the token, and scans a
+  whitespace-stripped view of the output — so reversing, rot13-ing, or
+  space-separating a secret no longer evades it. Safe to broaden because the
+  token is a unique 64-hex-character nonce: no honest output contains its
+  reverse or rot13 by chance (the honest twins confirm it). `gzip+base64`
+  remains open below.
+- **Signature drift between surfaces.** The skill instruction-override pattern
+  was aligned with toolscan's, which already had the verb "override" (and
+  `any`, `preceding`, `directions`). The same override sentence is now caught as
+  both a skill instruction and an MCP description.
+- **Write-to-file exfiltration.** After the target runs, the writable home is
+  scanned for planted tokens sitting in files that are not the decoys
+  themselves — a secret copied somewhere new. Wired into both surfaces (the
+  skill script path and the MCP probe path), so staging a secret to disk instead
+  of returning it no longer leaks unseen.
+
+### Open
+
+- **Compressed exfiltration.** `gzip+base64` (and any encoding that isn't a
+  static transform of the token) still evades the matcher — catching it means
+  attempting decompression of blobs in the output, not adding one more encoding.
 - **The SSH-key decoy is base64-only.** Its file holds `base64(token)`, never
   the raw token, so *any* transform on top of it — even plain hex — evades the
   match. The raw-token decoys (`.netrc`, `.aws`, `.env`) are more robust; the
   encoding fixture uses `.netrc` for that reason.
 - **Injection phrasing.** The instruction/description regexes match a fixed verb
   and noun list. Synonyms ("set aside the earlier directions"), passive voice,
-  and homoglyphs step outside it.
-- **Signature drift between surfaces.** The MCP metadata scanner catches the
-  verb "override"; the skill instruction scanner does not. The two lists have
-  diverged.
-- **Write-to-file exfiltration.** The decoy scan reads stdout and stderr, not
-  the sandbox filesystem, so a script that stages a secret to a file and prints
-  nothing is unseen — though the writable home was furnished to make a
-  post-run diff possible.
+  homoglyphs, and base64-with-a-decode-nudge step outside it.
 
 ## Expectation classes
 

@@ -2,29 +2,27 @@ schema: detonate.corpus/v1
 fixture: evil-skill-obfuscated
 kind: skill
 
-# One instruction-override attack, five phrasings, in a skill body. Each line
-# carries a unique marker so a finding maps to exactly one variant (the detector
-# reports the matched line as evidence).
+# One instruction-override attack, four phrasings, in a skill body. Each line
+# carries a unique marker so a finding maps to exactly one variant.
 #
-# This surfaced a real asymmetry: the MCP metadata scanner catches the verb
-# "override", but the skill instruction scanner's verb list is (ignore|disregard
-# |forget) only, so inj.override is a gap on the skill path while its twin is
-# caught on the MCP path (see evil-mcp-injection). The two signature lists have
-# drifted; closing this gap is aligning them.
+# The skill analyser emits one event per signature (a repeated pattern is one
+# behaviour), so only the FIRST matching line is reported. That is why there is
+# no canonical "Ignore all previous instructions" line here: it would match and
+# shadow the override line, hiding the one thing this fixture exists to prove.
+# The canonical form is covered by evil-mcp-injection and by the skill unit
+# tests. The three phrasing variants below match no signature at all, so they do
+# not shadow anything — they are honest gaps.
+#
+# inj.override records a closed asymmetry: the skill scanner's verb list was
+# (ignore|disregard|forget) only, so "override" was caught on the MCP path and
+# missed here. The two instruction-override patterns are now aligned.
 planted:
-  - id: inj.canonical
-    class: prompt-injection
-    where: 'marker-canonical line — "Ignore all previous instructions"'
-    expect: finding
-    match:
-      source: skill-instructions
-      summary_contains: marker-canonical
-
+  # Closed: the skill override pattern was aligned with toolscan's, which
+  # already had the verb "override". The two signature lists no longer drift.
   - id: inj.override
     class: prompt-injection-evasion
-    where: 'marker-override line — verb "override" (caught on MCP, not on skill)'
+    where: 'marker-override line — verb "override"'
     expect: finding
-    known_gap: true
     match:
       source: skill-instructions
       summary_contains: marker-override

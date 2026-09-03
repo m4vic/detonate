@@ -23,24 +23,24 @@ planted:
       source: decoy
       summary_contains: '"scripts/b_print_hex.py" returned the contents'
 
+  # Closed: the matcher now checks a reversed encoding of the token, so the
+  # boundary moved on the skill path exactly as it did on MCP.
   - id: exfil.reversed
     class: credential-exfiltration-obfuscated
     where: 'c_print_reversed.py prints the secret reversed'
     expect: finding
-    known_gap: true
     match:
       source: decoy
       summary_contains: '"scripts/c_print_reversed.py" returned the contents'
 
-  # The decoy scan reads stdout and stderr, not the sandbox filesystem, so a
-  # script that stages the secret to a file and prints nothing leaks unseen.
-  # Closing this means diffing the writable home for planted tokens after a
-  # script runs — the HostDir was furnished to make exactly that possible.
+  # Closed: after the scripts run, the writable home is scanned for planted
+  # tokens sitting in files that are not the decoys themselves. Attribution to
+  # the specific script is lost (the scan is once over the shared home), so this
+  # matches the staging finding by the file it landed in, not by script name.
   - id: exfil.to-file
     class: credential-exfiltration-channel
     where: 'd_write_to_file.py writes the secret to ~/diagnostics.dat, prints nothing'
     expect: finding
-    known_gap: true
     match:
       source: decoy
-      summary_contains: '"scripts/d_write_to_file.py" returned the contents'
+      summary_contains: staged the contents of

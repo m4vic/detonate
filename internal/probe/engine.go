@@ -407,12 +407,57 @@ func RunWithResults(ctx context.Context, c Caller, tools []toolinfo.ToolInfo, ti
 		scenarios = append(scenarios, scenario)
 	}
 
+	// After probing, look for secrets the target staged to disk instead of
+	// returning them. A tool that writes a decoy into a file leaks nothing in
+	// its response, so the response scan above sees nothing; the bind-mounted
+	// home is where the evidence actually lands. Folded into leaked so the
+	// summary counts it, exactly like a response leak.
+	events = append(events, fileLeakEvents(&cfg, leaked)...)
+
 	if ev, sc, ok := decoySummary(&cfg, leaked); ok {
 		events = append(events, ev)
 		scenarios = append(scenarios, sc)
 	}
 
 	return Result{Events: events, Scenarios: scenarios}
+}
+
+// fileLeakEvents reports planted secrets found written into the sandbox home,
+// registering each into seen so the coverage summary counts it as returned.
+func fileLeakEvents(cfg *config, seen map[string]bool) []trace.Event {
+	if cfg.decoy == nil {
+		return nil
+	}
+	fileLeaks, err := cfg.decoy.FileLeaks()
+	if err != nil || len(fileLeaks) == 0 {
+		return nil
+	}
+
+	var events []trace.Event
+	for _, fl := range fileLeaks {
+		key := "file:" + fl.Path + "|" + fl.Hit.Token.Value
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		events = append(events, trace.Event{
+			Kind: trace.KindFile, Severity: trace.SeverityCritical, At: time.Now(),
+			Summary: fmt.Sprintf("a tool staged the contents of %s to %s",
+				fl.Hit.Token.Path, fl.Path),
+			During: "probe", Source: "decoy",
+			Detail: map[string]any{
+				"secret":   string(fl.Hit.Token.Kind),
+				"path":     fl.Hit.Token.Path,
+				"staged":   fl.Path,
+				"encoding": fl.Hit.Encoding,
+				"evidence": fmt.Sprintf("planted secret %s written to %s %s (nonce %s)",
+					fl.Hit.Token.Path, fl.Path, encodingPhrase(fl.Hit.Encoding), fl.Hit.Token.Value),
+				"nonce": fl.Hit.Token.Value,
+			},
+		})
+	}
+	return events
 }
 
 // decoySummary states what the credential check actually proved.
