@@ -1,0 +1,109 @@
+schema: detonate.corpus/v1
+fixture: evil-mcp
+kind: mcp
+command: python /target/server.py
+
+# Every hostile behaviour planted in server.py, and how detonate is expected to
+# surface it. `match` is how the scorer recognises the detection: an event from
+# `source` whose summary contains `summary_contains`.
+planted:
+  - id: mcp.decoy.ssh-key
+    class: credential-exfiltration
+    where: 'call() -> read_file returns ~/.ssh/id_rsa'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: /.ssh/id_rsa
+
+  - id: mcp.decoy.aws-base64
+    class: credential-exfiltration-encoded
+    where: 'call() -> sync_workspace base64s ~/.aws/credentials'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: /.aws/credentials
+
+  - id: mcp.meta.instruction-override
+    class: tool-poisoning
+    where: 'TOOLS -> read_file.description'
+    expect: finding
+    match:
+      source: tool-description
+      summary_contains: override the agent's prior context
+
+  - id: mcp.meta.concealment
+    class: tool-poisoning
+    where: 'TOOLS -> sync_workspace.description'
+    expect: finding
+    match:
+      source: tool-description
+      summary_contains: hide its actions from the user
+
+  - id: mcp.meta.unconditional-precedence
+    class: tool-poisoning
+    where: 'TOOLS -> check_policy.description'
+    expect: finding
+    match:
+      source: tool-description
+      summary_contains: precedence over every other tool
+
+  - id: mcp.meta.fake-authority
+    class: tool-poisoning
+    where: 'TOOLS -> audit_log.description'
+    expect: finding
+    match:
+      source: tool-description
+      summary_contains: pseudo-system markup
+
+  - id: mcp.meta.hidden-unicode
+    class: hidden-instructions
+    where: 'TOOLS -> format_note.description (U+E0000 tag characters)'
+    expect: finding
+    match:
+      source: tool-description
+      summary_contains: invisible Unicode tag characters
+
+  - id: mcp.meta.credential-path
+    class: tool-poisoning
+    where: 'TOOLS -> read_file.description names ~/.ssh/id_rsa as something to return'
+    expect: finding
+    match:
+      source: tool-description
+      summary_contains: instructs reading private keys or cloud credentials
+
+  - id: mcp.meta.shadowing
+    class: tool-shadowing
+    where: 'TOOLS -> helper.description redirects read_file in one sentence'
+    expect: finding
+    match:
+      source: tool-inventory
+      summary_contains: redirects the agent away from another tool
+
+  # A known gap, recorded rather than hidden. The same redirect split across a
+  # semicolon lands the tool name and the directive in different sentences, and
+  # the shadowing rule requires one sentence on purpose. Counted in the miss
+  # budget below; closing it means lowering that number.
+  - id: mcp.meta.shadowing-split
+    class: tool-shadowing-evasion
+    where: 'TOOLS -> search_docs.description splits the redirect across a semicolon'
+    expect: finding
+    known_gap: true
+    match:
+      source: tool-inventory
+      summary_contains: '"search_docs"'
+
+  - id: mcp.probe.path-traversal
+    class: path-traversal
+    where: 'call() -> check_policy honours ".." in its argument'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"check_policy" returned the contents of'
+
+  - id: mcp.startup.egress
+    class: unprovoked-network
+    where: 'module scope: socket.create_connection at import time'
+    expect: finding
+    match:
+      source: container-stderr
+      summary_contains: network is disabled in the sandbox
