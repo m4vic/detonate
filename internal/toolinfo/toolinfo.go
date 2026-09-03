@@ -44,6 +44,13 @@ type ToolInfo struct {
 // the full text always survives in the struct; only this display is clipped.
 const maxDescLen = 80
 
+// String renders one tool for terminal listings, with the description
+// collapsed onto a single line and clipped to maxDescLen runes.
+//
+// This is a display form and nothing else. A probe, a report, or any analysis
+// must read Description directly: a clipped description can cut off the very
+// injection payload the scan exists to find, so using this text as evidence
+// would silently narrow what detonate can detect.
 func (t ToolInfo) String() string {
 	desc := strings.Join(strings.Fields(t.Description), " ")
 

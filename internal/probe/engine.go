@@ -460,18 +460,18 @@ func decoySummary(cfg *config, leaked map[string]bool) (trace.Event, assessment.
 	}
 
 	return trace.Event{
-			Kind: trace.KindFile, Severity: trace.SeverityInfo, At: time.Now(),
-			Summary: summary, During: "probe", Source: "decoy",
-			Detail: map[string]any{
-				"planted":  planted,
-				"returned": returned,
-				"secrets":  strings.Join(kinds, ", "),
-			},
-		}, assessment.ScenarioResult{
-			ID:       "decoy.credential-exfiltration",
-			Required: true,
-			Outcome:  outcome,
-		}, true
+		Kind: trace.KindFile, Severity: trace.SeverityInfo, At: time.Now(),
+		Summary: summary, During: "probe", Source: "decoy",
+		Detail: map[string]any{
+			"planted":  planted,
+			"returned": returned,
+			"secrets":  strings.Join(kinds, ", "),
+		},
+	}, assessment.ScenarioResult{
+		ID:       "decoy.credential-exfiltration",
+		Required: true,
+		Outcome:  outcome,
+	}, true
 }
 
 // encodingPhrase renders how a secret came back, for the evidence line. A

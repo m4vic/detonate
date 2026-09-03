@@ -91,6 +91,9 @@ type Event struct {
 	Source string `json:"source"`
 }
 
+// String renders one event for logs and terminal output. The layout is for
+// human reading and is not part of any contract; a machine consumer reads the
+// JSON report, whose shape is versioned, instead of parsing this.
 func (e Event) String() string {
 	return fmt.Sprintf("[%s/%s +%dms] %s",
 		e.Kind, e.Severity, e.Elapsed.Milliseconds(), e.Summary)

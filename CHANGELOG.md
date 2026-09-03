@@ -3,6 +3,39 @@
 All notable user-visible changes are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) once versioned prereleases begin.
 
+## Unreleased
+
+### Fixed
+
+- **A scan that lost its target still exited 0.** `not_assessed` was already
+  caught, so a target nothing could be learned from failed correctly. What was
+  missed is the case where *something* was learned and the run then fell apart:
+  two tools pass, the third times out or kills the server, the rest are never
+  reached. That lands on `risk=no_findings` beside `completeness=inconclusive`,
+  and the exit rule only failed on `not_assessed` and `failed` — so it exited 0.
+  This is the crash case from the v0.4.1 corpus run reporting green to CI.
+  Inconclusive coverage now exits 4.
+
+  The same hole swallowed the total scan budget added in v0.4.0. A scan killed
+  by its own 15-minute ceiling recorded the timeout, collapsed completeness to
+  inconclusive — and exited 0 anyway. The ceiling was reporting without gating.
+
+  `partial` still exits 0 and that line is deliberate: partial means the
+  coverage question was answered and the answer was "some of it". Inconclusive
+  means required scenarios started and never finished, so there is no answer.
+
+- **Ctrl-C left no trace in the report.** The probe loop unwinds cleanly on
+  cancellation, so an interrupted scan looked like one that finished quickly
+  with fewer results. A `pipeline.cancelled` scenario and a `scan_cancelled`
+  failure now name it, matching how a budget overrun is already recorded.
+  Verified against a live server interrupted mid-probe: exit 4, the
+  cancellation named in the report, and no containers or volumes left behind.
+
+### Changed
+
+- CI and release workflows build with Go 1.27 (was 1.25). `go.mod` still
+  requires only Go 1.25, so building from source is unaffected.
+
 ## v0.4.1 — 2026-08-23
 
 First corpus run against servers written by people who have never seen

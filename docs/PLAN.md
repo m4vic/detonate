@@ -1,6 +1,6 @@
 # Detonate — the plan to 1.0
 
-Status: 2026-08-20. **This is the only plan.** Everything else in `docs/` is
+Status: 2026-09-02. **This is the only plan.** Everything else in `docs/` is
 history or reference. If a task is not on this list, it is not being built.
 
 ## What we are building
@@ -105,9 +105,16 @@ a coverage-accounting rule:
 A0-A2 are why the dynamic differentiator does not currently reach real targets.
 Sizing them is the first task of week two, before anything else is committed to.
 
-- [ ] **6. Total scan budget.** ~20 per-phase timeouts exist; the scan as a whole
-      has no ceiling.
-      — *check:* a deliberately hanging target is killed and reported.
+- [x] **6. Total scan budget. Implemented 2026-08-2x, partially verified.**
+      `scan.DefaultBudget` is 15 minutes and `scan.Run` wraps the whole pipeline
+      in it, recording a required `pipeline.budget` timeout scenario so an
+      overrun cannot report success.
+      — *check, partly open:* `TestBudgetExceededIsReportedAndNeverLooksClean`
+      proves the collapse using an already-spent budget, which needs no target.
+      **Not yet proven:** a genuinely hanging target, running under a real
+      deadline, is killed and reported. The fixture takes the same code path
+      but does not exercise the phase that would actually have to be
+      interrupted.
 
 - [ ] **7. No path exits 0 without a verdict. THE priority.** Measured broken:
       six real servers, six exits of 0, zero verdicts. An unassessed target must
@@ -115,6 +122,45 @@ Sizing them is the first task of week two, before anything else is committed to.
       — *check:* fault injection at every phase boundary — cancel, timeout,
       crash, teardown failure — and none yields exit 0; and every target in the
       corpus that reaches no verdict exits non-zero.
+
+      **Diagnosed 2026-09-02. Two defects, both reachable.**
+
+      The `not_assessed` half of this shipped already: `exitForSummary` returns
+      4 when nothing was examined, and four community servers proved it. What
+      remains is the case where *something* was examined and the run then fell
+      apart.
+
+      - [x] **7c. `inconclusive` coverage still exits 0. Fixed 2026-09-02.** `exitForSummary` fails
+        only on `failed` and `not_assessed`. So a scan where two tools pass and
+        the third times out — or kills the target, leaving the rest skipped —
+        lands on `risk=no_findings, completeness=inconclusive` and exits 0. That
+        is the crash case from the v0.4.1 corpus run reporting green. `partial`
+        keeps exiting 0 and that stays deliberate: the line is "was the coverage
+        question answerable", not "was everything covered".
+      - [x] **7d. Cancellation is not recorded. Fixed 2026-09-02.** `scan.Run` special-cases
+        `DeadlineExceeded` only, so Ctrl-C unwinds through the probe loop as
+        ordinary timeout scenarios and no `pipeline.*` scenario says the run was
+        interrupted. With 7c fixed the exit code is right by accident; the
+        report still does not say why.
+      — *check:* one table driving all four boundaries — cancel, timeout, crash,
+      teardown — through the real exit path, plus a scan-level cancellation
+      test, plus a real interrupted run against a live server.
+      — *verified 2026-09-02:* `TestNoFaultAtAnyPhaseBoundaryExitsClean` drives
+      all four faults through `assessment.Summarize` and the real exit rule, and
+      was confirmed to **fail before the fix** on three of them — cancel, budget
+      and crash all returned 0. `TestCancellationIsRecordedAndNeverLooksClean`
+      covers the pipeline scenario. Live runs on macOS arm64 with real Docker:
+      the honest fixture exits 0 (`complete`), the thief fixture exits 3 with
+      two critical findings, and a real `SIGINT` mid-probe exits 4 carrying
+      `pipeline.cancelled` — that report reads `no_findings` + `inconclusive`
+      with one tool passed, which is exactly what the old rule returned 0 for.
+      — *still open, and this is what keeps item 7 unchecked:* the corpus half.
+      "Every target in the corpus that reaches no verdict exits non-zero" has
+      not been re-measured since the fix. The six servers that produced six
+      zeroes have not been re-run.
+      — *note:* the same hole made item 6 inert. The budget fired, recorded its
+      timeout, collapsed completeness — and exited 0. A ceiling that reports
+      without gating is not a ceiling.
 
 - [x] **7a. Size the acquisition gaps. Done 2026-08-20 — A0 and A1 are closed
       without implementing either.** An author's CI already builds their project,
@@ -135,9 +181,17 @@ Sizing them is the first task of week two, before anything else is committed to.
       the largest remaining coverage gap.
       — *check:* `servers/src/filesystem` reaches `complete`.
 
-- [ ] **8. Verified teardown before success is reported.**
-      — *check:* zero `detonate-*` containers or volumes remain after any scan,
-      including failed ones.
+- [ ] **8. Verified teardown before success is reported.** Half done:
+      `addTeardownFailure` records a required `pipeline.teardown` scenario whose
+      `teardown_error` outcome forces completeness to `failed` and exit 1, so a
+      scan that could not clean up cannot report success.
+      — *check, partly verified 2026-09-02:* zero `detonate-*` containers or
+      volumes remain after any scan, **including failed ones**. Confirmed after
+      a full test-suite run (the passing path) and after a real `SIGINT` killed
+      a live scan mid-probe (an abrupt failing path) — zero of both each time.
+      **Still open:** teardown when the harness itself errors, and when the
+      Docker daemon disappears mid-scan. Both were observed to be survivable
+      during this session but neither was measured.
 
 - [ ] **9. Freeze the contract.** Exit codes (already stable in practice) and
       `schema_version`, plus a written deprecation policy.

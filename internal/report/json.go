@@ -10,6 +10,10 @@ import (
 	"github.com/m4vic/detonate/internal/trace"
 )
 
+// SchemaV1 names the machine-readable report format, and consumers match on
+// it to know which fields they can rely on. That makes it part of the
+// published contract: fields may be added under this identifier, but changing
+// or removing one requires a new identifier and a breaking release.
 const SchemaV1 = "detonate.report/v1"
 
 // Scan is the complete machine-readable result of one scan.
@@ -57,6 +61,15 @@ type Failure struct {
 	Retryable bool   `json:"retryable"`
 }
 
+// Counts tallies observed events by severity, not scenarios or tools.
+//
+// The split mirrors Findings and Observations above: critical and notable
+// events become findings, info events become observations. That distinction is
+// load-bearing rather than cosmetic — a non-zero Critical or Notable is what
+// makes a scan exit with the findings code, while any number of info events
+// leaves the verdict untouched. Counting an observation as a finding here
+// would fail a consumer's build over context that was deliberately not a
+// finding.
 type Counts struct {
 	Critical int `json:"critical"`
 	Notable  int `json:"notable"`

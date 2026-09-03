@@ -149,11 +149,17 @@ These are frozen. A pipeline can gate on them.
 
 | Code | Meaning |
 |---:|---|
-| `0` | clean — something was assessed and nothing was found |
+| `0` | clean — coverage was established and nothing was found |
 | `1` | the scan itself broke |
 | `2` | usage or environment problem |
 | `3` | findings |
-| `4` | nothing was learned about the target, or `--fail-incomplete` and coverage was short |
+| `4` | coverage could not be established, or `--fail-incomplete` and coverage was short |
+
+`0` requires that the coverage question was *answerable*, not that everything
+was covered. Partial coverage still exits `0`: some checks ran, the rest were
+unsupported or skipped, and nothing was found. A scan that was interrupted,
+timed out, or lost the target partway through exits `4` instead — those leave
+no coverage to report, whatever passed before it happened.
 
 `1` and `3` are deliberately distinct: a pipeline must be able to tell a
 detonate bug from a real finding in your code.

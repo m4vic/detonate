@@ -176,12 +176,15 @@ func Run(ctx context.Context, req Request, p Progress) (*Report, error) {
 
 	report, err := runKind(ctx, req, p)
 
-	// A scan killed by its own ceiling must say so, and must not look like a
-	// pass. Checked after the run rather than instead of it: the pipeline may
-	// have produced real evidence before the deadline, and throwing that away
-	// would lose findings that were already proven.
-	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// A scan that did not finish under its own power must say so, and must not
+	// look like a pass. Checked after the run rather than instead of it: the
+	// pipeline may have produced real evidence before it was stopped, and
+	// throwing that away would lose findings that were already proven.
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return withBudgetExceeded(report, req, budget), nil
+	case errors.Is(ctx.Err(), context.Canceled):
+		return withCancelled(report, req), nil
 	}
 	return report, err
 }
@@ -209,6 +212,38 @@ func withBudgetExceeded(report *Report, req Request, budget time.Duration) *Repo
 	})
 	report.Failures = append(report.Failures, Failure{
 		Phase: "budget", Code: "scan_budget_exceeded",
+		Message: reason, Retryable: true,
+	})
+	return report
+}
+
+// withCancelled records an interrupted run the same way an overrun is
+// recorded, so a scan stopped from outside cannot report success either.
+//
+// Cancellation reaches here after the pipeline has already unwound: the probe
+// loop checks the context between payloads and returns what it had, marking
+// the tool it was on as timed out and the rest as skipped. Those alone are
+// indistinguishable from a slow target, so without this scenario a reader has
+// to infer an interruption from the shape of the results.
+//
+// The outcome is timeout rather than skipped deliberately. Skipped only narrows
+// coverage, and an interrupted scan has not narrowed the coverage question, it
+// has abandoned it — which is the distinction completeness turns into
+// inconclusive rather than partial.
+func withCancelled(report *Report, req Request) *Report {
+	if report == nil {
+		report = &Report{Reference: req.Target.Reference}
+	}
+	const reason = "scan cancelled before it finished"
+
+	report.Scenarios = append(report.Scenarios, assessment.ScenarioResult{
+		ID:       "pipeline.cancelled",
+		Required: true,
+		Outcome:  assessment.OutcomeTimeout,
+		Reason:   reason,
+	})
+	report.Failures = append(report.Failures, Failure{
+		Phase: "cancelled", Code: "scan_cancelled",
 		Message: reason, Retryable: true,
 	})
 	return report
