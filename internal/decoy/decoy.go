@@ -116,6 +116,16 @@ type Hit struct {
 const (
 	fileMode = 0o644
 	dirMode  = 0o755
+
+	// writableDirMode makes the home writable by the sandbox user, not just
+	// traversable. The decoy directories are owned by whoever ran detonate, so
+	// at 0755 the sandbox uid (1000, not the owner) may enter them but cannot
+	// create files in them. On Linux that silently blocks a target from writing
+	// anywhere under ~, so exfiltration staged to a file could never happen and
+	// so could never be caught. Docker Desktop's VM ignores POSIX ownership and
+	// hid this on macOS. World-writable is safe here: the home is an ephemeral
+	// per-scan tmpdir that is deleted with the scan.
+	writableDirMode = 0o777
 )
 
 // makeReadableInSandbox forces the mode after creation.
@@ -191,8 +201,8 @@ func openDirectories(root string) error {
 		if !info.IsDir() {
 			return nil
 		}
-		if err := os.Chmod(path, dirMode); err != nil {
-			return fmt.Errorf("making decoy directory %s traversable inside the sandbox: %w", path, err)
+		if err := os.Chmod(path, writableDirMode); err != nil {
+			return fmt.Errorf("making decoy directory %s writable inside the sandbox: %w", path, err)
 		}
 		return nil
 	})
