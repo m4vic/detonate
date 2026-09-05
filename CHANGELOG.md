@@ -5,6 +5,29 @@ All notable user-visible changes are recorded here. The project follows
 
 ## Unreleased
 
+### Added
+
+- **A ground-truth detection corpus** (`testdata/corpus/`). Fixtures with a
+  known, enumerated count of planted vulnerabilities, scored by the real
+  pipeline: **34 of 43 detected, 9 recorded gaps, 0 findings on the honest
+  twins.** The README's calibration only measured false positives — a direction a
+  scanner satisfies by detecting nothing; this measures recall. Fixtures are
+  discovered by directory, and the gate fails on both a new miss and a
+  silently-closed gap, so the score cannot drift unnoticed. Run it with
+  `go test ./internal/scan -run TestCorpus -v`.
+- **Credential decoys now reach a skill's bundled scripts.** Script stdout was
+  drained and discarded, so a script that read a planted secret and printed it —
+  a script's normal result channel — left no trace. It is now scanned the same
+  way an MCP tool response is: one critical `decoy.credential-exfiltration`
+  finding per hit, plus a per-skill coverage summary.
+- **Exfiltration is caught in more shapes.** The decoy matcher now recognises a
+  secret returned reversed, rot13'd, or with whitespace inserted between every
+  character, in addition to plain/base64/hex. And a secret **staged to a file**
+  in the sandbox home — read and written to disk rather than returned — is now
+  caught by a post-run scan of the writable home, on both the MCP and skill
+  paths. Safe to broaden because the token is a unique 128-bit nonce: no honest
+  output contains its transform by chance.
+
 ### Fixed
 
 - **A scan that lost its target still exited 0.** `not_assessed` was already
