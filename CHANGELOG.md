@@ -5,6 +5,8 @@ All notable user-visible changes are recorded here. The project follows
 
 ## Unreleased
 
+## v0.4.2 — 2026-09-05
+
 ### Added
 
 - **A ground-truth detection corpus** (`testdata/corpus/`). Fixtures with a
