@@ -201,10 +201,17 @@ detonate dynamic ./my-server --cmd "node /target/dist/index.js" --no-install
 
 ## What's new in 0.4
 
+- **A ground-truth detection corpus.** Detection capability is now a measured,
+  test-enforced number (**34/43** planted vulnerabilities caught, 9 recorded
+  gaps, zero false positives on the honest twins) rather than a claim. See
+  [Detection coverage](#detection-coverage).
 - **Credential decoys.** The sandbox is furnished with plausible SSH keys, cloud
   credentials, a `.env`, a `.netrc`, a GitHub token, and shell history — each
   carrying a unique 128-bit nonce. A tool that returns one has leaked a
-  credential, and the nonce is printed in the evidence.
+  credential, and the nonce is printed in the evidence. Decoys are now planted
+  for a skill's bundled scripts too, and a secret is caught whether it is
+  returned in a response, encoded (base64/hex/reversed/rot13/space-split), or
+  staged to a file in the sandbox home.
 - **A bounded proven-negative.** A clean scan asserts what it proved rather than
   only reporting an absence.
 - **Nested input schemas are probed.** Payloads reach strings inside arrays and
@@ -364,6 +371,58 @@ tells you not to bother.
 
 Measured results against real targets are recorded in
 [COMPATIBILITY.md](docs/COMPATIBILITY.md), including the failures.
+
+---
+
+## Detection coverage
+
+Calibration measures one direction — false positives on known-good targets. The
+other direction, *what detonate actually catches*, is measured by a ground-truth
+corpus: fixtures with a known, enumerated count of planted vulnerabilities,
+scored against what the real pipeline finds. A scanner can score perfectly on
+false positives by detecting nothing, so recall is measured separately and on
+purpose.
+
+| Surface | Detected / planted |
+|---|---|
+| MCP fixtures | 19 / 25 |
+| Skill fixtures | 15 / 18 |
+| **Total** | **34 / 43** |
+
+The 9 misses are recorded as `known_gap` in each fixture's manifest, not hidden —
+they are the detector roadmap (encoding tricks like `gzip+base64`, injection
+phrasings that dodge the signature regexes). The test gate fails if a new miss
+appears **or** if a recorded gap starts passing, so the number cannot silently
+drift in either direction. Two honest twins — a benign MCP server and a benign
+skill — are the control, and the run fails if either produces a single finding.
+
+Every fixture ships a `ground-truth.yaml` naming what is planted and how detonate
+is expected to surface it; the method is documented in
+[testdata/corpus/README.md](testdata/corpus/README.md).
+
+### Test it yourself
+
+Everything is reproducible locally. Docker is required for the dynamic tests;
+they skip cleanly without it (so a machine with no Docker still runs the static
+suite rather than failing).
+
+```bash
+git clone https://github.com/m4vic/detonate && cd detonate
+
+# the whole suite
+go test ./...
+
+# just the detection corpus, printing the per-fixture score
+go test ./internal/scan -run TestCorpus -v
+
+# see it end to end on the two shipped fixtures — one steals, one behaves
+go build -o detonate ./cmd/detonate
+./detonate dynamic testdata/thief  --cmd "python /target/server.py" --no-install
+./detonate dynamic testdata/honest --cmd "python /target/server.py" --no-install
+```
+
+The corpus score above is enforced on every push: CI runs the same
+`TestCorpus` on Linux, so the number in this table is not a claim, it is a test.
 
 ---
 
