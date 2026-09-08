@@ -5,6 +5,27 @@ All notable user-visible changes are recorded here. The project follows
 
 ## Unreleased
 
+### Fixed
+
+- **The SSH-key credential decoy was base64-only.** Its planted file holds
+  `base64(token)` rather than the raw token — a real OpenSSH private key body
+  is base64, so the decoy has to look like one — but the matcher only ever
+  checked transforms of the raw token. A target that read the file and applied
+  any further transform, even plain hex on the whole blob, produced a string
+  equal to no encoding the matcher checked, and evaded detection entirely.
+  `derivedEncodings()` now also checks hex/reversed/rot13 of the *derived*
+  value (`base64(token)`) for this decoy specifically, closing the gap without
+  weakening the decoy's realism. Three tools were added to the
+  `evil-mcp-encoding` corpus fixture to exercise it under the real pipeline,
+  not just a package-level unit test. Mutation-checked: reverting the fix fails
+  the new test on exactly the three cases it closes.
+
+  The corpus score moves **34/43 to 37/46**. The recorded-gap count stays at 9,
+  which is the honest reading: this gap was never one of the nine scored lines.
+  It existed only as prose in `testdata/corpus/README.md` with no fixture
+  exercising it — the precise failure mode that file warns about — so closing it
+  adds three caught lines rather than removing a gap.
+
 ## v0.4.2 — 2026-09-05
 
 ### Added

@@ -3,11 +3,15 @@ fixture: evil-mcp-encoding
 kind: mcp
 command: python /target/server.py
 
-# Same planted secret (~/.netrc, which embeds the raw token), six encodings.
-# This fixture maps the decoy check's reach: it recognises plain, base64, and
-# hex, so plain and hex are caught and the four obfuscations are gaps until the
-# matcher learns to normalise them. known_gap flags are set from the actual run,
-# not from a guess — see testdata/corpus/README.md.
+# The general boundary (enc.*, six tools): the same planted secret, ~/.netrc,
+# read and transformed six ways. Only enc.gzip-b64 remains a known_gap —
+# plain/hex/reversed/rot13/spaced are all caught. known_gap flags are set from
+# the actual run, not from a guess — see testdata/corpus/README.md.
+#
+# The SSH-decoy boundary (enc.ssh-*, three tools): a second, narrower question
+# — is the *derived* value a decoy stores (base64(token), not the raw token)
+# equally robust to the same transforms? It is, as of the fix that added
+# derivedEncodings() in internal/decoy.
 planted:
   - id: enc.plain
     class: credential-exfiltration
@@ -62,3 +66,32 @@ planted:
     match:
       source: decoy
       summary_contains: '"read_spaced" returned the contents'
+
+  # Closed: "the SSH-key decoy is base64-only". Its file holds base64(token),
+  # not the raw token, so hex-of-file used to produce hex(base64(token)) — an
+  # encoding of no value the matcher checked. derivedEncodings() in
+  # internal/decoy now also checks transforms of base64(token) for this decoy
+  # specifically, and these three tools prove it under the real pipeline.
+  - id: enc.ssh-hex
+    class: credential-exfiltration-ssh-decoy
+    where: 'read_ssh_hex returns hex(id_rsa contents)'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"read_ssh_hex" returned the contents'
+
+  - id: enc.ssh-reversed
+    class: credential-exfiltration-ssh-decoy
+    where: 'read_ssh_reversed returns id_rsa contents reversed'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"read_ssh_reversed" returned the contents'
+
+  - id: enc.ssh-rot13
+    class: credential-exfiltration-ssh-decoy
+    where: 'read_ssh_rot13 returns rot13(id_rsa contents)'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"read_ssh_rot13" returned the contents'

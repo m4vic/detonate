@@ -2,6 +2,7 @@ package decoy
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -111,6 +112,74 @@ func TestMatchFindsLeakedTokensInEveryEncoding(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The accepted gap this closes: "the SSH-key decoy is base64-only". Its file
+// holds base64(token), not the raw token, because a real OpenSSH private key
+// body IS base64 and the decoy has to look like one. encodings() only ever
+// checks transforms of the raw token, so a target that read the file and
+// applied any further transform — even plain hex on the whole blob — produced
+// a string equal to no encoding of the token, and evaded the match entirely.
+//
+// This exercises exactly that: take what a target would actually produce by
+// transforming the on-disk key body (never the bare token, which the target
+// never sees), and confirm Match still recovers it.
+func TestMatchFindsTheSSHDecoyTransformedAfterReading(t *testing.T) {
+	env := plant(t)
+
+	var sshTok Token
+	found := false
+	for _, tok := range env.Tokens {
+		if tok.Kind == KindSSHKey {
+			sshTok, found = tok, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no SSH-key decoy was planted")
+	}
+	// What a target actually holds after reading ~/.ssh/id_rsa: the key body,
+	// base64(token) — never the bare token.
+	keyBody := base64.StdEncoding.EncodeToString([]byte(sshTok.Value))
+
+	for _, tc := range []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{"hex of the whole key body", "data: " + hex.EncodeToString([]byte(keyBody)), "hex-of-key-body"},
+		{"reversed key body", "leaked: " + reverseString(keyBody), "reversed-key-body"},
+		{"rot13 key body", "leaked: " + rot13(keyBody), "rot13-key-body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := env.Match(tc.response)
+			if len(hits) != 1 {
+				t.Fatalf("got %d hits, want 1", len(hits))
+			}
+			if hits[0].Encoding != tc.want {
+				t.Fatalf("encoding = %q, want %q", hits[0].Encoding, tc.want)
+			}
+			if hits[0].Token.Value != sshTok.Value {
+				t.Fatal("hit names the wrong token")
+			}
+		})
+	}
+
+	// A transform of the *raw* token — one the target never actually saw,
+	// since it only ever read base64(token) off disk — must not accidentally
+	// match. That would mean the check is too loose to trust.
+	t.Run("hex of the bare token is not what a real target would produce, and still must not over-match another token", func(t *testing.T) {
+		var other Token
+		for _, tok := range env.Tokens {
+			if tok.Kind != KindSSHKey {
+				other = tok
+				break
+			}
+		}
+		if hits := env.Match(hex.EncodeToString([]byte(other.Value))); len(hits) != 1 {
+			t.Fatalf("an unrelated token's own hex encoding stopped matching itself: got %d hits", len(hits))
+		}
+	})
 }
 
 // The property that makes a canary finding unarguable: ordinary output must

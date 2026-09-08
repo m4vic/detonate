@@ -202,7 +202,7 @@ detonate dynamic ./my-server --cmd "node /target/dist/index.js" --no-install
 ## What's new in 0.4
 
 - **A ground-truth detection corpus.** Detection capability is now a measured,
-  test-enforced number (**34/43** planted vulnerabilities caught, 9 recorded
+  test-enforced number (**37/46** planted vulnerabilities caught, 9 recorded
   gaps, zero false positives on the honest twins) rather than a claim. See
   [Detection coverage](#detection-coverage).
 - **Credential decoys.** The sandbox is furnished with plausible SSH keys, cloud
@@ -385,9 +385,9 @@ purpose.
 
 | Surface | Detected / planted |
 |---|---|
-| MCP fixtures | 19 / 25 |
+| MCP fixtures | 22 / 28 |
 | Skill fixtures | 15 / 18 |
-| **Total** | **34 / 43** |
+| **Total** | **37 / 46** |
 
 The 9 misses are recorded as `known_gap` in each fixture's manifest, not hidden —
 they are the detector roadmap (encoding tricks like `gzip+base64`, injection
