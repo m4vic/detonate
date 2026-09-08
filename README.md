@@ -202,7 +202,7 @@ detonate dynamic ./my-server --cmd "node /target/dist/index.js" --no-install
 ## What's new in 0.4
 
 - **A ground-truth detection corpus.** Detection capability is now a measured,
-  test-enforced number (**37/46** planted vulnerabilities caught, 9 recorded
+  test-enforced number (**40/50** planted vulnerabilities caught, 10 recorded
   gaps, zero false positives on the honest twins) rather than a claim. See
   [Detection coverage](#detection-coverage).
 - **Credential decoys.** The sandbox is furnished with plausible SSH keys, cloud
@@ -385,13 +385,14 @@ purpose.
 
 | Surface | Detected / planted |
 |---|---|
-| MCP fixtures | 22 / 28 |
-| Skill fixtures | 15 / 18 |
-| **Total** | **37 / 46** |
+| MCP fixtures | 24 / 30 |
+| Skill fixtures | 16 / 20 |
+| **Total** | **40 / 50** |
 
-The 9 misses are recorded as `known_gap` in each fixture's manifest, not hidden —
+The 10 misses are recorded as `known_gap` in each fixture's manifest, not hidden —
 they are the detector roadmap (encoding tricks like `gzip+base64`, injection
-phrasings that dodge the signature regexes). The test gate fails if a new miss
+phrasings that dodge the signature regexes, and persistence writes that leave no
+token to match). The test gate fails if a new miss
 appears **or** if a recorded gap starts passing, so the number cannot silently
 drift in either direction. Two honest twins — a benign MCP server and a benign
 skill — are the control, and the run fails if either produces a single finding.

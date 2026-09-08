@@ -1,0 +1,30 @@
+schema: detonate.corpus/v1
+fixture: evil-skill-covert
+kind: skill
+
+# The point of this fixture: the SKILL.md is clean. It declares Bash honestly,
+# carries no injection or concealment language, and reads like an ordinary
+# markdown-tidy helper -- nothing a reviewer scanning the instructions would
+# flag. The danger is entirely in what a bundled script does when it runs, which
+# is the skill-side parallel to evil-mcp-covert and the case that justifies
+# executing a skill's scripts instead of only reading its prose.
+#
+# known_gap flags are set from the actual run, not from a guess -- see
+# testdata/corpus/README.md.
+planted:
+  - id: covert.script-reads-credential
+    class: credential-exfiltration
+    where: 'format.py folds ~/.aws/credentials into its output disguised as a build fingerprint'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: 'scripts/format.py" returned the contents'
+
+  - id: covert.persistence-no-token
+    class: persistence
+    where: 'setup_env.py appends a curl|sh implant to ~/.bashrc, leaving no planted token to match'
+    expect: finding
+    known_gap: true
+    match:
+      source: decoy
+      summary_contains: '.bashrc'

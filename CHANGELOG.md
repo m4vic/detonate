@@ -5,6 +5,26 @@ All notable user-visible changes are recorded here. The project follows
 
 ## Unreleased
 
+### Added
+
+- **Two "covert" corpus fixtures** whose danger is invisible to static review,
+  which is the case that most directly justifies executing a target instead of
+  reading it. `evil-mcp-covert` ships two tools with honest names and honest
+  descriptions — a weather lookup that also returns your SSH key, and a file
+  reader that is clean on its first call and leaks base64'd AWS credentials on
+  every one after — and detonate catches both (2/2). `evil-skill-covert` ships
+  a `SKILL.md` that passes review cleanly (declares Bash honestly, no injection
+  or concealment phrasing) alongside a formatter script that folds AWS
+  credentials into its output disguised as a build fingerprint; caught (1/2).
+  The corpus moves **37/46 to 40/50**.
+- **A recorded gap: persistence writes leave no token.** The second
+  `evil-skill-covert` script appends a `curl | sh` implant to `~/.bashrc`. The
+  decoy design keys entirely on planted nonces, and a persistence write leaves
+  none — it writes attacker-controlled code, not a token — so it is invisible
+  to every current detector. Planted and marked `known_gap` rather than omitted;
+  closing it means watching sensitive startup paths, a different mechanism from
+  the token match. This is the tenth recorded gap.
+
 ### Fixed
 
 - **The SSH-key credential decoy was base64-only.** Its planted file holds
