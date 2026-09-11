@@ -288,8 +288,21 @@ func (e *Environment) Match(text string) []Hit {
 
 	var hits []Hit
 	for _, t := range e.Tokens {
+		checks := encodings(t.Value)
+		// The SSH-key decoy is the one file whose on-disk content is not the
+		// raw token: it holds base64(token), because a real OpenSSH private
+		// key body is base64 and the decoy has to look like one. Every
+		// encodings() check above tests transforms of the raw token, so a
+		// thief who reads the file and applies any further transform — even
+		// plain hex — produces a string that equals no encoding of the token
+		// and evades all of them. This was the accepted gap: "the SSH-key
+		// decoy is base64-only". Closed by also checking transforms of what
+		// is actually in the file.
+		if t.Kind == KindSSHKey {
+			checks = append(checks, derivedEncodings(t.Value)...)
+		}
 	encodingLoop:
-		for _, enc := range encodings(t.Value) {
+		for _, enc := range checks {
 			// fold encodings (plain, reversed, rot13) are matched
 			// case-insensitively because a hex secret is routinely upper-cased
 			// in transit; base64 and hex alphabets are case-significant and
@@ -462,6 +475,30 @@ func encodings(token string) []encoded {
 		{name: "hex", value: hex.EncodeToString([]byte(token))},
 		{name: "reversed", value: reverseString(token), fold: true},
 		{name: "rot13", value: rot13(token), fold: true},
+	}
+}
+
+// derivedEncodings covers transforms of a value derived from the token, not
+// the token itself.
+//
+// Today that is exactly one case: base64(token), the SSH-key decoy's file
+// content (see layout, ".ssh/id_rsa"). "plain" and "base64" reads of that file
+// are already caught by encodings() above — base64(token) IS one of its
+// entries, so a verbatim read matches the "base64" name. What escaped was
+// anything applied on top: hex-encode the file, reverse it, rot13 it. Named
+// with a "-key-body" suffix so evidence never claims a thief hex-encoded the
+// bare token when what actually happened is hex-of-the-whole-key-file — a
+// different, and less misleading, fact for a human to check.
+//
+// Deliberately narrow: only the transforms the accepted gap named ("even
+// plain hex"), not a second base64 pass. Double-encoding is not the documented
+// failure and adding it would be scope creep past what closing the gap needs.
+func derivedEncodings(token string) []encoded {
+	body := base64.StdEncoding.EncodeToString([]byte(token))
+	return []encoded{
+		{name: "hex-of-key-body", value: hex.EncodeToString([]byte(body))},
+		{name: "reversed-key-body", value: reverseString(body), fold: true},
+		{name: "rot13-key-body", value: rot13(body), fold: true},
 	}
 }
 

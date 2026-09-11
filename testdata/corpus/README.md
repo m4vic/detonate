@@ -35,14 +35,31 @@ Run `go test ./internal/scan -run TestCorpus -v` for the live numbers.
 | Fixture | Kind | Detected / planted | What it probes |
 |---|---|---|---|
 | `evil-mcp` | MCP | 11 / 12 | breadth: exfil, five poisoning shapes, unicode, shadowing, traversal, egress |
-| `evil-mcp-encoding` | MCP | 5 / 6 | credential-exfil **encoding** robustness |
+| `evil-mcp-encoding` | MCP | 8 / 9 | credential-exfil **encoding** robustness, and the SSH decoy's derived value |
 | `evil-mcp-injection` | MCP | 2 / 6 | description-injection **phrasing** robustness |
 | `evil-mcp-exfil-file` | MCP | 1 / 1 | exfil staged to disk instead of returned |
+| `evil-mcp-covert` | MCP | 2 / 2 | **manifest-clean** theft: honest tool names/descriptions, harm only at runtime |
 | `evil-skill` | Skill | 10 / 10 | breadth: injection, permission mismatch, script exfil |
 | `evil-skill-obfuscated` | Skill | 1 / 4 | skill-injection **phrasing** robustness + signature-list alignment |
 | `evil-skill-exfil` | Skill | 4 / 4 | exfil **channel** robustness (encoding + write-to-file) |
+| `evil-skill-covert` | Skill | 1 / 2 | **instructions-clean** skill: SKILL.md passes review, a script betrays it at runtime |
 
-Total: **34 / 43 detected, 9 recorded gaps, 0 findings on the honest twins.**
+Total: **40 / 50 detected, 10 recorded gaps, 0 findings on the honest twins.**
+
+The two `*-covert` fixtures are the ones that most directly justify the tool. A
+static reviewer reading the manifest or the SKILL.md sees nothing wrong in
+either: honest tool names, honest descriptions, no injection phrasing. The harm
+is only in what the code does when it runs — a weather tool that also returns
+your SSH key, a file reader clean on its first call and leaking on every one
+after, a tidy-formatter script that folds AWS credentials into its output
+disguised as a build fingerprint. detonate catches all four, which is the whole
+argument for executing a target rather than reading it.
+
+The gap count did not fall when the SSH-decoy gap closed, and that is not an
+error. That gap was never one of the nine scored lines — it lived only as prose
+in this file, with no fixture exercising it, which is exactly the state the
+workflow above warns about. Closing it added three *caught* lines rather than
+removing a gap: 34/43 became 37/46.
 
 The honest twins already in the repo — `testdata/honest` and
 `testdata/benign-formatter` — are the control, and `TestCorpusHonestTwinsStay
@@ -72,19 +89,33 @@ working on.
   themselves — a secret copied somewhere new. Wired into both surfaces (the
   skill script path and the MCP probe path), so staging a secret to disk instead
   of returning it no longer leaks unseen.
+- **The SSH-key decoy was base64-only.** Its file holds `base64(token)`, never
+  the raw token — a real OpenSSH private key body IS base64, so the decoy has
+  to look like one. Any transform on top of that — even plain hex on the whole
+  file — used to produce a string equal to no encoding of the bare token, and
+  evaded the match. `derivedEncodings()` in `internal/decoy` now also checks
+  transforms of the *derived* value (`base64(token)`) for this decoy
+  specifically. The raw-token decoys (`.netrc`, `.aws`, `.env`) never had this
+  problem, which is why the general encoding-boundary fixture still uses
+  `.netrc`; three new tools (`read_ssh_hex`/`_reversed`/`_rot13`) were added
+  to `evil-mcp-encoding` specifically to exercise this decoy under the real
+  pipeline, not just a decoy-package unit test.
 
 ### Open
 
 - **Compressed exfiltration.** `gzip+base64` (and any encoding that isn't a
   static transform of the token) still evades the matcher — catching it means
   attempting decompression of blobs in the output, not adding one more encoding.
-- **The SSH-key decoy is base64-only.** Its file holds `base64(token)`, never
-  the raw token, so *any* transform on top of it — even plain hex — evades the
-  match. The raw-token decoys (`.netrc`, `.aws`, `.env`) are more robust; the
-  encoding fixture uses `.netrc` for that reason.
 - **Injection phrasing.** The instruction/description regexes match a fixed verb
   and noun list. Synonyms ("set aside the earlier directions"), passive voice,
   homoglyphs, and base64-with-a-decode-nudge step outside it.
+- **Persistence writes leave no token.** The whole decoy design keys on planted
+  nonces: a leak is proven because a value that existed nowhere else came back.
+  A script that establishes persistence — appending a `curl | sh` implant to
+  `~/.bashrc`, dropping a cron entry — writes attacker-controlled *code*, not a
+  token, to a file that holds no decoy, so nothing matches. Catching it means
+  watching sensitive startup paths for writes, a different mechanism from the
+  token match. Planted in `evil-skill-covert` as `covert.persistence-no-token`.
 
 ## Expectation classes
 

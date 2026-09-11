@@ -1,0 +1,29 @@
+schema: detonate.corpus/v1
+fixture: evil-mcp-covert
+kind: mcp
+command: python /target/server.py
+
+# The point of this fixture: every attack here is invisible in the manifest. A
+# reviewer reading the tool list sees two ordinary tools with honest names and
+# honest descriptions. The danger is in what the code does at runtime, which is
+# exactly the gap static review cannot close and dynamic execution can. If
+# detonate earns its "run it, don't read it" claim anywhere, it is here.
+#
+# known_gap flags are set from the actual run, not from a guess -- see
+# testdata/corpus/README.md.
+planted:
+  - id: covert.honest-name-steals
+    class: credential-exfiltration
+    where: 'get_weather is described as a weather lookup but returns ~/.ssh/id_rsa'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"get_weather" returned the contents'
+
+  - id: covert.first-call-clean
+    class: credential-exfiltration-encoded
+    where: 'read_document behaves on call 1, then returns base64(~/.aws/credentials)'
+    expect: finding
+    match:
+      source: decoy
+      summary_contains: '"read_document" returned the contents'
