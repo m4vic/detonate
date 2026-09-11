@@ -214,8 +214,94 @@ Not cancelled. Not now.
   it as **v1.1** — the release that makes `no_findings` worth trusting.
 - MCPTox benchmark and the published precision/recall numbers (v1.2).
 - Static source-level tool extraction for non-MCPB servers. Measure demand first.
-- Capability model, targeted probing, transport breadth, remote MCP, eBPF.
-- The "AI system harness" generalization.
+- Capability model, remote MCP, the "AI system harness" generalization.
+- **eBPF runtime monitor, HTTP transport, prompts/resources** — now planned in
+  detail below (decided 2026-09-11), no longer a one-line grab-bag.
+
+---
+
+## Beyond 1.0 — runtime observability and real-target coverage (decided 2026-09-11)
+
+Two inputs drove these decisions: a competitive scan (dynamic execution is no
+longer unique — WASM/sandbox MCP analyzers now exist in research), and a
+corpus-fidelity review. Both point the same way: the differentiator is no longer
+"we run it", it is *proof you can trust* (the nonce) and *detection of what the
+stderr-based monitor structurally cannot see*.
+
+### What the 41/51 corpus number does and does not prove
+
+The fixtures are **protocol-faithful but structurally minimal**. Measured
+against the real servers scanned this project:
+
+| Dimension | Corpus fixtures | Real servers (measured) |
+|---|---|---|
+| Tools/server | 1–9, flat schemas | 11 (memory) → 682 (affiliate), nested |
+| Transport | stdio only | stdio **and Streamable HTTP** |
+| Surface | tools only | tools **+ prompts + resources** |
+| Attack shape | one isolated attack | one subtle attack among dozens of honest tools |
+
+So 41/51 proves **recall against isolated, known attacks**. It does **not** prove
+detection when an attack is buried in a large production server, and the corpus
+is blind to HTTP-transport servers and to prompts/resources entirely. That is
+the gap the work below closes.
+
+### Decision 1 — build a targeted eBPF runtime monitor (leads this work)
+
+- **Why:** it closes the two gaps the corpus just surfaced that the stderr
+  monitor cannot — persistence writes that leave no token
+  (`evil-skill-covert:covert.persistence-no-token`, an open gap) and covert
+  egress observed at the syscall rather than inferred from stderr
+  (`evil-mcp-postmark:covert-bcc`, caught on Linux today but only because the
+  failure happens to reach stderr). It is also the moat competitors are now
+  describing.
+- **Scope — targeted, NOT full syscall tracing:** `connect()`/DNS, and writes to
+  a sensitive-path allowlist (`~/.bashrc`, `~/.profile`, `~/.ssh/authorized_keys`,
+  cron paths). Evidence is the syscall and its arguments — deterministic, no LLM
+  (invariant 1 holds).
+- **Architecture:** a **host-side** privileged monitor attached to the target
+  container's cgroup/PID/netns. The sandbox stays capless and non-root; eBPF
+  observes it from outside. Target code still never executes on the host — the
+  monitor only observes (invariant 3 holds).
+- **Graceful degradation is mandatory:** Linux + privilege only. On
+  Windows/macOS/no-privilege it no-ops and the scan runs exactly as today. This
+  is **additive** — an absent syscall layer lowers completeness confidence, it
+  must never invent a finding (invariant 2). eBPF must never become a hard
+  dependency of a scan.
+- **Environment (Decision 2 below):** WSL2. Verified 2026-09-11 — kernel 6.18,
+  `/sys/kernel/btf/vmlinux` present, `CONFIG_BPF/BPF_SYSCALL/KPROBES=y`, so
+  CO-RE eBPF works. **Setup gap:** the only WSL2 distro is Docker's internal
+  `docker-desktop` backend; install a real dev distro (`wsl --install -d Ubuntu`)
+  with Go, clang/llvm, and bpftool before E1.
+- **The corpus is the gate.** Success is defined, not vibes: `persistence-no-token`
+  flips gap→caught, and `covert-bcc` is caught at the syscall level even in a
+  variant that never touches stderr (add that variant when E1 lands).
+
+### eBPF phased milestones
+
+- **E1 — spike in WSL2.** Minimal CO-RE program logging `connect()` for a target
+  container; prove it observes `evil-mcp-postmark`'s BCC syscall directly. No
+  detonate integration yet — just "can we see it".
+- **E2 — sensitive-file-write probe.** `openat`/`write` on the path allowlist;
+  prove it would flip `evil-skill-covert`'s persistence gap to caught.
+- **E3 — integrate.** Feed events into `internal/trace` + `assessment` as a new
+  `ebpf` source, with the same dedup/severity discipline the stderr monitor
+  already uses. Findings only from the targeted probes; all else is observation.
+- **E4 — degradation gate.** A test proving a scan with eBPF unavailable is
+  byte-identical to today, and a `DETONATE_REQUIRE_EBPF` that turns absence into
+  failure on Linux CI the way `DETONATE_REQUIRE_DOCKER` does.
+- **E5 — CI.** A privileged Linux job that runs it; corpus fixtures marked
+  `requires_ebpf` where detection depends on it.
+
+### The other real-target gaps (recorded, ranked; eBPF leads by decision)
+
+1. **Streamable HTTP transport.** stdio-only today, so a whole class of real
+   servers is unreachable. Biggest coverage unlock, buildable on Windows, and
+   the corpus needs its first HTTP fixture.
+2. **Prompts + resources.** tools-only today; a poisoned prompt or an
+   exfiltrating resource is unscanned. Needs both engine support and fixtures.
+3. **Corpus realism.** One subtle attack embedded among 30+ honest tools, to
+   measure detection-in-noise rather than detection-of-isolated-attack — the
+   fidelity gap the review named.
 
 ## Fix register — small, do them inside the weeks above
 
