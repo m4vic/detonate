@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -32,7 +33,17 @@ type groundTruth struct {
 	Fixture string `yaml:"fixture"`
 	Kind    string `yaml:"kind"`
 	Command string `yaml:"command"`
-	Planted []struct {
+	// RequiresLinux marks a fixture whose detection depends on sandbox behaviour
+	// that only the real Linux runtime reproduces. Docker Desktop on Windows and
+	// macOS runs containers inside a VM whose handling of `--network none`
+	// differs: a blocked outbound connection made *during a tool call* does not
+	// surface the same stderr there, so evil-mcp-postmark is caught on Linux and
+	// silently missed on Windows. (Startup-time egress is caught on both.) The
+	// same platform gap already forced GOOS skips in internal/decoy. Rather than
+	// mislabel a Linux catch as a gap because the author's box can't see it, the
+	// fixture is skipped off Linux and its result is trusted from CI.
+	RequiresLinux bool `yaml:"requires_linux"`
+	Planted       []struct {
 		ID    string `yaml:"id"`
 		Class string `yaml:"class"`
 		Where string `yaml:"where"`
@@ -176,6 +187,11 @@ func TestCorpus(t *testing.T) {
 			t.Parallel()
 
 			gt, dir := loadGroundTruth(t, name)
+			if gt.RequiresLinux && runtime.GOOS != "linux" {
+				t.Skipf("%s: detection depends on the Linux sandbox runtime; "+
+					"Docker Desktop on %s does not reproduce it (see requires_linux)",
+					gt.Fixture, runtime.GOOS)
+			}
 			report := runFixture(t, gt, dir)
 			detected, missed := scoreCorpus(t, gt, report)
 			assertScore(t, gt, detected, missed)

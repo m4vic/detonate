@@ -7,18 +7,18 @@ All notable user-visible changes are recorded here. The project follows
 
 ### Added
 
-- **A corpus fixture for the real `postmark-mcp` incident, which detonate does
-  not catch.** `evil-mcp-postmark` reproduces the September-2025 npm attack: a
+- **A corpus fixture for the real `postmark-mcp` incident, which detonate
+  catches.** `evil-mcp-postmark` reproduces the September-2025 npm attack: a
   clean-manifest email server that silently BCCs every message to an attacker
-  host. It reports **clean** — `no_findings`, `complete`, exit 0 — and that
-  result is now a recorded, test-enforced gap rather than an unknown. The
-  mechanism is worth stating: the BCC fires on every `send_email` call including
-  the benign baseline, so the baseline captures the blocked-connection stderr as
-  "normal" and later probes are suppressed as already-seen, while the monitor
-  never analyses the baseline call itself. Startup egress is caught (it fires
-  before any baseline exists); egress entangled with normal operation is not.
-  Closing it means judging the baseline's own behaviour, not adding a signature.
-  The eleventh recorded gap. Corpus is now **40/51**.
+  host. On Linux the blocked outbound connection surfaces on container stderr
+  and the monitor flags it critical — a named real-world attack detected by
+  running the server. Corpus is now **41/51**. The fixture is marked
+  `requires_linux` and skipped off Linux: Docker Desktop on Windows/macOS does
+  not reproduce the same `--network none` stderr for a connection made during a
+  tool call (startup egress is caught on both), so a local Windows run reports a
+  false clean. This repeats the platform lesson from the decoy work — CI on
+  Linux is authoritative, a Windows-local Docker result is not — and it was
+  caught here by CI disagreeing with a local run.
 - **Two "covert" corpus fixtures** whose danger is invisible to static review,
   which is the case that most directly justifies executing a target instead of
   reading it. `evil-mcp-covert` ships two tools with honest names and honest
