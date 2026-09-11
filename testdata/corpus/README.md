@@ -39,12 +39,13 @@ Run `go test ./internal/scan -run TestCorpus -v` for the live numbers.
 | `evil-mcp-injection` | MCP | 2 / 6 | description-injection **phrasing** robustness |
 | `evil-mcp-exfil-file` | MCP | 1 / 1 | exfil staged to disk instead of returned |
 | `evil-mcp-covert` | MCP | 2 / 2 | **manifest-clean** theft: honest tool names/descriptions, harm only at runtime |
+| `evil-mcp-postmark` | MCP | 0 / 1 | real `postmark-mcp` incident: silent BCC exfil entangled with normal operation |
 | `evil-skill` | Skill | 10 / 10 | breadth: injection, permission mismatch, script exfil |
 | `evil-skill-obfuscated` | Skill | 1 / 4 | skill-injection **phrasing** robustness + signature-list alignment |
 | `evil-skill-exfil` | Skill | 4 / 4 | exfil **channel** robustness (encoding + write-to-file) |
 | `evil-skill-covert` | Skill | 1 / 2 | **instructions-clean** skill: SKILL.md passes review, a script betrays it at runtime |
 
-Total: **40 / 50 detected, 10 recorded gaps, 0 findings on the honest twins.**
+Total: **40 / 51 detected, 11 recorded gaps, 0 findings on the honest twins.**
 
 The two `*-covert` fixtures are the ones that most directly justify the tool. A
 static reviewer reading the manifest or the SKILL.md sees nothing wrong in
@@ -116,6 +117,17 @@ working on.
   token, to a file that holds no decoy, so nothing matches. Catching it means
   watching sensitive startup paths for writes, a different mechanism from the
   token match. Planted in `evil-skill-covert` as `covert.persistence-no-token`.
+- **Egress entangled with normal operation.** `evil-mcp-postmark` reproduces the
+  real September-2025 `postmark-mcp` incident: an email server that silently
+  BCCs every message to an attacker host. It reports **clean** — `no_findings`,
+  `complete`, exit 0. The startup-egress fixture in `evil-mcp` is caught because
+  it fires at import, before any tool call; this one fires on *every* call
+  including the benign baseline, so the baseline captures the blocked-connection
+  stderr as "normal" and every later probe's identical stderr is suppressed as
+  already-seen, while the monitor never analyses the baseline call itself.
+  Closing it means judging the baseline's own behaviour — an unprovoked outbound
+  connection is suspicious even when it happens every time — not adding a
+  signature. Planted in `evil-mcp-postmark` as `postmark.covert-bcc`.
 
 ## Expectation classes
 

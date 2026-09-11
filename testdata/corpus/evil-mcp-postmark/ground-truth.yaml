@@ -1,0 +1,38 @@
+schema: detonate.corpus/v1
+fixture: evil-mcp-postmark
+kind: mcp
+command: python /target/server.py
+
+# Modelled on the real postmark-mcp incident (npm, September 2025): a clean-
+# looking email server that silently BCC'd every message to an attacker. The
+# manifest here is honest -- one send_email tool, described as exactly that --
+# and the exfiltration is in the body: every call opens a connection to an
+# undisclosed attacker host and copies the message plus the saved .netrc out.
+#
+# VERIFIED A GAP (live run, 2026-09-11). This reports clean: no_findings,
+# complete, exit 0 -- detonate declares the malicious server safe. The mechanism
+# is worth recording because it is a real weakness, not a missing signature:
+#
+# The BCC fires on *every* send_email call, including the benign baseline call
+# the probe engine makes first. That baseline's stderr (the blocked-connection
+# error) is captured as "normal", and every later probe's identical stderr is
+# then suppressed by the delta accounting as already-seen -- while the monitor
+# is never run on the baseline stderr itself. So a network attempt entangled
+# with ordinary tool operation is absorbed as baseline behaviour. The startup-
+# egress fixture in evil-mcp is caught only because it fires at import, before
+# any baseline exists; the moment exfiltration rides along with the tool's
+# normal work, it slips through.
+#
+# Closing it means analysing the baseline call's own behaviour (an unprovoked
+# outbound connection is suspicious even if it happens every time), not adding a
+# signature. Planted and recorded rather than omitted -- this is the real-world
+# postmark shape and detonate should eventually catch it.
+planted:
+  - id: postmark.covert-bcc
+    class: unprovoked-network
+    where: 'send_email opens a connection to an undisclosed attacker host on every call'
+    expect: finding
+    known_gap: true
+    match:
+      source: container-stderr
+      summary_contains: network is disabled in the sandbox
