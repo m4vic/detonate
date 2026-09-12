@@ -228,7 +228,7 @@ corpus-fidelity review. Both point the same way: the differentiator is no longer
 "we run it", it is *proof you can trust* (the nonce) and *detection of what the
 stderr-based monitor structurally cannot see*.
 
-### What the 41/51 corpus number does and does not prove
+### What the 40/51 corpus number does and does not prove
 
 The fixtures are **protocol-faithful but structurally minimal**. Measured
 against the real servers scanned this project:
@@ -240,7 +240,7 @@ against the real servers scanned this project:
 | Surface | tools only | tools **+ prompts + resources** |
 | Attack shape | one isolated attack | one subtle attack among dozens of honest tools |
 
-So 41/51 proves **recall against isolated, known attacks**. It does **not** prove
+So 40/51 proves **recall against isolated, known attacks**. It does **not** prove
 detection when an attack is buried in a large production server, and the corpus
 is blind to HTTP-transport servers and to prompts/resources entirely. That is
 the gap the work below closes.
@@ -251,9 +251,9 @@ the gap the work below closes.
   monitor cannot — persistence writes that leave no token
   (`evil-skill-covert:covert.persistence-no-token`, an open gap) and covert
   egress observed at the syscall rather than inferred from stderr
-  (`evil-mcp-postmark:covert-bcc`, caught on Linux today but only because the
-  failure happens to reach stderr). It is also the moat competitors are now
-  describing.
+  (`evil-mcp-postmark:covert-bcc`, an open gap: a silent BCC writes nothing to
+  stderr, so the stderr-inference monitor cannot see it at all). It is also the
+  moat competitors are now describing.
 - **Scope — targeted, NOT full syscall tracing:** `connect()`/DNS, and writes to
   a sensitive-path allowlist (`~/.bashrc`, `~/.profile`, `~/.ssh/authorized_keys`,
   cron paths). Evidence is the syscall and its arguments — deterministic, no LLM
@@ -272,9 +272,11 @@ the gap the work below closes.
   CO-RE eBPF works. **Setup gap:** the only WSL2 distro is Docker's internal
   `docker-desktop` backend; install a real dev distro (`wsl --install -d Ubuntu`)
   with Go, clang/llvm, and bpftool before E1.
-- **The corpus is the gate.** Success is defined, not vibes: `persistence-no-token`
-  flips gap→caught, and `covert-bcc` is caught at the syscall level even in a
-  variant that never touches stderr (add that variant when E1 lands).
+- **The corpus is the gate.** Success is defined, not vibes: both
+  `evil-skill-covert:covert.persistence-no-token` and
+  `evil-mcp-postmark:covert-bcc` flip gap→caught, detected at the syscall level
+  (a sensitive-path write and a `connect()` respectively) with no reliance on
+  stderr.
 
 ### eBPF phased milestones
 

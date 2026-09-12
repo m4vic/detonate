@@ -7,18 +7,20 @@ All notable user-visible changes are recorded here. The project follows
 
 ### Added
 
-- **A corpus fixture for the real `postmark-mcp` incident, which detonate
-  catches.** `evil-mcp-postmark` reproduces the September-2025 npm attack: a
-  clean-manifest email server that silently BCCs every message to an attacker
-  host. On Linux the blocked outbound connection surfaces on container stderr
-  and the monitor flags it critical — a named real-world attack detected by
-  running the server. Corpus is now **41/51**. The fixture is marked
-  `requires_linux` and skipped off Linux: Docker Desktop on Windows/macOS does
-  not reproduce the same `--network none` stderr for a connection made during a
-  tool call (startup egress is caught on both), so a local Windows run reports a
-  false clean. This repeats the platform lesson from the decoy work — CI on
-  Linux is authoritative, a Windows-local Docker result is not — and it was
-  caught here by CI disagreeing with a local run.
+- **A corpus fixture for the real `postmark-mcp` incident — a recorded gap.**
+  `evil-mcp-postmark` reproduces the September-2025 npm attack: a clean-manifest
+  email server that silently BCCs every message to an attacker host. detonate
+  does **not** catch it, and now says so under test. The monitor infers network
+  attempts from container stderr, and a real covert exfiltrator does not log a
+  failed delivery — nothing reaches stderr, so there is nothing to infer.
+  Recorded as `known_gap` and made the eleventh gap; corpus is **40/51**.
+  (Detecting it needs the `connect()` syscall itself, which is the planned eBPF
+  monitor — closing this gap is a defined success criterion for that work.)
+  An earlier version logged the failed connection, which made detection *flaky*
+  — caught on one CI run and missed on the next, as the blocked connection raced
+  the probe engine's baseline/delta stderr accounting. A finding that flips
+  between runs violates the determinism the tool rests on, so the fixture was
+  made silent: an honest, stable miss rather than a coin-flip catch.
 - **Two "covert" corpus fixtures** whose danger is invisible to static review,
   which is the case that most directly justifies executing a target instead of
   reading it. `evil-mcp-covert` ships two tools with honest names and honest
