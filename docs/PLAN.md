@@ -297,9 +297,21 @@ the gap the work below closes.
   to a `cilium/ebpf` reader; load with `ebpf.LoadCollectionSpec` (no bpf2go
   codegen needed); attach with `link.Tracepoint`. Loading needs root — the
   monitor is host-side, the sandbox stays capless.
+- [x] **Attribution — proven 2026-09-15.** The un-proven risk before E3: E1/E2
+  traced system-wide, but production must flag only the target container. A
+  `BPF_MAP_TYPE_ARRAY` holds one target cgroup id (userspace writes it before
+  attach), and the program drops any event whose `bpf_get_current_cgroup_id()`
+  does not match. Proven: the same silent `connect()` made inside vs. outside a
+  hand-made cgroup was captured only for the in-cgroup process, host processes
+  ignored. On cgroup v2 the id is the cgroup dir's inode; E3 reads it from the
+  Docker container instead of a hand-made cgroup — same filter.
 - **E3 — integrate.** Feed events into `internal/trace` + `assessment` as a new
   `ebpf` source, with the same dedup/severity discipline the stderr monitor
   already uses. Findings only from the targeted probes; all else is observation.
+  No unknowns remain after the three spikes — the open questions are build-system
+  choices (how to ship the compiled `.bpf.o`: `go:embed` a committed object vs.
+  compile at build behind a `//go:build linux` tag) and reading the launched
+  container's cgroup id from `internal/sandbox`.
 - **E4 — degradation gate.** A test proving a scan with eBPF unavailable is
   byte-identical to today, and a `DETONATE_REQUIRE_EBPF` that turns absence into
   failure on Linux CI the way `DETONATE_REQUIRE_DOCKER` does.
