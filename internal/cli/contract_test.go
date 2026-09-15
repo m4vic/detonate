@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/m4vic/detonate/internal/assessment"
+	"github.com/m4vic/detonate/internal/bundle"
 	"github.com/m4vic/detonate/internal/report"
 )
 
@@ -298,5 +299,23 @@ func TestNoFaultAtAnyPhaseBoundaryExitsClean(t *testing.T) {
 					"CI reads 0 as safe to merge", tc.name, summary.Risk, summary.Completeness)
 			}
 		})
+	}
+}
+
+// The schema identifiers are the other half of the frozen contract. A consumer
+// keys on `"schema": "detonate.report/v1"` to know which fields it can rely on;
+// a saved bundle's `detonate.bundle/v1` is what `detonate report` replays. Like
+// the exit codes, these strings can only grow fields under the same identifier
+// — changing or removing a field means a new `/v2` identifier and a major
+// release, never a silent edit. Pinning the literals here makes bumping one a
+// deliberate, reviewed act. The policy is written in docs/CONTRACT.md.
+func TestSchemaIdentifiersAreFrozen(t *testing.T) {
+	if report.SchemaV1 != "detonate.report/v1" {
+		t.Errorf("report schema id is %q, want %q — a breaking change to the "+
+			"published contract, not a patch", report.SchemaV1, "detonate.report/v1")
+	}
+	if bundle.SchemaV1 != "detonate.bundle/v1" {
+		t.Errorf("bundle schema id is %q, want %q — a breaking change to the "+
+			"published contract, not a patch", bundle.SchemaV1, "detonate.bundle/v1")
 	}
 }

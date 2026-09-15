@@ -456,6 +456,7 @@ final and acquisition is safe, not that every feature is built.
 
 ## Docs
 
+- [Contract](docs/CONTRACT.md) — the frozen exit codes and schema identifiers a pipeline can gate on, and how they may change
 - [Architecture](docs/ARCHITECTURE.md) — what the code does today, module by module
 - [Plan](docs/PLAN.md) — what "done" means, and what is deliberately not being built
 - [Compatibility](docs/COMPATIBILITY.md) — measured results against real targets, including what failed
