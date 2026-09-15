@@ -105,16 +105,17 @@ a coverage-accounting rule:
 A0-A2 are why the dynamic differentiator does not currently reach real targets.
 Sizing them is the first task of week two, before anything else is committed to.
 
-- [x] **6. Total scan budget. Implemented 2026-08-2x, partially verified.**
+- [x] **6. Total scan budget. Fully verified 2026-09-15.**
       `scan.DefaultBudget` is 15 minutes and `scan.Run` wraps the whole pipeline
       in it, recording a required `pipeline.budget` timeout scenario so an
       overrun cannot report success.
-      — *check, partly open:* `TestBudgetExceededIsReportedAndNeverLooksClean`
-      proves the collapse using an already-spent budget, which needs no target.
-      **Not yet proven:** a genuinely hanging target, running under a real
-      deadline, is killed and reported. The fixture takes the same code path
-      but does not exercise the phase that would actually have to be
-      interrupted.
+      — *check:* `TestBudgetExceededIsReportedAndNeverLooksClean` proves the
+      collapse with an already-spent budget, and
+      `TestHangingTargetIsKilledByTheBudgetAndReported` now proves the other
+      half against Docker: `sleep 600` launched as an MCP server under a 5s
+      budget is killed in ~11s (well under the 30s handshake timeout, so the
+      budget is demonstrably what stopped it), reported as `pipeline.budget`
+      timeout, and completeness collapses. Stable across repeated runs.
 
 - [ ] **7. No path exits 0 without a verdict. THE priority.** Measured broken:
       six real servers, six exits of 0, zero verdicts. An unassessed target must
