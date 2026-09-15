@@ -96,7 +96,7 @@ func (a *App) runInteractive(ctx context.Context) int {
 	_ = a.configureColor(colorAuto, "text")
 
 	fmt.Fprint(output, a.heading(bannerText()))
-	fmt.Fprintln(output, a.warning("  ALPHA")+"  /static reads artifacts; /dynamic executes only inside Docker.")
+	fmt.Fprintln(output, a.muted("  /static reads artifacts; /dynamic executes only inside Docker."))
 	fmt.Fprintln(output, a.heading("  COMMANDS")+"  /static <target>  /dynamic <target>  /report <dir>  /help  /exit")
 	fmt.Fprintln(output, a.muted("  Paste a target without a slash to use /static."))
 
@@ -198,7 +198,7 @@ func (a *App) dispatchInteractiveLine(ctx context.Context, line string) int {
 
 	cmd := fields[0]
 
-	// Handle slash or word subcommands (/static, static, /dynamic, dynamic, /combined, combined)
+	// Handle slash or word subcommands (/static, static, /dynamic, dynamic)
 	switch cmd {
 	case "/static", "static":
 		if len(fields) < 2 {
@@ -212,12 +212,6 @@ func (a *App) dispatchInteractiveLine(ctx context.Context, line string) int {
 			return exitUsage
 		}
 		return a.runDynamic(ctx, fields[1:])
-	case "/combined", "combined":
-		if len(fields) < 2 {
-			fmt.Fprintln(a.Stderr, "usage: /combined <target> [options]")
-			return exitUsage
-		}
-		return a.runCombined(fields[1:])
 	case "/report", "report":
 		return a.runSavedReport(fields[1:])
 	case "doctor":

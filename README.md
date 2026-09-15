@@ -42,8 +42,17 @@ curl -sSL "https://github.com/m4vic/detonate/releases/download/${VERSION}/detona
 sudo mv detonate /usr/local/bin/
 ```
 
+```powershell
+# Windows (PowerShell)
+$tag = (Invoke-RestMethod https://api.github.com/repos/m4vic/detonate/releases/latest).tag_name
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+Invoke-WebRequest "https://github.com/m4vic/detonate/releases/download/$tag/detonate_$($tag.TrimStart('v'))_windows_$arch.zip" -OutFile detonate.zip
+Expand-Archive detonate.zip -DestinationPath $env:LOCALAPPDATA\detonate -Force
+# then add $env:LOCALAPPDATA\detonate to your PATH
+```
+
 ```bash
-# With Go 1.25+ installed
+# With Go 1.25+ installed (any OS)
 go install github.com/m4vic/detonate/cmd/detonate@latest
 ```
 
@@ -447,6 +456,7 @@ final and acquisition is safe, not that every feature is built.
 
 ## Docs
 
+- [Contract](docs/CONTRACT.md) — the frozen exit codes and schema identifiers a pipeline can gate on, and how they may change
 - [Architecture](docs/ARCHITECTURE.md) — what the code does today, module by module
 - [Plan](docs/PLAN.md) — what "done" means, and what is deliberately not being built
 - [Compatibility](docs/COMPATIBILITY.md) — measured results against real targets, including what failed

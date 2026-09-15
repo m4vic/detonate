@@ -193,9 +193,15 @@ Sizing them is the first task of week two, before anything else is committed to.
       Docker daemon disappears mid-scan. Both were observed to be survivable
       during this session but neither was measured.
 
-- [ ] **9. Freeze the contract.** Exit codes (already stable in practice) and
-      `schema_version`, plus a written deprecation policy.
-      — *check:* documented, and a test fails if an exit code changes.
+- [x] **9. Freeze the contract. Done 2026-09-15.** Exit codes and the schema
+      identifiers (`detonate.report/v1`, `detonate.bundle/v1`) are pinned to
+      their literals in `internal/cli/contract_test.go`
+      (`TestExitCodesAreFrozen`, `TestSchemaIdentifiersAreFrozen`), so a change
+      fails loudly in review. The deprecation policy — additive vs. breaking,
+      new identifier + major bump for breaks, one-cycle dual-emit — is written
+      in [CONTRACT.md](CONTRACT.md).
+      — *check:* documented ✓, and a test fails if an exit code or schema id
+      changes ✓.
 
 - [ ] **10. Ship `v1.0.0-rc1`, soak for a few days, then `v1.0.0`.**
       — *check:* the six facts above all hold on the released binary.
