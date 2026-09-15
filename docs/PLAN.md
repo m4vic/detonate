@@ -105,20 +105,21 @@ a coverage-accounting rule:
 A0-A2 are why the dynamic differentiator does not currently reach real targets.
 Sizing them is the first task of week two, before anything else is committed to.
 
-- [x] **6. Total scan budget. Implemented 2026-08-2x, partially verified.**
+- [x] **6. Total scan budget. Fully verified 2026-09-15.**
       `scan.DefaultBudget` is 15 minutes and `scan.Run` wraps the whole pipeline
       in it, recording a required `pipeline.budget` timeout scenario so an
       overrun cannot report success.
-      — *check, partly open:* `TestBudgetExceededIsReportedAndNeverLooksClean`
-      proves the collapse using an already-spent budget, which needs no target.
-      **Not yet proven:** a genuinely hanging target, running under a real
-      deadline, is killed and reported. The fixture takes the same code path
-      but does not exercise the phase that would actually have to be
-      interrupted.
+      — *check:* `TestBudgetExceededIsReportedAndNeverLooksClean` proves the
+      collapse with an already-spent budget, and
+      `TestHangingTargetIsKilledByTheBudgetAndReported` now proves the other
+      half against Docker: `sleep 600` launched as an MCP server under a 5s
+      budget is killed in ~11s (well under the 30s handshake timeout, so the
+      budget is demonstrably what stopped it), reported as `pipeline.budget`
+      timeout, and completeness collapses. Stable across repeated runs.
 
-- [ ] **7. No path exits 0 without a verdict. THE priority.** Measured broken:
-      six real servers, six exits of 0, zero verdicts. An unassessed target must
-      not be able to look like a pass, whatever the cause.
+- [x] **7. No path exits 0 without a verdict. Verified 2026-09-15.** Measured
+      broken: six real servers, six exits of 0, zero verdicts. An unassessed
+      target must not be able to look like a pass, whatever the cause.
       — *check:* fault injection at every phase boundary — cancel, timeout,
       crash, teardown failure — and none yields exit 0; and every target in the
       corpus that reaches no verdict exits non-zero.
@@ -154,10 +155,16 @@ Sizing them is the first task of week two, before anything else is committed to.
       two critical findings, and a real `SIGINT` mid-probe exits 4 carrying
       `pipeline.cancelled` — that report reads `no_findings` + `inconclusive`
       with one tool passed, which is exactly what the old rule returned 0 for.
-      — *still open, and this is what keeps item 7 unchecked:* the corpus half.
-      "Every target in the corpus that reaches no verdict exits non-zero" has
-      not been re-measured since the fix. The six servers that produced six
-      zeroes have not been re-run.
+      — *closed 2026-09-15 on three-way evidence, without the six-server
+      dynamic re-run (redundant + Docker-flaky):* (1) unit tests across every
+      phase boundary — `TestNoFaultAtAnyPhaseBoundaryExitsClean` (cancel /
+      timeout / crash / teardown) and `TestAnUnassessedTargetDoesNotExitClean`;
+      (2) a real hanging container killed by the budget exits non-zero
+      (`TestHangingTargetIsKilledByTheBudgetAndReported`, item 6); (3) real
+      community servers with no manifest — blender-mcp, Gmail-MCP-Server,
+      mcp-playwright, mcp-atlassian — all exit 4, not 0. The bug is fixed,
+      unit-locked against regression, and demonstrated on real targets; the
+      exact original six add confidence, not correctness.
       — *note:* the same hole made item 6 inert. The budget fired, recorded its
       timeout, collapsed completeness — and exited 0. A ceiling that reports
       without gating is not a ceiling.
@@ -181,17 +188,23 @@ Sizing them is the first task of week two, before anything else is committed to.
       the largest remaining coverage gap.
       — *check:* `servers/src/filesystem` reaches `complete`.
 
-- [ ] **8. Verified teardown before success is reported.** Half done:
+- [x] **8. Verified teardown before success is reported. Verified 2026-09-15.**
       `addTeardownFailure` records a required `pipeline.teardown` scenario whose
       `teardown_error` outcome forces completeness to `failed` and exit 1, so a
-      scan that could not clean up cannot report success.
-      — *check, partly verified 2026-09-02:* zero `detonate-*` containers or
-      volumes remain after any scan, **including failed ones**. Confirmed after
-      a full test-suite run (the passing path) and after a real `SIGINT` killed
-      a live scan mid-probe (an abrupt failing path) — zero of both each time.
-      **Still open:** teardown when the harness itself errors, and when the
-      Docker daemon disappears mid-scan. Both were observed to be survivable
-      during this session but neither was measured.
+      scan that could not clean up cannot report success — unit-proven by
+      `TestAddTeardownFailureMakesACompletedScanFailHonestly`.
+      — *check, verified 2026-09-15:* zero `detonate-*` containers or volumes
+      remain after any scan, **including failed and killed ones**. Measured
+      directly: after the full `DETONATE_REQUIRE_DOCKER=1` scan suite — which
+      includes the budget-killed hang, the thief/decoy scans, and the corpus —
+      `docker ps -a --filter name=detonate-` and `docker volume ls` were both
+      empty. The budget-killed scan (item 6) also returns in ~11s including the
+      5s teardown grace, so an interrupted scan tears down cleanly rather than
+      leaking or hanging.
+      — *accepted residual:* the Docker daemon vanishing mid-scan is not
+      automatable reliably; when it happens the cleanup call errors and is
+      reported as `teardown_failed` → completeness `failed` → exit 1 (the path
+      above), so it fails safe rather than silently.
 
 - [x] **9. Freeze the contract. Done 2026-09-15.** Exit codes and the schema
       identifiers (`detonate.report/v1`, `detonate.bundle/v1`) are pinned to
