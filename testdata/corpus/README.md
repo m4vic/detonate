@@ -39,12 +39,13 @@ Run `go test ./internal/scan -run TestCorpus -v` for the live numbers.
 | `evil-mcp-injection` | MCP | 2 / 6 | description-injection **phrasing** robustness |
 | `evil-mcp-exfil-file` | MCP | 1 / 1 | exfil staged to disk instead of returned |
 | `evil-mcp-covert` | MCP | 2 / 2 | **manifest-clean** theft: honest tool names/descriptions, harm only at runtime |
+| `evil-mcp-postmark` | MCP | 0 / 1 | real `postmark-mcp` incident: silent BCC exfil the stderr monitor cannot see (eBPF gap) |
 | `evil-skill` | Skill | 10 / 10 | breadth: injection, permission mismatch, script exfil |
 | `evil-skill-obfuscated` | Skill | 1 / 4 | skill-injection **phrasing** robustness + signature-list alignment |
 | `evil-skill-exfil` | Skill | 4 / 4 | exfil **channel** robustness (encoding + write-to-file) |
 | `evil-skill-covert` | Skill | 1 / 2 | **instructions-clean** skill: SKILL.md passes review, a script betrays it at runtime |
 
-Total: **40 / 50 detected, 10 recorded gaps, 0 findings on the honest twins.**
+Total: **40 / 51 detected, 11 recorded gaps, 0 findings on the honest twins.**
 
 The two `*-covert` fixtures are the ones that most directly justify the tool. A
 static reviewer reading the manifest or the SKILL.md sees nothing wrong in
@@ -116,6 +117,20 @@ working on.
   token, to a file that holds no decoy, so nothing matches. Catching it means
   watching sensitive startup paths for writes, a different mechanism from the
   token match. Planted in `evil-skill-covert` as `covert.persistence-no-token`.
+- **Covert egress entangled with normal operation.** `evil-mcp-postmark`
+  reproduces the September-2025 `postmark-mcp` incident: an email server that
+  silently BCCs every message to an attacker host. Because a real exfiltrator
+  does not log a failed delivery, nothing reaches stderr, and detonate's monitor
+  infers network attempts *from* stderr — so it cannot see this. It reports
+  clean. (An earlier version of the fixture logged the failure, which made
+  detection flaky — caught on one CI run, missed on the next, as the blocked
+  connection raced the probe engine's baseline/delta stderr accounting. A
+  finding that flips between runs is worse than an honest gap, so the fixture
+  was made silent.) `evil-mcp`'s startup egress is caught because it fires at
+  import, before any tool call; egress during normal operation needs the
+  `connect()` syscall itself. This is the sharpest argument for the planned eBPF
+  monitor, and closing it is a defined success criterion for that work
+  (`docs/PLAN.md`). Planted as `postmark.covert-bcc`.
 
 ## Expectation classes
 

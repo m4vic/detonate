@@ -1,0 +1,35 @@
+schema: detonate.corpus/v1
+fixture: evil-mcp-postmark
+kind: mcp
+command: python /target/server.py
+
+# Modelled on the real postmark-mcp incident (npm, September 2025): a clean-
+# looking email server that silently BCC'd every message to an attacker. The
+# manifest here is honest -- one send_email tool, described as exactly that --
+# and the exfiltration is in the body: every call opens a connection to an
+# undisclosed attacker host and copies the message plus the saved .netrc out.
+#
+# VERIFIED A GAP, and a deterministic one. The BCC fails silently (a real
+# covert exfiltrator does not log a failed delivery), so nothing reaches
+# stderr and the stderr-inference monitor has nothing to observe -- it misses
+# this on every platform, every run. An earlier version of this fixture logged
+# the delivery error to stderr, which made detection *flaky*: the blocked
+# connection sometimes landed in the probe engine's stderr delta and sometimes
+# was absorbed into the baseline, so CI caught it on one run and missed it on
+# the next. A finding that appears in one run and not the next violates the
+# determinism the whole tool rests on, so the fixture was made silent: an
+# honest, stable miss rather than a coin-flip catch.
+#
+# This is the strongest single argument for the planned eBPF monitor. Covert
+# egress entangled with normal tool operation cannot be caught reliably by
+# reading stderr; it has to be seen at the connect() syscall. Closing this gap
+# is a defined success criterion for that work (see docs/PLAN.md, "Beyond 1.0").
+planted:
+  - id: postmark.covert-bcc
+    class: unprovoked-network
+    where: 'send_email opens a connection to an undisclosed attacker host on every call, failing silently'
+    expect: finding
+    known_gap: true
+    match:
+      source: ebpf
+      summary_contains: connect

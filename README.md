@@ -202,7 +202,7 @@ detonate dynamic ./my-server --cmd "node /target/dist/index.js" --no-install
 ## What's new in 0.4
 
 - **A ground-truth detection corpus.** Detection capability is now a measured,
-  test-enforced number (**40/50** planted vulnerabilities caught, 10 recorded
+  test-enforced number (**40/51** planted vulnerabilities caught, 11 recorded
   gaps, zero false positives on the honest twins) rather than a claim. See
   [Detection coverage](#detection-coverage).
 - **Credential decoys.** The sandbox is furnished with plausible SSH keys, cloud
@@ -240,29 +240,38 @@ Full detail in the [changelog](CHANGELOG.md).
 
 ---
 
-## Why not just use a static scanner
+## What makes a detonate finding different
 
 Most MCP scanners read the manifest, pattern-match the source, and ask a model
-what it thinks. Detonate does that too — and then runs the thing.
+what it thinks. Detonate runs the thing instead — but dynamic execution alone is
+no longer rare (WASM- and sandbox-based analyzers are appearing in research).
+Two properties are the actual difference, and both are about whether you can
+*trust* a finding:
 
-| | Reads manifests and source | Executes the target and probes its tools |
-|---|---|---|
-| Static and LLM-based scanners | yes | no |
-| **detonate** | yes | **yes** |
+**A finding is proof, not a suspicion.** Every credential the sandbox plants
+carries a unique 128-bit nonce that exists nowhere else. If that exact value
+comes back out of a tool — plain, base64'd, hex'd, reversed — the tool read a
+secret and handed it over. There is no benign explanation to argue about and no
+threshold to tune; the false-positive rate on the honest twins is measured at
+zero. Most scanners answer "this looks risky"; detonate answers "this specific
+byte string left the sandbox, here it is."
 
-The distinction is not academic. Published measurement of static MCP analysis
-found it scored **100% on Python and 0% on JavaScript**, while dynamic analysis
-of the same corpus scored 100% across every language
-([arXiv:2603.21641](https://arxiv.org/abs/2603.21641)). Detonate speaks to a
-running server over the MCP protocol and never parses target source, so its
-coverage does not depend on the language the target happens to be written in.
+**No LLM is in any verdict.** Findings come from deterministic rules over
+collected evidence, so two runs of an unchanged target give the same answer.
+A scanner whose output drifts between runs — which every LLM-judged one does —
+cannot gate a pipeline on a frozen exit code. Detonate can, and does.
 
-It also means a finding is a fact rather than a suspicion. The file came back or
-it did not.
+Executing the target is what makes both possible, and it has a measured payoff:
+static MCP analysis scored **100% on Python and 0% on JavaScript** in published
+work, while dynamic analysis of the same corpus scored 100% across every
+language ([arXiv:2603.21641](https://arxiv.org/abs/2603.21641)). Detonate speaks
+to a running server over the protocol and never parses source, so its coverage
+does not depend on the language the target is written in.
 
-**No LLM is involved in any verdict.** Findings come from deterministic rules
-over static artifacts and collected runtime evidence. A scanner whose output
-changes between runs cannot gate a pipeline.
+| | Reads manifests and source | Executes and probes | Verdict is deterministic | Proof is a unique nonce |
+|---|---|---|---|---|
+| Static / LLM scanners | yes | no | no | no |
+| **detonate** | yes | **yes** | **yes** | **yes** |
 
 ---
 
@@ -385,11 +394,11 @@ purpose.
 
 | Surface | Detected / planted |
 |---|---|
-| MCP fixtures | 24 / 30 |
+| MCP fixtures | 24 / 31 |
 | Skill fixtures | 16 / 20 |
-| **Total** | **40 / 50** |
+| **Total** | **40 / 51** |
 
-The 10 misses are recorded as `known_gap` in each fixture's manifest, not hidden —
+The 11 misses are recorded as `known_gap` in each fixture's manifest, not hidden —
 they are the detector roadmap (encoding tricks like `gzip+base64`, injection
 phrasings that dodge the signature regexes, and persistence writes that leave no
 token to match). The test gate fails if a new miss
