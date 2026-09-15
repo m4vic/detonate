@@ -1,0 +1,3 @@
+# Generated at build time from the running kernel's BTF; never committed.
+# The committed, portable artifact is ../monitor.bpf.o (CO-RE relocatable).
+vmlinux.h
