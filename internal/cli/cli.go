@@ -166,8 +166,8 @@ Usage:
   detonate              Guided scan
   detonate doctor       Check whether this machine can run a scan
   detonate report <dir> Render a saved report without rescanning
-  detonate static <target>   Static-only inspection (alpha)
-  detonate dynamic <target>  Sandboxed execution (experimental)
+  detonate static <target>   Inspect without running it (no Docker)
+  detonate dynamic <target>  Run it in a sandbox and watch what it does
 
 detonate works out what the target is: a folder with SKILL.md is a skill, a
 folder with an entry point is an MCP server, a .txt or .md file is a prompt.
@@ -254,8 +254,6 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.runStatic(ctx, args[1:])
 	case "dynamic":
 		return a.runDynamic(ctx, args[1:])
-	case "combined":
-		return a.runCombined(args[1:])
 	}
 
 	if args[0] != "-" && strings.HasPrefix(args[0], "-") {
