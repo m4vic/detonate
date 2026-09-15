@@ -280,11 +280,23 @@ the gap the work below closes.
 
 ### eBPF phased milestones
 
-- **E1 — spike in WSL2.** Minimal CO-RE program logging `connect()` for a target
-  container; prove it observes `evil-mcp-postmark`'s BCC syscall directly. No
-  detonate integration yet — just "can we see it".
-- **E2 — sensitive-file-write probe.** `openat`/`write` on the path allowlist;
-  prove it would flip `evil-skill-covert`'s persistence gap to caught.
+- [x] **E1 — spike in WSL2. Done 2026-09-15.** A CO-RE tracepoint on
+  `syscalls/sys_enter_connect`, loaded by a cilium/ebpf (v0.22) Go userspace
+  reader over a ring buffer, observed a silent `connect()` to `1.2.3.4:443` that
+  the calling process never printed — the postmark BCC shape. Proven against the
+  live WSL2 kernel (6.18, BTF), spike at `~/ebpf-spike`.
+- [x] **E2 — sensitive-file-write probe. Done 2026-09-15.** A CO-RE tracepoint on
+  `syscalls/sys_enter_openat`, filtered in-kernel to write-intent opens
+  (`O_ACCMODE != O_RDONLY`) and in userspace to a persistence-path allowlist
+  (`.bashrc`, `.ssh/authorized_keys`, cron, …), observed a `curl|sh` implant
+  appended to `~/.bashrc` that the process never printed and that leaves no
+  token. Spike at `~/ebpf-spike/e2`.
+  — *the working approach, recorded so E3 needs no re-discovery:* tracepoints
+  (not kprobes) on the syscall entry; `vmlinux.h` from `bpftool btf dump`;
+  `bpf_probe_read_user`/`_str` for the userspace sockaddr and path; ring buffer
+  to a `cilium/ebpf` reader; load with `ebpf.LoadCollectionSpec` (no bpf2go
+  codegen needed); attach with `link.Tracepoint`. Loading needs root — the
+  monitor is host-side, the sandbox stays capless.
 - **E3 — integrate.** Feed events into `internal/trace` + `assessment` as a new
   `ebpf` source, with the same dedup/severity discipline the stderr monitor
   already uses. Findings only from the targeted probes; all else is observation.
