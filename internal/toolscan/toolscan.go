@@ -59,10 +59,20 @@ func Analyze(tools []toolinfo.ToolInfo) []trace.Event {
 	var events []trace.Event
 
 	for _, tool := range tools {
-		events = append(events, analyzeDescription(tool, now)...)
-		events = append(events, analyzeHiddenCharacters(tool, now)...)
-		events = append(events, analyzeSchema(tool, now)...)
-		events = append(events, analyzeShadowing(tool, names, now)...)
+		var found []trace.Event
+		found = append(found, analyzeDescription(tool, now)...)
+		found = append(found, analyzeHiddenCharacters(tool, now)...)
+		found = append(found, analyzeSchema(tool, now)...)
+		found = append(found, analyzeShadowing(tool, names, now)...)
+
+		// Every rule in this package reads one tool's declaration, so every
+		// finding it produces belongs at that declaration's location. Stamped
+		// here rather than in each rule for the same reason event() is
+		// centralized: a rule added later cannot forget to do it.
+		for i := range found {
+			found[i].Location = tool.DeclaredAt
+		}
+		events = append(events, found...)
 	}
 
 	return events

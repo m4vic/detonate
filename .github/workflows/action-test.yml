@@ -11,9 +11,9 @@ name: Action
 on:
   push:
     branches: [main]
-    paths: ['action.yml', '.github/workflows/action-test.yml', 'testdata/action/**', 'internal/**', 'cmd/**']
+    paths: ['action.yml', '.github/workflows/action-test.yml', 'scripts/assert-sarif-locations.py', 'testdata/action/**', 'internal/**', 'cmd/**']
   pull_request:
-    paths: ['action.yml', '.github/workflows/action-test.yml', 'testdata/action/**', 'internal/**', 'cmd/**']
+    paths: ['action.yml', '.github/workflows/action-test.yml', 'scripts/assert-sarif-locations.py', 'testdata/action/**', 'internal/**', 'cmd/**']
 
 permissions:
   contents: read
@@ -136,6 +136,18 @@ jobs:
           [ -f detonate.sarif ] || { echo "no SARIF written on a failing scan"; exit 1; }
           grep -q '"detonateRisk"' detonate.sarif \
             || { echo "SARIF is missing detonate run properties"; exit 1; }
+
+      # An upload succeeds whether or not the locations in it mean anything. A
+      # result whose location is a directory, or a basename that exists nowhere
+      # in the checkout, is accepted and attached to nothing, so the pull
+      # request shows no annotation while every step reports success. That is
+      # how this stayed broken across four releases.
+      #
+      # Checked on a Linux runner with a RELATIVE target, because a relative
+      # target is what the action passes and was the input that broke it.
+      - name: Assert every finding points at a real file and line
+        shell: bash
+        run: python3 scripts/assert-sarif-locations.py detonate.sarif
 
   # fail-on: never must report without failing, or "report-only" adoption is
   # impossible for a team that wants to see findings before enforcing them.

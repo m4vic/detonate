@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/m4vic/detonate/internal/assessment"
@@ -91,6 +93,39 @@ type sarifRegion struct {
 	StartLine int `json:"startLine"`
 }
 
+// locate turns a finding into the SARIF location GitHub anchors on.
+//
+// targetURI is the scanned target, already resolved relative to the repository
+// root. An event that names a file inside the target is reported at
+// target/file, because an event's own Location is relative to the target it
+// was observed on and knows nothing about a repository.
+//
+// Three cases, in descending order of what a reviewer gets:
+//
+//   - file and line: the annotation lands on the line that caused it.
+//   - file only: the annotation lands on the file. A location with no line is
+//     how the scanner says "line unknown", and no region is emitted, because a
+//     guessed line would point a reviewer at innocent text.
+//   - neither: the target itself, which for a directory attaches the finding
+//     to the run rather than to a line. Runtime behaviour has no source line
+//     and must not be given one.
+func locate(e trace.Event, targetURI string) sarifLocation {
+	uri := targetURI
+	var region *sarifRegion
+
+	if e.Location != nil && e.Location.Path != "" {
+		uri = path.Join(targetURI, filepath.ToSlash(e.Location.Path))
+		if e.Location.Line > 0 {
+			region = &sarifRegion{StartLine: e.Location.Line}
+		}
+	}
+
+	return sarifLocation{PhysicalLocation: sarifPhysical{
+		ArtifactLocation: sarifArtifact{URI: uri},
+		Region:           region,
+	}}
+}
+
 // levelFor maps our severities onto SARIF's.
 //
 // Info becomes "note" rather than being dropped: GitHub renders notes
@@ -118,10 +153,13 @@ func ruleID(e trace.Event) string {
 
 // SARIF writes a scan's findings as a SARIF 2.1.0 log.
 //
-// artifactURI is what the finding is attached to. For a scanned folder that is
-// a path GitHub can resolve inside the repository; when detonate scanned
-// something outside the checkout there is nothing to point at, so the target
-// string is used and the annotation lands on the run rather than a line.
+// artifactURI is the scanned target, resolved relative to the repository root
+// where that is possible; when detonate scanned something outside the checkout
+// there is nothing to point at, so the bare target name is used and the
+// annotation lands on the run rather than a line.
+//
+// A finding that carries its own Location is reported inside that target, at
+// the file and line the evidence was read from. See locate.
 func SARIF(
 	w io.Writer,
 	tr *trace.Trace,
@@ -153,14 +191,10 @@ func SARIF(
 		}
 
 		results = append(results, sarifResult{
-			RuleID:  id,
-			Level:   levelFor(e.Severity),
-			Message: sarifText{Text: messageFor(e)},
-			Locations: []sarifLocation{{
-				PhysicalLocation: sarifPhysical{
-					ArtifactLocation: sarifArtifact{URI: artifactURI},
-				},
-			}},
+			RuleID:    id,
+			Level:     levelFor(e.Severity),
+			Message:   sarifText{Text: messageFor(e)},
+			Locations: []sarifLocation{locate(e, artifactURI)},
 			PartialFingerprints: map[string]string{
 				// Kind + summary is stable across runs of the same target, so
 				// a finding that has not changed is not re-raised as new.

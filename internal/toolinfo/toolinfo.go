@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/m4vic/detonate/internal/trace"
 )
 
 // Source says which kind of target a tool was discovered on.
@@ -37,6 +39,17 @@ type ToolInfo struct {
 	// path, the command that launched a server). Never required for basic
 	// enumeration, so it stays untyped rather than growing a field per kind.
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// DeclaredAt is the file and line this tool was declared on, when it was
+	// read out of a file. A tool recovered from a live `tools/list` has no
+	// declaration site, so this stays nil for everything the dynamic path
+	// enumerates.
+	//
+	// It is typed rather than two more Metadata keys because the report layer
+	// turns it into a SARIF location that GitHub anchors an annotation to. A
+	// field a consumer depends on should not be reachable only by guessing a
+	// map key.
+	DeclaredAt *trace.Location `json:"declared_at,omitempty"`
 }
 
 // maxDescLen is how much description we show in one-line CLI output before
