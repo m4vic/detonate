@@ -1,0 +1,53 @@
+name: PR annotation demo
+
+# Throwaway. Not for merge.
+#
+# docs/PLAN.md requires that a finding appear inline on a real pull request.
+# That cannot be proven by the action test, which runs with upload-sarif off,
+# and it cannot be proven by scanning a fixture already on main: GitHub renders
+# a code-scanning alert as a PR annotation only when the alert's line falls in
+# the diff. So the proof is a pull request that ADDS a poisoned manifest and
+# uploads the SARIF for it.
+#
+# fail-on: never, because the job's purpose is the annotation, not the gate —
+# the gate is already proven by the action test's poisoned job.
+
+on:
+  pull_request:
+    paths:
+      - 'testdata/action/pr-annotation-demo/**'
+      - '.github/workflows/pr-annotation-demo.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  annotate:
+    name: Poisoned fixture annotates the diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Scan the poisoned fixture added by this PR
+        id: scan
+        uses: ./
+        with:
+          target: testdata/action/pr-annotation-demo
+          version: source
+          fail-on: never
+          upload-sarif: 'true'
+          sarif-file: detonate.sarif
+
+      - name: Show where the findings landed
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "exit-code=${{ steps.scan.outputs.exit-code }} risk=${{ steps.scan.outputs.risk }}"
+          python3 scripts/assert-sarif-locations.py detonate.sarif
