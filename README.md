@@ -17,10 +17,13 @@ code and SARIF for the GitHub Security tab.
   <img src="https://img.shields.io/github/last-commit/m4vic/detonate" alt="Last Commit">
 </p>
 
-> **`0.x` software.** It installs, it runs, and it finds real things, but it has
-> bugs, false positives, and false negatives. A `no_findings` result is **not** a
-> security certification. Use disposable targets, never supply real secrets, and
-> read the [disclaimer](DISCLAIMER.md) before running dynamic scans.
+> **It catches misbehaviour and proves it. It never certifies a target safe.**
+> detonate finds real things, and it also has bugs, false positives and false
+> negatives. A `no_findings` result is **not** a security certification — it
+> means the coverage question was answerable and the answer was "nothing found",
+> so read it together with completeness, never alone. Use disposable targets,
+> never supply real secrets, and read the [disclaimer](DISCLAIMER.md) before
+> running dynamic scans.
 
 ---
 
@@ -447,12 +450,18 @@ The corpus score above is enforced on every push: CI runs the same
 
 ## Status
 
-`0.x`. Flags and report fields may still change within a minor version;
-breaking changes are named in the [changelog](CHANGELOG.md). Exit codes are
-frozen and covered by a test that fails loudly if anyone moves one.
+`1.0`, shipped 2026-10-06. The exit codes, the schema identifiers
+(`detonate.report/v1`, `detonate.bundle/v1`) and the SARIF properties a
+pipeline gates on are frozen, each pinned to its literal in a test that fails
+loudly if anyone moves it. What may still change, and how, is written down in
+the [contract](docs/CONTRACT.md); breaking changes are named in the
+[changelog](CHANGELOG.md) one minor release before they land.
 
-Interfaces stabilize at `1.0` — meaning the report schema and exit codes are
-final and acquisition is safe, not that every feature is built.
+Stable interfaces do not mean every feature is built. The corpus stands at
+**40/51 with eleven recorded gaps**, each one written down rather than rounded
+off, and two of them need syscall-level visibility that the v1.1 eBPF monitor
+exists to provide. stdio transport only; tools only, not prompts or resources.
+The roadmap is in [PLAN.md](docs/PLAN.md).
 
 ## Docs
 

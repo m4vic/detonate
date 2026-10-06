@@ -1,7 +1,12 @@
 # Detonate — the plan to 1.0
 
-Status: 2026-09-02. **This is the only plan.** Everything else in `docs/` is
-history or reference. If a task is not on this list, it is not being built.
+Status: **1.0 shipped 2026-10-06.** All six facts in "Done means this" hold on
+the released binary, so the plan to 1.0 is closed; it is kept as the record of
+what was required and how each item was verified. Work after 1.0 is under
+"Beyond 1.0" below, led by the eBPF runtime monitor.
+
+**This is the only plan.** Everything else in `docs/` is history or reference.
+If a task is not on this list, it is not being built.
 
 ## What we are building
 
@@ -53,8 +58,15 @@ The tool works. Nobody can *use* it. That is the whole gap this week.
       — *verified:* the scan step was executed locally against real fixtures —
       benign passes, poisoned fails the job, `fail-on: never` reports without
       failing, an unassessable target warns rather than passing silently, and an
-      invalid `mode` is rejected. **Not yet verified:** the download-and-verify
-      path, since local testing used `version: source`.
+      invalid `mode` is rejected.
+      — *download-and-verify path closed 2026-10-06*, the last thing here that
+      local testing with `version: source` could not reach. The `published` job
+      ran on a real runner against the real release: `uses: m4vic/detonate@v0`
+      resolved, `version: latest` printed `resolved latest release: v1.0.0`,
+      `detonate_1.0.0_linux_amd64.tar.gz` verified `OK` against the published
+      `checksums.txt`, and the installed binary reported `detonate 1.0.0` and
+      exited 0 on the benign fixture. The same two archives were also downloaded
+      and checksum-verified by hand off-CI.
 
 - [x] **2. SARIF upload to the Security tab. Wired 2026-08-20; findings proven
       inline on a real pull request 2026-10-05.** Upload runs even when the scan
@@ -248,11 +260,32 @@ Sizing them is the first task of week two, before anything else is committed to.
       — *check:* documented ✓, and a test fails if an exit code or schema id
       changes ✓.
 
-- [ ] **10. Ship `v1.0.0-rc1`, soak for a few days, then `v1.0.0`.**
-      — *check:* the six facts above all hold on the released binary.
-      — `v1.0.0-rc1` cut 2026-09-15 and soaked without regression. The last
-      open fact (3, inline on the PR) closed 2026-10-05 under item 2 above, so
-      all six now hold. Remaining: tag `v1.0.0` and move `@v0`/`@v1` to it.
+- [x] **10. Shipped `v1.0.0` on 2026-10-06.** `v1.0.0-rc1` was cut 2026-09-15
+      and soaked without regression; the last open fact (3, inline on the PR)
+      closed 2026-10-05 under item 2 above.
+      — *check, verified on the released binary and not on a local build:*
+      `v1.0.0` published from `2f97e49` as a normal release (not a prerelease),
+      six archives plus `checksums.txt`, and `releases/latest` now resolves to
+      it. The published Windows archive was downloaded, checksum-verified,
+      and run: it reports `detonate 1.0.0` and resolves findings on the poisoned
+      fixture to `testdata/action/poisoned/manifest.json:14, :14, :18` — so
+      fact 3 holds on the artifact a user actually installs, not just on `main`.
+      The release was gated by its own `verify` job (`gofmt`, `vet`,
+      `docker version`, `go test -race` with `DETONATE_REQUIRE_DOCKER=1`) before
+      GoReleaser ran.
+      — `@v0` was moved and `@v1` created, both pointing at `2f97e49`. Neither
+      matches the release workflow's `v[0-9]+.[0-9]+.[0-9]+` triggers, so
+      pushing them cut no duplicate release — confirmed: the release list holds
+      no `v0` or `v1`.
+      — *side effect worth recording:* the repository's own stale alert at
+      `benign:1` is now marked **fixed** and replaced by one at
+      `testdata/action/benign:1`. The location fix reached detonate's own
+      Security tab.
+
+**The plan is complete.** All six facts in "Done means this" hold on the
+released binary. Per the decision rule, nothing further was required to reach
+1.0 and nothing was allowed to delay it. What remains open below (7b, F6) was
+never a 1.0 blocker; v1.1 and the eBPF work continue from here.
 
 ---
 
