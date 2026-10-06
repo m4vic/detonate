@@ -63,8 +63,14 @@ bump, never as a silent edit to `/v1`.
 
 ## When this takes effect
 
-The contract is a hard guarantee **as of `1.0`**. Before `1.0` (the current
-`0.x` line) the exit codes and schema identifiers above are already stable in
-practice and treated as frozen, but the `0.x` disclaimer in the README still
-holds: other flags and report fields may still move while the tool converges on
-`1.0`.
+The contract is a hard guarantee **as of `1.0`, which shipped 2026-10-06**. It
+is in force now: everything frozen above changes only by the rule above, and the
+`0.x` caveat that other flags and report fields might still move is withdrawn.
+
+What is *not* covered is unchanged by 1.0 and worth stating plainly, because a
+frozen contract is easy to mistake for a broader promise. Human-readable
+terminal output is for reading, not parsing. Which rules fire, and the wording
+of a finding's summary, are expected to change as detection improves — a
+consumer gates on the exit code and the frozen fields, never on a message. And
+`0` still means the coverage question was answerable and the answer was "nothing
+found"; it has never meant the target is safe.
