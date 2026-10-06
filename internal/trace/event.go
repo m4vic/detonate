@@ -85,6 +85,10 @@ type Event struct {
 	// finding.
 	During string `json:"during,omitempty"`
 
+	// Location is where the evidence lives in the target's files, when it came
+	// from a file at all. Nil for everything observed at runtime.
+	Location *Location `json:"location,omitempty"`
+
 	// Source is the monitor that observed this, e.g. "docker-events",
 	// "container-stderr". Evidence that cannot name its own origin is not
 	// evidence.
@@ -147,4 +151,25 @@ func severityRank(s Severity) int {
 		return 1
 	}
 	return 0
+}
+
+// Location is where in the target's own files a finding's evidence lives.
+//
+// Path is relative to the scanned target directory, never to the repository or
+// the working directory: the trace is evidence about a target and must stay
+// readable after the target has been copied, mounted at /target, or acquired
+// into a temporary checkout. Resolving it against a repository root is the
+// report layer's job, because only the report layer knows there is one.
+//
+// It is optional on purpose. A runtime observation — a connect(), a process
+// spawn, a memory ceiling — has no source line, and inventing one to make the
+// annotation prettier would be a fabricated piece of evidence. Only a finding
+// read out of a file gets a location.
+type Location struct {
+	Path string `json:"path"`
+
+	// Line is 1-based, and zero means "this file, line unknown". A location
+	// that names the file is already most of the value; a guessed line is
+	// worse than none, because it points a reviewer at innocent text.
+	Line int `json:"line,omitempty"`
 }

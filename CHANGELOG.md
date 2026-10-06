@@ -5,6 +5,31 @@ All notable user-visible changes are recorded here. The project follows
 
 ## Unreleased
 
+### Fixed
+
+- **SARIF findings pointed at nothing, so no annotation could ever appear on a
+  pull request.** Every result's location was the scanned *directory*, and for
+  a relative target it was not even that: `sarifURI` called `filepath.Rel` with
+  an absolute working directory and the target as typed, which errors when the
+  two disagree about being absolute, and the error fell through to
+  `filepath.Base`. Scanning `testdata/action/poisoned` therefore reported
+  `uri: "poisoned"` - a path that exists in no repository. A relative target is
+  what the GitHub Action always passes (its `target` input defaults to `.`), so
+  the one code path every CI user takes was the one that could never be
+  annotated, while each upload step reported success. Findings now carry the
+  file and line they were read from: a poisoned tool description is reported at
+  `manifest.json:14`, and GitHub renders it inline on the diff.
+
+  Findings read out of a file gained a `location` (file plus 1-based line) in
+  the JSON report and a `region` in SARIF. Runtime observations deliberately
+  have neither - a `connect()` seen in the sandbox has no source line, and
+  inventing one would put fabricated evidence in the record. Additive under
+  `detonate.report/v1`; no frozen field changed meaning.
+
+  `scripts/assert-sarif-locations.py` now fails CI if a finding's location is
+  not a real file on a real line, because an upload succeeds whether or not the
+  locations in it mean anything - which is how this survived four releases.
+
 ### Added
 
 - **A corpus fixture for the real `postmark-mcp` incident — a recorded gap.**

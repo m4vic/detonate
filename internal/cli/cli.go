@@ -994,8 +994,21 @@ func (a *App) failPipeline(err error) int {
 // checkout cannot be annotated on a line. Falling back to the bare target name
 // puts the finding on the run itself, which is visible, rather than silently
 // attaching it to a file that does not exist.
+//
+// The target is made absolute before it is made relative. filepath.Rel errors
+// when its two arguments disagree about being absolute, and the error used to
+// fall through to the basename — so a scan of `testdata/action/poisoned`
+// reported `uri: "poisoned"`, a path that exists in no repository. That is the
+// form the GitHub Action always passes (its `target` defaults to `.`), so the
+// one code path every CI user takes was the one that could never be annotated.
 func (a *App) sarifURI() string {
-	if rel, err := filepath.Rel(mustWD(), a.scanTarget); err == nil &&
+	target := a.scanTarget
+	if !filepath.IsAbs(target) {
+		if abs, err := filepath.Abs(target); err == nil {
+			target = abs
+		}
+	}
+	if rel, err := filepath.Rel(mustWD(), target); err == nil &&
 		!strings.HasPrefix(rel, "..") {
 		return filepath.ToSlash(rel)
 	}

@@ -56,11 +56,43 @@ The tool works. Nobody can *use* it. That is the whole gap this week.
       invalid `mode` is rejected. **Not yet verified:** the download-and-verify
       path, since local testing used `version: source`.
 
-- [x] **2. SARIF upload to the Security tab. Wired 2026-08-20.** Upload runs even
-      when the scan failed the job, since findings are exactly what should reach
-      the Security tab, and never fails the build on a permissions error.
-      — *check, still open:* a finding appears as an annotation on a real pull
-      request. Unproven until the workflow runs on GitHub.
+- [x] **2. SARIF upload to the Security tab. Wired 2026-08-20; findings proven
+      inline on a real pull request 2026-10-05.** Upload runs even when the scan
+      failed the job, since findings are exactly what should reach the Security
+      tab, and never fails the build on a permissions error.
+      — *the check was not merely unproven, it was broken.* Every SARIF result
+      pointed at the scanned **directory**, which GitHub cannot anchor an
+      annotation to, and for a *relative* target not even that: `sarifURI`
+      called `filepath.Rel` with an absolute working directory and the target as
+      typed, Rel errors when its two arguments disagree about being absolute,
+      and the error fell through to `filepath.Base`. Scanning
+      `testdata/action/poisoned` therefore reported `uri: "poisoned"`, a path
+      that exists in no repository. A relative target is what the Action always
+      passes (`target` defaults to `.`), so the one code path every CI user
+      takes was the one that could never be annotated — across 22 successful
+      uploads and four releases, each reporting success. Fixed in #18: findings
+      carry the file and line they were read from.
+      — *verified 2026-10-05, measured not assumed:* throwaway PR #19 added a
+      poisoned manifest and uploaded its SARIF. GitHub rendered **two inline
+      annotations on the diff** — check run `detonate`,
+      `annotations_count = 2`, at
+      `testdata/action/pr-annotation-demo/manifest.json:14` (a description that
+      sequences a hidden credential read and tells the agent to conceal it) and
+      `:18` (a description that redirects the agent away from the honest tool),
+      both at level `failure` with detonate's own messages. Those are exactly
+      the two poisoned lines in the file the PR adds. The informational
+      `static_scanner` note correctly stayed on the directory: it is a statement
+      about the run, not about a line. The demo PR was closed unmerged so
+      detonate's own Security tab does not permanently carry alerts about
+      detonate's own fixtures; the evidence stays readable on the closed PR.
+      — *locked against regression:* `scripts/assert-sarif-locations.py` fails
+      the action test when a finding's location is not a real file on a real
+      line, run on a Linux runner with a relative target (confirmed there:
+      `testdata/action/poisoned/manifest.json:14, :14, :18`), plus Go tests at
+      the staticinv, toolscan, report and CLI layers. The two location tests
+      were confirmed to **fail against the old code** — `uri "server" does not
+      resolve from the working directory` — so the basename collapse is
+      reproduced in a test, not just reasoned about.
 
 - [x] **3. Rewrite the README for the author. Done 2026-08-20.** First screen is
       the tagline, the CI snippet, a real failure, and static mode's measured
@@ -218,6 +250,9 @@ Sizing them is the first task of week two, before anything else is committed to.
 
 - [ ] **10. Ship `v1.0.0-rc1`, soak for a few days, then `v1.0.0`.**
       — *check:* the six facts above all hold on the released binary.
+      — `v1.0.0-rc1` cut 2026-09-15 and soaked without regression. The last
+      open fact (3, inline on the PR) closed 2026-10-05 under item 2 above, so
+      all six now hold. Remaining: tag `v1.0.0` and move `@v0`/`@v1` to it.
 
 ---
 
