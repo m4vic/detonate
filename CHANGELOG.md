@@ -3,32 +3,28 @@
 All notable user-visible changes are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) once versioned prereleases begin.
 
-## Unreleased
+## v1.0.0 — 2026-10-06
 
-### Fixed
+The six facts in [docs/PLAN.md](docs/PLAN.md) that define "done" all hold, so
+this is 1.0 and the plan stops here. A stranger adds detonate to an MCP server
+repo in three lines of YAML; it runs on every pull request inside the time
+budget; findings reach the Security tab **and** annotate the diff; no path exits
+0 without a verdict; no scan can run forever; and the exit codes and schema
+identifiers are frozen.
 
-- **SARIF findings pointed at nothing, so no annotation could ever appear on a
-  pull request.** Every result's location was the scanned *directory*, and for
-  a relative target it was not even that: `sarifURI` called `filepath.Rel` with
-  an absolute working directory and the target as typed, which errors when the
-  two disagree about being absolute, and the error fell through to
-  `filepath.Base`. Scanning `testdata/action/poisoned` therefore reported
-  `uri: "poisoned"` - a path that exists in no repository. A relative target is
-  what the GitHub Action always passes (its `target` input defaults to `.`), so
-  the one code path every CI user takes was the one that could never be
-  annotated, while each upload step reported success. Findings now carry the
-  file and line they were read from: a poisoned tool description is reported at
-  `manifest.json:14`, and GitHub renders it inline on the diff.
+**What 1.0 means for a consumer.** The guarantees in
+[docs/CONTRACT.md](docs/CONTRACT.md) become hard as of this release: exit codes
+`0`-`4`, the `detonate.report/v1` and `detonate.bundle/v1` identifiers, and the
+`detonateRisk`/`detonateCompleteness` SARIF properties will not change meaning
+without a new identifier and a major version. The `0.x` caveat that other flags
+and report fields might still move is withdrawn.
 
-  Findings read out of a file gained a `location` (file plus 1-based line) in
-  the JSON report and a `region` in SARIF. Runtime observations deliberately
-  have neither - a `connect()` seen in the sandbox has no source line, and
-  inventing one would put fabricated evidence in the record. Additive under
-  `detonate.report/v1`; no frozen field changed meaning.
-
-  `scripts/assert-sarif-locations.py` now fails CI if a finding's location is
-  not a real file on a real line, because an upload succeeds whether or not the
-  locations in it mean anything - which is how this survived four releases.
+**What 1.0 does not mean.** detonate catches misbehaviour and proves it; it
+never certifies a target safe. `risk=no_findings` says the coverage question was
+answerable and the answer was "nothing found" — read it together with
+completeness, never alone. The corpus stands at **40/51 with eleven recorded
+gaps**, every one written down rather than rounded off, and the two gaps that
+need syscall-level visibility are what the v1.1 eBPF monitor exists to close.
 
 ### Added
 
@@ -65,6 +61,29 @@ All notable user-visible changes are recorded here. The project follows
   the token match. This is the tenth recorded gap.
 
 ### Fixed
+
+- **SARIF findings pointed at nothing, so no annotation could ever appear on a
+  pull request.** Every result's location was the scanned *directory*, and for
+  a relative target it was not even that: `sarifURI` called `filepath.Rel` with
+  an absolute working directory and the target as typed, which errors when the
+  two disagree about being absolute, and the error fell through to
+  `filepath.Base`. Scanning `testdata/action/poisoned` therefore reported
+  `uri: "poisoned"` — a path that exists in no repository. A relative target is
+  what the GitHub Action always passes (its `target` input defaults to `.`), so
+  the one code path every CI user takes was the one that could never be
+  annotated, while each upload step reported success. Findings now carry the
+  file and line they were read from: a poisoned tool description is reported at
+  `manifest.json:14`, and GitHub renders it inline on the diff.
+
+  Findings read out of a file gained a `location` (file plus 1-based line) in
+  the JSON report and a `region` in SARIF. Runtime observations deliberately
+  have neither — a `connect()` seen in the sandbox has no source line, and
+  inventing one would put fabricated evidence in the record. Additive under
+  `detonate.report/v1`; no frozen field changed meaning.
+
+  `scripts/assert-sarif-locations.py` now fails CI if a finding's location is
+  not a real file on a real line, because an upload succeeds whether or not the
+  locations in it mean anything — which is how this survived four releases.
 
 - **The SSH-key credential decoy was base64-only.** Its planted file holds
   `base64(token)` rather than the raw token — a real OpenSSH private key body
