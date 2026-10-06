@@ -221,3 +221,96 @@ func completedScenario() []assessment.ScenarioResult {
 		ID: "test.static", Required: true, Outcome: assessment.OutcomePass,
 	}}
 }
+
+// A SARIF result is only useful to GitHub if its location is a file in the
+// repository. Before this, every finding pointed at the scanned directory, so
+// code scanning had nothing in the diff to attach an annotation to and the
+// Security-tab integration was decorative.
+func TestSARIFLocatesFindingsAtTheFileAndLineTheyCameFrom(t *testing.T) {
+	tr := &trace.Trace{Events: []trace.Event{{
+		Kind: trace.KindProtocol, Severity: trace.SeverityCritical,
+		Summary:  "tool description tells the agent to hide its actions",
+		Source:   "tool-description",
+		Location: &trace.Location{Path: "manifest.json", Line: 14},
+	}}}
+
+	var buf bytes.Buffer
+	if err := SARIF(&buf, tr, completedScenario(), "testdata/action/poisoned", "v1"); err != nil {
+		t.Fatalf("SARIF: %v", err)
+	}
+
+	loc := firstLocation(t, buf.Bytes())
+	uri := loc["artifactLocation"].(map[string]any)["uri"]
+	if uri != "testdata/action/poisoned/manifest.json" {
+		t.Errorf("uri = %v, want testdata/action/poisoned/manifest.json", uri)
+	}
+	region, ok := loc["region"].(map[string]any)
+	if !ok {
+		t.Fatal("no region; the annotation lands at the top of the file instead of on the finding")
+	}
+	if region["startLine"].(float64) != 14 {
+		t.Errorf("startLine = %v, want 14", region["startLine"])
+	}
+}
+
+// Line unknown must mean no region, not line 1. A guessed line puts the
+// annotation on innocent text, which is worse than annotating the file.
+func TestSARIFOmitsTheRegionWhenTheLineIsUnknown(t *testing.T) {
+	tr := &trace.Trace{Events: []trace.Event{{
+		Kind: trace.KindProtocol, Severity: trace.SeverityNotable,
+		Summary:  "something in the manifest",
+		Source:   "tool-description",
+		Location: &trace.Location{Path: "manifest.json"},
+	}}}
+
+	var buf bytes.Buffer
+	if err := SARIF(&buf, tr, completedScenario(), "pkg/server", "v1"); err != nil {
+		t.Fatalf("SARIF: %v", err)
+	}
+
+	loc := firstLocation(t, buf.Bytes())
+	if uri := loc["artifactLocation"].(map[string]any)["uri"]; uri != "pkg/server/manifest.json" {
+		t.Errorf("uri = %v, want pkg/server/manifest.json", uri)
+	}
+	if _, present := loc["region"]; present {
+		t.Error("emitted a region for an unknown line")
+	}
+}
+
+// Runtime behaviour has no source line. A connect() observed in the sandbox
+// must not be given a file and a line to make the annotation prettier.
+func TestSARIFLeavesRuntimeObservationsOnTheTarget(t *testing.T) {
+	tr := &trace.Trace{Events: []trace.Event{{
+		Kind: trace.KindNetwork, Severity: trace.SeverityCritical,
+		Summary: "target attempted to connect to 1.2.3.4:443",
+		Source:  "ebpf",
+	}}}
+
+	var buf bytes.Buffer
+	if err := SARIF(&buf, tr, completedScenario(), "pkg/server", "v1"); err != nil {
+		t.Fatalf("SARIF: %v", err)
+	}
+
+	loc := firstLocation(t, buf.Bytes())
+	if uri := loc["artifactLocation"].(map[string]any)["uri"]; uri != "pkg/server" {
+		t.Errorf("uri = %v, want the bare target pkg/server", uri)
+	}
+	if _, present := loc["region"]; present {
+		t.Error("invented a source line for a runtime observation")
+	}
+}
+
+// firstLocation returns the physicalLocation of the first SARIF result.
+func firstLocation(t *testing.T, sarif []byte) map[string]any {
+	t.Helper()
+	var log map[string]any
+	if err := json.Unmarshal(sarif, &log); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	results := log["runs"].([]any)[0].(map[string]any)["results"].([]any)
+	if len(results) == 0 {
+		t.Fatal("no results")
+	}
+	locations := results[0].(map[string]any)["locations"].([]any)
+	return locations[0].(map[string]any)["physicalLocation"].(map[string]any)
+}

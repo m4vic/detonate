@@ -135,16 +135,6 @@ func TestStaticPromptNeedsNoDocker(t *testing.T) {
 	}
 }
 
-func TestCombinedModeIsClearlyUnavailable(t *testing.T) {
-	app, _, stderr := newTestApp(false)
-	if code := app.Run(context.Background(), []string{"combined", "example"}); code != exitUsage {
-		t.Fatalf("exit = %d, want %d", code, exitUsage)
-	}
-	if !strings.Contains(stderr.String(), "not available") {
-		t.Fatalf("missing availability message: %s", stderr.String())
-	}
-}
-
 func writeSampleSkill(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

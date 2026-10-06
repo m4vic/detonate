@@ -18,10 +18,9 @@ import (
 )
 
 const modeUsage = `Usage:
-  detonate static <file|folder|git-url>   Inspect without target execution
-  detonate dynamic <file|folder>          Experimental sandboxed execution
+  detonate static <file|folder|git-url>   Inspect without running the target
+  detonate dynamic <file|folder>          Run the target in a sandbox
   detonate report <bundle-dir>            Render a saved result offline
-  detonate combined <target>               Not available in alpha
 `
 
 // helpRequested reports whether the user asked for help rather than a scan.
@@ -149,16 +148,6 @@ func (a *App) runDynamic(ctx context.Context, args []string) int {
 	// RunTarget owns format selection and output redirection for this path,
 	// so the parsed options are handed over whole rather than applied here.
 	return a.RunTarget(ctx, input, opt)
-}
-
-func (a *App) runCombined(args []string) int {
-	if len(args) != 1 {
-		fmt.Fprint(a.Stderr, modeUsage)
-		return exitUsage
-	}
-	fmt.Fprintln(a.Stderr, "detonate: combined mode is not available in this alpha.")
-	fmt.Fprintln(a.Stderr, "Use `detonate static <target>` or experimental `detonate dynamic <target>`.")
-	return exitUsage
 }
 
 // scanStatic never starts Docker, installs dependencies, or invokes a target.

@@ -43,3 +43,9 @@ release:
   github:
     owner: m4vic
     name: detonate
+  # Auto-mark a tag with a prerelease suffix (v1.0.0-rc1) as a GitHub
+  # prerelease, so it never becomes "latest" and the install one-liner keeps
+  # handing users the last stable release. A clean vX.Y.Z tag publishes as a
+  # normal release. Without this, rc1 published as latest and had to be fixed
+  # by hand.
+  prerelease: auto

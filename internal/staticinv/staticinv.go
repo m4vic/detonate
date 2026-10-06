@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/m4vic/detonate/internal/toolinfo"
+	"github.com/m4vic/detonate/internal/trace"
 )
 
 // maxManifestBytes bounds the manifest read. The file is target-controlled, so
@@ -135,8 +136,12 @@ func Extract(dir string) Result {
 		}
 	}
 
+	// Where each tool was declared, so a finding about it can be annotated on
+	// the line that caused it rather than on the folder that was scanned.
+	lines := declarationLines(raw, len(m.Tools))
+
 	tools := make([]toolinfo.ToolInfo, 0, len(m.Tools))
-	for _, t := range m.Tools {
+	for i, t := range m.Tools {
 		tools = append(tools, toolinfo.ToolInfo{
 			Name:        t.Name,
 			Description: t.Description,
@@ -145,6 +150,10 @@ func Extract(dir string) Result {
 				"declared_in":      "manifest.json",
 				"manifest_version": m.ManifestVersion,
 			},
+			// Relative to the scanned directory, never to the repository: the
+			// report layer is what knows whether there is a repository to
+			// resolve against.
+			DeclaredAt: &trace.Location{Path: "manifest.json", Line: lines[i]},
 		})
 	}
 

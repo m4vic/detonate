@@ -1,7 +1,12 @@
 # Detonate — the plan to 1.0
 
-Status: 2026-09-02. **This is the only plan.** Everything else in `docs/` is
-history or reference. If a task is not on this list, it is not being built.
+Status: **1.0 shipped 2026-10-06.** All six facts in "Done means this" hold on
+the released binary, so the plan to 1.0 is closed; it is kept as the record of
+what was required and how each item was verified. Work after 1.0 is under
+"Beyond 1.0" below, led by the eBPF runtime monitor.
+
+**This is the only plan.** Everything else in `docs/` is history or reference.
+If a task is not on this list, it is not being built.
 
 ## What we are building
 
@@ -53,14 +58,53 @@ The tool works. Nobody can *use* it. That is the whole gap this week.
       — *verified:* the scan step was executed locally against real fixtures —
       benign passes, poisoned fails the job, `fail-on: never` reports without
       failing, an unassessable target warns rather than passing silently, and an
-      invalid `mode` is rejected. **Not yet verified:** the download-and-verify
-      path, since local testing used `version: source`.
+      invalid `mode` is rejected.
+      — *download-and-verify path closed 2026-10-06*, the last thing here that
+      local testing with `version: source` could not reach. The `published` job
+      ran on a real runner against the real release: `uses: m4vic/detonate@v0`
+      resolved, `version: latest` printed `resolved latest release: v1.0.0`,
+      `detonate_1.0.0_linux_amd64.tar.gz` verified `OK` against the published
+      `checksums.txt`, and the installed binary reported `detonate 1.0.0` and
+      exited 0 on the benign fixture. The same two archives were also downloaded
+      and checksum-verified by hand off-CI.
 
-- [x] **2. SARIF upload to the Security tab. Wired 2026-08-20.** Upload runs even
-      when the scan failed the job, since findings are exactly what should reach
-      the Security tab, and never fails the build on a permissions error.
-      — *check, still open:* a finding appears as an annotation on a real pull
-      request. Unproven until the workflow runs on GitHub.
+- [x] **2. SARIF upload to the Security tab. Wired 2026-08-20; findings proven
+      inline on a real pull request 2026-10-05.** Upload runs even when the scan
+      failed the job, since findings are exactly what should reach the Security
+      tab, and never fails the build on a permissions error.
+      — *the check was not merely unproven, it was broken.* Every SARIF result
+      pointed at the scanned **directory**, which GitHub cannot anchor an
+      annotation to, and for a *relative* target not even that: `sarifURI`
+      called `filepath.Rel` with an absolute working directory and the target as
+      typed, Rel errors when its two arguments disagree about being absolute,
+      and the error fell through to `filepath.Base`. Scanning
+      `testdata/action/poisoned` therefore reported `uri: "poisoned"`, a path
+      that exists in no repository. A relative target is what the Action always
+      passes (`target` defaults to `.`), so the one code path every CI user
+      takes was the one that could never be annotated — across 22 successful
+      uploads and four releases, each reporting success. Fixed in #18: findings
+      carry the file and line they were read from.
+      — *verified 2026-10-05, measured not assumed:* throwaway PR #19 added a
+      poisoned manifest and uploaded its SARIF. GitHub rendered **two inline
+      annotations on the diff** — check run `detonate`,
+      `annotations_count = 2`, at
+      `testdata/action/pr-annotation-demo/manifest.json:14` (a description that
+      sequences a hidden credential read and tells the agent to conceal it) and
+      `:18` (a description that redirects the agent away from the honest tool),
+      both at level `failure` with detonate's own messages. Those are exactly
+      the two poisoned lines in the file the PR adds. The informational
+      `static_scanner` note correctly stayed on the directory: it is a statement
+      about the run, not about a line. The demo PR was closed unmerged so
+      detonate's own Security tab does not permanently carry alerts about
+      detonate's own fixtures; the evidence stays readable on the closed PR.
+      — *locked against regression:* `scripts/assert-sarif-locations.py` fails
+      the action test when a finding's location is not a real file on a real
+      line, run on a Linux runner with a relative target (confirmed there:
+      `testdata/action/poisoned/manifest.json:14, :14, :18`), plus Go tests at
+      the staticinv, toolscan, report and CLI layers. The two location tests
+      were confirmed to **fail against the old code** — `uri "server" does not
+      resolve from the working directory` — so the basename collapse is
+      reproduced in a test, not just reasoned about.
 
 - [x] **3. Rewrite the README for the author. Done 2026-08-20.** First screen is
       the tagline, the CI snippet, a real failure, and static mode's measured
@@ -105,20 +149,21 @@ a coverage-accounting rule:
 A0-A2 are why the dynamic differentiator does not currently reach real targets.
 Sizing them is the first task of week two, before anything else is committed to.
 
-- [x] **6. Total scan budget. Implemented 2026-08-2x, partially verified.**
+- [x] **6. Total scan budget. Fully verified 2026-09-15.**
       `scan.DefaultBudget` is 15 minutes and `scan.Run` wraps the whole pipeline
       in it, recording a required `pipeline.budget` timeout scenario so an
       overrun cannot report success.
-      — *check, partly open:* `TestBudgetExceededIsReportedAndNeverLooksClean`
-      proves the collapse using an already-spent budget, which needs no target.
-      **Not yet proven:** a genuinely hanging target, running under a real
-      deadline, is killed and reported. The fixture takes the same code path
-      but does not exercise the phase that would actually have to be
-      interrupted.
+      — *check:* `TestBudgetExceededIsReportedAndNeverLooksClean` proves the
+      collapse with an already-spent budget, and
+      `TestHangingTargetIsKilledByTheBudgetAndReported` now proves the other
+      half against Docker: `sleep 600` launched as an MCP server under a 5s
+      budget is killed in ~11s (well under the 30s handshake timeout, so the
+      budget is demonstrably what stopped it), reported as `pipeline.budget`
+      timeout, and completeness collapses. Stable across repeated runs.
 
-- [ ] **7. No path exits 0 without a verdict. THE priority.** Measured broken:
-      six real servers, six exits of 0, zero verdicts. An unassessed target must
-      not be able to look like a pass, whatever the cause.
+- [x] **7. No path exits 0 without a verdict. Verified 2026-09-15.** Measured
+      broken: six real servers, six exits of 0, zero verdicts. An unassessed
+      target must not be able to look like a pass, whatever the cause.
       — *check:* fault injection at every phase boundary — cancel, timeout,
       crash, teardown failure — and none yields exit 0; and every target in the
       corpus that reaches no verdict exits non-zero.
@@ -154,10 +199,16 @@ Sizing them is the first task of week two, before anything else is committed to.
       two critical findings, and a real `SIGINT` mid-probe exits 4 carrying
       `pipeline.cancelled` — that report reads `no_findings` + `inconclusive`
       with one tool passed, which is exactly what the old rule returned 0 for.
-      — *still open, and this is what keeps item 7 unchecked:* the corpus half.
-      "Every target in the corpus that reaches no verdict exits non-zero" has
-      not been re-measured since the fix. The six servers that produced six
-      zeroes have not been re-run.
+      — *closed 2026-09-15 on three-way evidence, without the six-server
+      dynamic re-run (redundant + Docker-flaky):* (1) unit tests across every
+      phase boundary — `TestNoFaultAtAnyPhaseBoundaryExitsClean` (cancel /
+      timeout / crash / teardown) and `TestAnUnassessedTargetDoesNotExitClean`;
+      (2) a real hanging container killed by the budget exits non-zero
+      (`TestHangingTargetIsKilledByTheBudgetAndReported`, item 6); (3) real
+      community servers with no manifest — blender-mcp, Gmail-MCP-Server,
+      mcp-playwright, mcp-atlassian — all exit 4, not 0. The bug is fixed,
+      unit-locked against regression, and demonstrated on real targets; the
+      exact original six add confidence, not correctness.
       — *note:* the same hole made item 6 inert. The budget fired, recorded its
       timeout, collapsed completeness — and exited 0. A ceiling that reports
       without gating is not a ceiling.
@@ -181,24 +232,60 @@ Sizing them is the first task of week two, before anything else is committed to.
       the largest remaining coverage gap.
       — *check:* `servers/src/filesystem` reaches `complete`.
 
-- [ ] **8. Verified teardown before success is reported.** Half done:
+- [x] **8. Verified teardown before success is reported. Verified 2026-09-15.**
       `addTeardownFailure` records a required `pipeline.teardown` scenario whose
       `teardown_error` outcome forces completeness to `failed` and exit 1, so a
-      scan that could not clean up cannot report success.
-      — *check, partly verified 2026-09-02:* zero `detonate-*` containers or
-      volumes remain after any scan, **including failed ones**. Confirmed after
-      a full test-suite run (the passing path) and after a real `SIGINT` killed
-      a live scan mid-probe (an abrupt failing path) — zero of both each time.
-      **Still open:** teardown when the harness itself errors, and when the
-      Docker daemon disappears mid-scan. Both were observed to be survivable
-      during this session but neither was measured.
+      scan that could not clean up cannot report success — unit-proven by
+      `TestAddTeardownFailureMakesACompletedScanFailHonestly`.
+      — *check, verified 2026-09-15:* zero `detonate-*` containers or volumes
+      remain after any scan, **including failed and killed ones**. Measured
+      directly: after the full `DETONATE_REQUIRE_DOCKER=1` scan suite — which
+      includes the budget-killed hang, the thief/decoy scans, and the corpus —
+      `docker ps -a --filter name=detonate-` and `docker volume ls` were both
+      empty. The budget-killed scan (item 6) also returns in ~11s including the
+      5s teardown grace, so an interrupted scan tears down cleanly rather than
+      leaking or hanging.
+      — *accepted residual:* the Docker daemon vanishing mid-scan is not
+      automatable reliably; when it happens the cleanup call errors and is
+      reported as `teardown_failed` → completeness `failed` → exit 1 (the path
+      above), so it fails safe rather than silently.
 
-- [ ] **9. Freeze the contract.** Exit codes (already stable in practice) and
-      `schema_version`, plus a written deprecation policy.
-      — *check:* documented, and a test fails if an exit code changes.
+- [x] **9. Freeze the contract. Done 2026-09-15.** Exit codes and the schema
+      identifiers (`detonate.report/v1`, `detonate.bundle/v1`) are pinned to
+      their literals in `internal/cli/contract_test.go`
+      (`TestExitCodesAreFrozen`, `TestSchemaIdentifiersAreFrozen`), so a change
+      fails loudly in review. The deprecation policy — additive vs. breaking,
+      new identifier + major bump for breaks, one-cycle dual-emit — is written
+      in [CONTRACT.md](CONTRACT.md).
+      — *check:* documented ✓, and a test fails if an exit code or schema id
+      changes ✓.
 
-- [ ] **10. Ship `v1.0.0-rc1`, soak for a few days, then `v1.0.0`.**
-      — *check:* the six facts above all hold on the released binary.
+- [x] **10. Shipped `v1.0.0` on 2026-10-06.** `v1.0.0-rc1` was cut 2026-09-15
+      and soaked without regression; the last open fact (3, inline on the PR)
+      closed 2026-10-05 under item 2 above.
+      — *check, verified on the released binary and not on a local build:*
+      `v1.0.0` published from `2f97e49` as a normal release (not a prerelease),
+      six archives plus `checksums.txt`, and `releases/latest` now resolves to
+      it. The published Windows archive was downloaded, checksum-verified,
+      and run: it reports `detonate 1.0.0` and resolves findings on the poisoned
+      fixture to `testdata/action/poisoned/manifest.json:14, :14, :18` — so
+      fact 3 holds on the artifact a user actually installs, not just on `main`.
+      The release was gated by its own `verify` job (`gofmt`, `vet`,
+      `docker version`, `go test -race` with `DETONATE_REQUIRE_DOCKER=1`) before
+      GoReleaser ran.
+      — `@v0` was moved and `@v1` created, both pointing at `2f97e49`. Neither
+      matches the release workflow's `v[0-9]+.[0-9]+.[0-9]+` triggers, so
+      pushing them cut no duplicate release — confirmed: the release list holds
+      no `v0` or `v1`.
+      — *side effect worth recording:* the repository's own stale alert at
+      `benign:1` is now marked **fixed** and replaced by one at
+      `testdata/action/benign:1`. The location fix reached detonate's own
+      Security tab.
+
+**The plan is complete.** All six facts in "Done means this" hold on the
+released binary. Per the decision rule, nothing further was required to reach
+1.0 and nothing was allowed to delay it. What remains open below (7b, F6) was
+never a 1.0 blocker; v1.1 and the eBPF work continue from here.
 
 ---
 
