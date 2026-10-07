@@ -1,0 +1,7 @@
+# Generated at build time from the running kernel's BTF; never committed.
+#
+# It is ~3.6 MB and 172k lines of one machine's kernel types, which is the
+# opposite of portable — the whole point of CO-RE is that the committed
+# artifact (../monitor.bpf.o) relocates against whatever kernel it loads on.
+# `make -C internal/ebpf` regenerates this via `bpftool btf dump`.
+vmlinux.h
