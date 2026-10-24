@@ -45,9 +45,12 @@ func TestMonitorLoadsAndAttachesOnRealKernel(t *testing.T) {
 			"object failed to load or attach, which the spike proved should work")
 	}
 
-	// Close must be clean even with no event ever delivered: the scan path
-	// calls it on every run, including the overwhelming majority where the
-	// target does nothing the probes watch for.
+	// Called explicitly on top of the deferred Close above, so the deferred
+	// one is a SECOND call. That is deliberate: it is how this test found the
+	// crash where Close closed an already-closed channel and panicked, and
+	// keeping it means the real monitor -- not just the no-op -- is held to the
+	// idempotent-Close contract. It also proves Close is clean with no event
+	// ever delivered, which is the overwhelmingly common case.
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

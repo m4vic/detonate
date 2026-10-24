@@ -104,7 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -c -o "${RUNNER_TEMP}/ebpf.test" ./internal/ebpf
-          sudo DETONATE_REQUIRE_EBPF=1 "${RUNNER_TEMP}/ebpf.test" -test.run TestMonitorLoadsAndAttachesOnRealKernel -test.v
+          sudo DETONATE_REQUIRE_EBPF=1 "${RUNNER_TEMP}/ebpf.test" -test.run 'TestMonitorLoadsAndAttachesOnRealKernel|TestCloseIsIdempotent' -test.v
 
       # The additive contract, checked on the same runner: without privilege
       # the monitor must degrade to a no-op and the package must still pass.

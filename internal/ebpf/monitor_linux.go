@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -43,6 +44,15 @@ type linuxMonitor struct {
 	reader *ringbuf.Reader
 	events chan Event
 	done   chan struct{}
+
+	// closeOnce makes Close idempotent. Without it the second call closed an
+	// already-closed channel and panicked, which is not a theoretical concern:
+	// `defer m.Close()` plus an explicit teardown on the success path is the
+	// idiomatic shape, and it is exactly what a scan's teardown does. A
+	// panicking teardown in a tool whose contract is "a scan that could not
+	// clean up cannot report success" takes the process down instead of
+	// reporting.
+	closeOnce sync.Once
 }
 
 // New attaches the monitor, scoped to cgroupID, and starts streaming events.
@@ -143,12 +153,17 @@ func (m *linuxMonitor) loop() {
 func (m *linuxMonitor) Events() <-chan Event { return m.events }
 func (m *linuxMonitor) Available() bool      { return true }
 
+// Close stops the monitor and releases the kernel resources it holds. It is
+// safe to call more than once and from more than one goroutine; later calls do
+// nothing and return nil.
 func (m *linuxMonitor) Close() error {
-	close(m.done)
-	if m.reader != nil {
-		m.reader.Close() // unblocks loop's Read
-	}
-	m.closeResources()
+	m.closeOnce.Do(func() {
+		close(m.done)
+		if m.reader != nil {
+			m.reader.Close() // unblocks loop's Read
+		}
+		m.closeResources()
+	})
 	return nil
 }
 

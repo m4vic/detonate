@@ -80,3 +80,29 @@ func TestRequireEnvParsing(t *testing.T) {
 		})
 	}
 }
+
+// Close must be idempotent, on every implementation.
+//
+// This is a regression test for a real crash, found by the privileged CI lane
+// on its first run: linuxMonitor.Close closed its done channel unconditionally,
+// so a second call panicked with "close of closed channel". That is not an
+// exotic sequence — `defer m.Close()` alongside an explicit teardown on the
+// success path is the idiomatic shape in this codebase, and it is what a scan's
+// teardown does. A panic there takes the process down in a tool whose contract
+// is that a scan which could not clean up must not report success.
+//
+// Asserted through the Monitor interface so it covers whichever implementation
+// New returns on this platform: the no-op everywhere eBPF is out of reach, and
+// the real monitor on a privileged BTF kernel.
+func TestCloseIsIdempotent(t *testing.T) {
+	m, err := New(0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		if err := m.Close(); err != nil {
+			t.Fatalf("Close call %d returned %v, want nil", i, err)
+		}
+	}
+}
