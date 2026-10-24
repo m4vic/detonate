@@ -392,18 +392,65 @@ the gap the work below closes.
   hand-made cgroup was captured only for the in-cgroup process, host processes
   ignored. On cgroup v2 the id is the cgroup dir's inode; E3 reads it from the
   Docker container instead of a hand-made cgroup — same filter.
-- **E3 — integrate.** Feed events into `internal/trace` + `assessment` as a new
-  `ebpf` source, with the same dedup/severity discipline the stderr monitor
-  already uses. Findings only from the targeted probes; all else is observation.
-  No unknowns remain after the three spikes — the open questions are build-system
-  choices (how to ship the compiled `.bpf.o`: `go:embed` a committed object vs.
-  compile at build behind a `//go:build linux` tag) and reading the launched
-  container's cgroup id from `internal/sandbox`.
+- [x] **E3a — the `internal/ebpf` package. Done 2026-09-15.** Loader + embedded
+  CO-RE object + non-Linux no-op stub. Ship decision locked: the `.bpf.o` is
+  compiled and committed, `go:embed`'d behind `//go:build linux`, so `go
+  install` needs no toolchain; `bpf/vmlinux.h` is generated, not committed; the
+  Makefile rebuilds. Best-effort: `New` never errors, unavailable everywhere it
+  cannot load. Verified — builds+vets on Linux and Windows, no-op contract test
+  passes both, and a root integration test loaded the embedded object and
+  attached both tracepoints on a real BTF kernel (`sudo go test -run RealKernel`
+  PASS, 2026-09-15).
+- **E3b — wire into `internal/scan`.** Start the monitor scoped to the launched
+  container before probing, drain its events after, map them to `trace` events
+  from a new `ebpf` source. **Finding rule (clean because the sandbox denies the
+  network):** in a `--network none` sandbox any `connect()` is unprovoked egress
+  → critical, matching the existing `unprovoked-network` class; a write to a
+  sensitive persistence path → critical. The event→finding mapping is a pure,
+  unit-testable function; keep it separate from the wiring.
+  — **Constraint discovered 2026-09-15:** attribution needs the container's
+  cgroup id, resolved from its host PID (`docker inspect` → `/proc/<pid>/cgroup`
+  → cgroup dir inode). Under the developer's **WSL2 + Docker Desktop** the
+  container lives in Docker's VM, invisible to the Ubuntu `/proc`, so the id
+  cannot be resolved and the monitor degrades to no-op locally. The live path is
+  therefore **only validatable on real-Docker Linux CI (E5)** — the same
+  platform split the decoy and postmark work hit. Build E3b test-first (unit
+  tests for the mapping and the cgid resolver) and let E5 prove the end-to-end.
 - **E4 — degradation gate.** A test proving a scan with eBPF unavailable is
   byte-identical to today, and a `DETONATE_REQUIRE_EBPF` that turns absence into
   failure on Linux CI the way `DETONATE_REQUIRE_DOCKER` does.
-- **E5 — CI.** A privileged Linux job that runs it; corpus fixtures marked
-  `requires_ebpf` where detection depends on it.
+  — *half delivered 2026-10-24 with E5a:* `DETONATE_REQUIRE_EBPF` exists and
+  is enforced on the privileged lane, with its parsing tested on every platform
+  (an exported-but-empty value must not count as a demand). The byte-identical
+  scan test is the remaining half and needs E3b, since there is no eBPF-shaped
+  scan output to compare yet.
+- [x] **E5a — the privileged CI lane. Done 2026-10-24.** A job that asserts the
+  runner's kernel exposes BTF, compiles the test binary as the normal user, and
+  runs the real-kernel test under `sudo` with `DETONATE_REQUIRE_EBPF=1` so a
+  skip cannot pass for a proof. Privilege is confined to the load; `go test` as
+  root would leave root-owned entries in the Go build cache. The job then
+  re-runs the package unprivileged, because an eBPF monitor that becomes a hard
+  dependency of a scan is a regression even when it works.
+  — *this is what settles the CO-RE portability claim.* The committed
+  `monitor.bpf.o` was compiled against one machine's BTF (WSL2, 6.18), and the
+  only machine that had ever loaded it was the machine that built it — an
+  argument, not a measurement. **Measured 2026-10-24:** it loads and attaches
+  both tracepoints on `6.17.0-1022-azure` (BTF present, 6,841,206 bytes), a
+  kernel nobody chose. `TestMonitorLoadsAndAttachesOnRealKernel` and
+  `TestCloseIsIdempotent` both PASS under root — not skipped, confirmed in the
+  job log.
+  — *the lane paid for itself on its first run,* which is the argument for
+  building it before E3b rather than after. It failed immediately on a real
+  defect in E3a's production code: `Close` closed its `done` channel
+  unconditionally, so a second call panicked with "close of closed channel".
+  `defer m.Close()` plus an explicit teardown is the idiomatic shape here and is
+  what a scan's teardown does, so this would have crashed the process in exactly
+  the path item 8 exists to protect. Fixed under a `sync.Once`, with the
+  contract asserted through the `Monitor` interface on every platform.
+
+- **E5b — corpus fixtures marked `requires_ebpf`** where detection depends on
+  it. Deferred until E3b, because nothing in a scan consumes eBPF events yet, so
+  there is no fixture whose outcome the marker would change.
 
 ### The other real-target gaps (recorded, ranked; eBPF leads by decision)
 

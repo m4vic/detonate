@@ -55,6 +55,64 @@ jobs:
           DETONATE_REQUIRE_DOCKER: '1'
         run: go test -race -count=1 -timeout 25m ./...
 
+  # E5: the privileged lane that proves the eBPF monitor actually loads.
+  #
+  # internal/ebpf ships a COMMITTED, pre-compiled CO-RE object, embedded with
+  # go:embed so `go install` needs no clang. That object was compiled against
+  # one developer machine's kernel BTF (WSL2, 6.18). The claim that it relocates
+  # against any kernel is the entire reason the generated vmlinux.h is not
+  # committed -- and until this job existed it was an argument, not a
+  # measurement, because the only machine that ever loaded it was the one that
+  # built it.
+  #
+  # So this runs the real-kernel test on a kernel nobody chose: whatever
+  # ubuntu-latest is this month. If the object stops relocating, this is what
+  # says so.
+  ebpf:
+    name: eBPF monitor loads on a real kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      # Checked before the test so a kernel without BTF fails in an obvious
+      # place, naming what is missing, rather than inside a Go skip.
+      - name: Confirm the kernel can support a CO-RE load
+        run: |
+          set -euo pipefail
+          uname -a
+          if [ ! -r /sys/kernel/btf/vmlinux ]; then
+            echo "::error::no readable /sys/kernel/btf/vmlinux on this runner; a CO-RE load cannot be validated"
+            exit 1
+          fi
+          echo "kernel BTF present: $(stat -c %s /sys/kernel/btf/vmlinux) bytes"
+
+      # Built as the normal user, then run under sudo. Running `go test`
+      # directly as root would populate the Go build cache with root-owned
+      # entries and break later cached steps; compiling first keeps privilege
+      # confined to the thing that actually needs it -- loading the program.
+      #
+      # DETONATE_REQUIRE_EBPF is passed on the sudo command line rather than
+      # relying on -E, because sudoers resets the environment by default and a
+      # silently dropped variable would turn this job back into one that passes
+      # by skipping.
+      - name: Load the embedded object and attach both tracepoints
+        run: |
+          set -euo pipefail
+          go test -c -o "${RUNNER_TEMP}/ebpf.test" ./internal/ebpf
+          sudo DETONATE_REQUIRE_EBPF=1 "${RUNNER_TEMP}/ebpf.test" -test.run 'TestMonitorLoadsAndAttachesOnRealKernel|TestCloseIsIdempotent' -test.v
+
+      # The additive contract, checked on the same runner: without privilege
+      # the monitor must degrade to a no-op and the package must still pass.
+      # An eBPF monitor that becomes a hard dependency is a regression even
+      # when it works.
+      - name: Unprivileged run still passes and degrades to no-op
+        run: go test -count=1 ./internal/ebpf
+
   # A normal checkout is already clean on GitHub, but extracting git archive
   # makes the invariant explicit: ignored and untracked developer files cannot
   # make this job pass. This caught cmd/detonate/main.go being present locally
