@@ -199,6 +199,14 @@ func normalizeToolResult(res *mcp.CallToolResult) (toolcall.Result, error) {
 // Stderr returns what the target has written so far. Implements probe.Caller.
 func (s *Session) Stderr() string { return s.container.Stderr() }
 
+// ContainerName is the sandbox container this session is running in.
+//
+// Exposed so the host-side syscall monitor can scope itself to exactly this
+// container: it resolves the container's cgroup and drops every event from any
+// other, which is what stops the monitor attributing a host process's
+// behaviour to the target.
+func (s *Session) ContainerName() string { return s.container.Name }
+
 // Close tears down the session and the container.
 func (s *Session) Close() error {
 	_ = s.session.Close()
