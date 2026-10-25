@@ -20,11 +20,25 @@ planted:
       source: decoy
       summary_contains: 'scripts/format.py" returned the contents'
 
+  # Matched against the eBPF source, not the decoy one. The decoy tier keys
+  # entirely on planted nonces, and a persistence write leaves none -- it
+  # writes attacker-controlled CODE to a file that holds no decoy -- so no
+  # decoy-sourced event can ever carry this. Pointing the match at `decoy`
+  # described a gap that could not close: eBPF would emit the finding, this
+  # line would still match nothing, the item would stay marked known_gap, and
+  # the set-equality gate would still pass. The gap would silently fail to
+  # close with no test saying so.
+  #
+  # Still known_gap until a PRIVILEGED corpus run proves it. eBPF needs root
+  # and a BTF kernel, so the ordinary unprivileged CI lane sees no ebpf events
+  # and this correctly stays open there. Closing it is E5b's job, and the gate
+  # will then fail until known_gap is removed -- which is the mechanism
+  # working, not breaking.
   - id: covert.persistence-no-token
     class: persistence
     where: 'setup_env.py appends a curl|sh implant to ~/.bashrc, leaving no planted token to match'
     expect: finding
     known_gap: true
     match:
-      source: decoy
+      source: ebpf
       summary_contains: '.bashrc'
