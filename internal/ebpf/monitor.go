@@ -44,6 +44,16 @@ type Monitor interface {
 	Close() error
 }
 
+// Unavailable returns a monitor that observes nothing.
+//
+// Exported so a caller that could not even get as far as New -- a cgroup it
+// could not resolve, or could not attribute to the target -- has the same
+// no-op to fall back on, instead of carrying a nil Monitor and a special case
+// for it. Every "eBPF is out of reach" path then looks identical at the call
+// site, which is what keeps the layer additive by construction rather than by
+// everyone remembering.
+func Unavailable() Monitor { return noopMonitor{} }
+
 // noopMonitor is returned wherever eBPF cannot run. Its Events channel is
 // closed, so callers range over nothing and need no special case.
 type noopMonitor struct{}

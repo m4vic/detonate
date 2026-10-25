@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/assessment"
@@ -237,6 +238,16 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		return nil, targetError("start", "mcp_start_failed", false, err)
 	}
 
+	// Attach the host-side syscall monitor to the container now that it
+	// exists, before anything is asked of the target. Best-effort by
+	// construction: every failure path yields a monitor that observes nothing
+	// and the scan proceeds exactly as it did before this layer existed.
+	runtimeMon := startRuntimeMonitor(ctx, sess.ContainerName())
+	defer runtimeMon.close()
+	if runtimeMon.available() {
+		p.step("  syscall-level observation active (connect, persistence writes)")
+	}
+
 	tools, err := sess.Tools(ctx)
 	if err != nil {
 		return nil, targetError("inventory", "mcp_inventory_failed", false, err)
@@ -261,6 +272,19 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// own API when we call it must not be confused with the server reaching
 	// out on its own; only the second is suspicious.
 	for _, ev := range monitor.Analyze(sess.Stderr(), "enumeration") {
+		tr.Add(ev)
+	}
+
+	// The same phase boundary, drawn at the syscall level. Taken here rather
+	// than once at the end so an attempt made just from being launched and
+	// asked for a tool list stays distinguishable from one a tool call
+	// provoked -- the distinction the stderr tier above exists to preserve,
+	// and the reason this is unprovoked egress rather than a tool doing its
+	// job.
+	for _, ev := range runtimeMon.attachedEvent("enumeration", time.Now()) {
+		tr.Add(ev)
+	}
+	for _, ev := range runtimeMon.take("enumeration", time.Now()) {
 		tr.Add(ev)
 	}
 
@@ -300,6 +324,13 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 		tr.Add(ev)
 	}
 	scenarios = append(scenarios, probeResult.Scenarios...)
+
+	// Syscalls observed while probing. This is the tier that sees egress
+	// entangled with normal tool operation -- the postmark shape, where a
+	// silent BCC writes nothing to stderr for the tier above to infer from.
+	for _, ev := range runtimeMon.take("probe", time.Now()) {
+		tr.Add(ev)
+	}
 
 	return &Report{
 		Tools: tools, Trace: tr,

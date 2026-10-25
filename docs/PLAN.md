@@ -401,29 +401,109 @@ the gap the work below closes.
   passes both, and a root integration test loaded the embedded object and
   attached both tracepoints on a real BTF kernel (`sudo go test -run RealKernel`
   PASS, 2026-09-15).
-- **E3b — wire into `internal/scan`.** Start the monitor scoped to the launched
-  container before probing, drain its events after, map them to `trace` events
-  from a new `ebpf` source. **Finding rule (clean because the sandbox denies the
-  network):** in a `--network none` sandbox any `connect()` is unprovoked egress
-  → critical, matching the existing `unprovoked-network` class; a write to a
-  sensitive persistence path → critical. The event→finding mapping is a pure,
-  unit-testable function; keep it separate from the wiring.
-  — **Constraint discovered 2026-09-15:** attribution needs the container's
-  cgroup id, resolved from its host PID (`docker inspect` → `/proc/<pid>/cgroup`
-  → cgroup dir inode). Under the developer's **WSL2 + Docker Desktop** the
-  container lives in Docker's VM, invisible to the Ubuntu `/proc`, so the id
-  cannot be resolved and the monitor degrades to no-op locally. The live path is
-  therefore **only validatable on real-Docker Linux CI (E5)** — the same
-  platform split the decoy and postmark work hit. Build E3b test-first (unit
-  tests for the mapping and the cgid resolver) and let E5 prove the end-to-end.
+- [x] **E3b1 — the two pure pieces. Done 2026-10-25.** The event-to-finding
+  mapping and the cgroup resolver, both decided from their inputs alone so the
+  policy is arguable without a kernel, a container or privilege. 80 assertions;
+  vet clean on linux, darwin and windows.
+  — *the mapping:* any `connect()` is critical, because the sandbox denies the
+  network and so nothing can have asked the target to talk to anything. A
+  write-intent open is critical only on a persistence path — the kernel already
+  dropped reads and foreign cgroups, so what arrives is every write a real
+  server makes, thousands of temp files and caches. Those evidence nothing and
+  would bury the report, so they are dropped rather than demoted to
+  observations. **The allowlist is the probe's scope.** Matched on basename and
+  ancestry, never substring: at critical severity a substring test for `cron`
+  fails somebody's build over `cronjob-parser.py`. `.bash_history` is
+  deliberately excluded — a shell writes it constantly and nothing executes it.
+  — *the resolver:* `docker inspect` to host PID to `/proc/<pid>/cgroup` to the
+  unified path to that directory's inode, which is what
+  `bpf_get_current_cgroup_id()` reports. A v1-only host is a refusal, not a v1
+  path. The mount is checked for the cgroup2 magic, because on a hybrid host
+  `/sys/fs/cgroup` is tmpfs and an inode from it is a valid number that is not a
+  cgroup id.
+  — *and the guard that matters most:* the resolved cgroup must **name** the
+  container. The PID from `docker inspect` is only a host PID when the daemon
+  shares this machine's PID namespace; under Docker Desktop it is a PID in the
+  daemon's VM, which will frequently also be a live unrelated process here.
+  Without the check `/proc/<pid>/cgroup` resolves, yields a real cgroup id, and
+  the monitor watches something that is not the target **while reporting itself
+  available**. Silence is recoverable; mis-attribution is not.
+  — *a corpus gap that could not close, fixed:* `covert.persistence-no-token`
+  matched `source: decoy`, but the decoy tier keys on planted nonces and a
+  persistence write leaves none, so no decoy-sourced event could ever carry it.
+  eBPF would emit the finding, the manifest would match nothing, the item would
+  stay `known_gap`, and the set-equality gate would still pass — the gap failing
+  to close with nothing saying so. Repointed at `source: ebpf`, and
+  `TestFindingsSatisfyTheCorpusGroundTruth` now replicates the corpus matcher
+  against both target fixtures so that whole class of drift is caught on any
+  platform instead of on a privileged run, or never.
+
+- [x] **E3b2 — the MCP scan path. Done 2026-10-25.** Attaches the monitor to the
+  launched container, snapshots its observations at each phase boundary, and
+  turns them into evidence.
+  — *additive by construction, which matters more than the detection.* Every
+  failure path — non-Linux, unprivileged, no BTF, cgroup unresolvable or
+  unattributable, Docker Desktop — ends at one place: a monitor that is not
+  available and contributes **nothing**. Not a finding, not an observation, not
+  a scenario. `TestUnavailableMonitorContributesNothing` pins it, because if
+  this layer ever adds even an observation while unavailable then every existing
+  report changes and every recorded corpus expectation needs re-baselining.
+  — *deliberately no new scenario, available or not.* `completeness()` skips
+  non-required scenarios, but `risk()` sets `assessed` from any scenario that
+  passed — so a passing `ebpf` scenario would flip a report from `not_assessed`
+  to `no_findings` on the strength of the monitor having attached, which proves
+  nothing about the target. Attachment is an info observation instead, because a
+  reader cannot otherwise tell whether `no_findings` was checked at the syscall
+  level or only inferred from stderr.
+  — *phase attribution:* taken at each boundary, not once at the end, because
+  the phase is what makes a network attempt meaningful — unprovoked at
+  enumeration, possibly a tool doing its job while probing. The kernel events
+  carry no phase, so it is drawn by when they are collected.
+  — *target-controlled volume is a budget:* capped at 4096 distinct
+  observations, truncation disclosed as an observation. The collector keeps
+  reading past the cap, because the monitor's reader blocks when its channel
+  fills and a blocked reader stops servicing the kernel ring buffer.
+  — **known window, recorded rather than glossed:** the monitor attaches *after*
+  the container starts, since the cgroup id does not exist until then. The gap
+  between the target's first instruction and the attach is invisible to this
+  tier. It is covered by the stderr tier — which is why `evil-mcp`'s import-time
+  egress is caught today — and closing it means pre-creating a cgroup and
+  passing `--cgroup-parent`, a sandbox policy change outside this milestone.
+  — *verified on Linux CI 2026-10-25:* `go test -race` with
+  `DETONATE_REQUIRE_DOCKER=1` passes, `internal/scan` in 14.2s with no data
+  race. The corpus gate asserts **exact detection sets**, so it passing with the
+  monitor wired into every MCP scan is the measurement that nothing moved.
+
+- **E3b3 — the skill scan path.** Not wired yet. A skill's scripts run in
+  containers owned by `internal/skill`, one per script, so the monitor has to
+  attach there rather than in `internal/scan`. Left separate so E3b2 could be
+  measured against an unprivileged CI run on its own.
+  **`covert.persistence-no-token` cannot close until this lands** — it is a
+  skill fixture, and only the MCP path observes syscalls today.
+
+  *Superseded by E3b1–E3b3 above, which is where this item was split once it was
+  built. The design it recorded held up: the finding rules are as written, the
+  mapping stayed pure and separate from the wiring, and the 2026-09-15
+  constraint was right — under WSL2 + Docker Desktop the container lives in the
+  daemon's VM and the cgroup id cannot be resolved, so the live path is only
+  validatable on real-Docker Linux CI. Building it surfaced one thing the design
+  had not: that an unresolvable cgroup is the safe failure, while a resolvable
+  but UNATTRIBUTABLE one is the dangerous one, because a VM PID is frequently
+  also a live host PID. See the guard in E3b1.*
+
 - **E4 — degradation gate.** A test proving a scan with eBPF unavailable is
   byte-identical to today, and a `DETONATE_REQUIRE_EBPF` that turns absence into
   failure on Linux CI the way `DETONATE_REQUIRE_DOCKER` does.
   — *half delivered 2026-10-24 with E5a:* `DETONATE_REQUIRE_EBPF` exists and
   is enforced on the privileged lane, with its parsing tested on every platform
-  (an exported-but-empty value must not count as a demand). The byte-identical
-  scan test is the remaining half and needs E3b, since there is no eBPF-shaped
-  scan output to compare yet.
+  (an exported-but-empty value must not count as a demand).
+  — *the degradation half landed 2026-10-25 with E3b2*, in two layers rather
+  than one test. `TestUnavailableMonitorContributesNothing` proves the layer
+  emits nothing at all when eBPF is out of reach, and the corpus gate — which
+  asserts exact detection sets — passing on an unprivileged Linux runner with
+  the monitor wired in is the end-to-end measurement that no report changed.
+  What remains for E4 proper is the privileged counterpart: a corpus run WITH
+  eBPF available, which is E5b.
 - [x] **E5a — the privileged CI lane. Done 2026-10-24.** A job that asserts the
   runner's kernel exposes BTF, compiles the test binary as the normal user, and
   runs the real-kernel test under `sudo` with `DETONATE_REQUIRE_EBPF=1` so a
