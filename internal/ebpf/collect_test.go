@@ -1,4 +1,4 @@
-package scan
+package ebpf
 
 import (
 	"context"
@@ -6,27 +6,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m4vic/detonate/internal/ebpf"
 	"github.com/m4vic/detonate/internal/trace"
 )
 
-var runtimeAt = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+var collectAt = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
 // fakeMonitor stands in for a kernel. The collector's job — drain, cap, snapshot
 // per phase — is all testable without privilege, a BTF kernel or a container,
 // which matters because the developer machine has none of those.
 type fakeMonitor struct {
-	events    chan ebpf.Event
+	events    chan Event
 	available bool
 	closed    bool
 }
 
 func newFakeMonitor(buffer int) *fakeMonitor {
-	return &fakeMonitor{events: make(chan ebpf.Event, buffer), available: true}
+	return &fakeMonitor{events: make(chan Event, buffer), available: true}
 }
 
-func (f *fakeMonitor) Events() <-chan ebpf.Event { return f.events }
-func (f *fakeMonitor) Available() bool           { return f.available }
+func (f *fakeMonitor) Events() <-chan Event { return f.events }
+func (f *fakeMonitor) Available() bool      { return f.available }
 func (f *fakeMonitor) Close() error {
 	if !f.closed {
 		f.closed = true
@@ -35,10 +34,10 @@ func (f *fakeMonitor) Close() error {
 	return nil
 }
 
-// startFake builds a collector around a fake monitor and starts draining,
-// mirroring what startRuntimeMonitor does once an attach succeeds.
-func startFake(f *fakeMonitor) *runtimeMonitor {
-	r := &runtimeMonitor{mon: f, drained: make(chan struct{})}
+// startFakeCollector builds a collector around a fake monitor and starts draining,
+// mirroring what Collect does once an attach succeeds.
+func startFakeCollector(f *fakeMonitor) *Collector {
+	r := &Collector{mon: f, drained: make(chan struct{})}
 	go r.collect()
 	return r
 }
@@ -56,21 +55,21 @@ func TestUnavailableMonitorContributesNothing(t *testing.T) {
 	// A container name that cannot resolve. On Windows and macOS the resolver
 	// refuses outright; on Linux docker inspect fails. Both are the path under
 	// test.
-	r := startRuntimeMonitor(context.Background(), "detonate-no-such-container")
-	defer r.close()
+	r := Collect(context.Background(), "detonate-no-such-container")
+	defer r.Close()
 
-	if r.available() {
+	if r.Available() {
 		t.Fatal("monitor reports available for a container that does not exist")
 	}
 	if r.reason == "" {
 		t.Error("an unavailable monitor did not record why")
 	}
 
-	if got := r.attachedEvent("enumeration", runtimeAt); got != nil {
+	if got := r.AttachedEvent("enumeration", collectAt); got != nil {
 		t.Errorf("attachedEvent returned %d event(s) while unavailable: %+v", len(got), got)
 	}
 	for _, phase := range []string{"enumeration", "probe"} {
-		if got := r.take(phase, runtimeAt); got != nil {
+		if got := r.Take(phase, collectAt); got != nil {
 			t.Errorf("take(%q) returned %d event(s) while unavailable: %+v",
 				phase, len(got), got)
 		}
@@ -80,10 +79,10 @@ func TestUnavailableMonitorContributesNothing(t *testing.T) {
 // close must be safe on an unavailable monitor, which is the common case on
 // every developer machine. It is called from a defer on every MCP scan.
 func TestClosingAnUnavailableMonitorIsSafeAndDoesNotHang(t *testing.T) {
-	r := startRuntimeMonitor(context.Background(), "detonate-no-such-container")
+	r := Collect(context.Background(), "detonate-no-such-container")
 
 	done := make(chan struct{})
-	go func() { r.close(); close(done) }()
+	go func() { r.Close(); close(done) }()
 
 	select {
 	case <-done:
@@ -99,32 +98,32 @@ func TestClosingAnUnavailableMonitorIsSafeAndDoesNotHang(t *testing.T) {
 // nothing is counted in two phases.
 func TestTakeAttributesToThePhaseAndClears(t *testing.T) {
 	f := newFakeMonitor(8)
-	r := startFake(f)
+	r := startFakeCollector(f)
 
-	f.events <- ebpf.Event{Kind: ebpf.KindConnect, PID: 1, Comm: "node", Dest: "203.0.113.1:443"}
+	f.events <- Event{Kind: KindConnect, PID: 1, Comm: "node", Dest: "203.0.113.1:443"}
 	waitForPending(t, r, 1)
 
-	enum := r.take("enumeration", runtimeAt)
+	enum := r.Take("enumeration", collectAt)
 	if len(enum) != 1 {
 		t.Fatalf("enumeration take returned %d events, want 1", len(enum))
 	}
 	if enum[0].During != "enumeration" {
 		t.Errorf("During = %q, want enumeration", enum[0].During)
 	}
-	if enum[0].Source != ebpf.Source {
-		t.Errorf("Source = %q, want %q", enum[0].Source, ebpf.Source)
+	if enum[0].Source != Source {
+		t.Errorf("Source = %q, want %q", enum[0].Source, Source)
 	}
 
 	// The same event must not reappear in the next phase.
-	if again := r.take("probe", runtimeAt); len(again) != 0 {
+	if again := r.Take("probe", collectAt); len(again) != 0 {
 		t.Fatalf("take did not clear; %d event(s) reported twice: %+v", len(again), again)
 	}
 
 	// A new event belongs to the phase it arrived in.
-	f.events <- ebpf.Event{Kind: ebpf.KindConnect, PID: 2, Comm: "node", Dest: "203.0.113.2:443"}
+	f.events <- Event{Kind: KindConnect, PID: 2, Comm: "node", Dest: "203.0.113.2:443"}
 	waitForPending(t, r, 1)
 
-	probePhase := r.take("probe", runtimeAt)
+	probePhase := r.Take("probe", collectAt)
 	if len(probePhase) != 1 {
 		t.Fatalf("probe take returned %d events, want 1", len(probePhase))
 	}
@@ -132,7 +131,7 @@ func TestTakeAttributesToThePhaseAndClears(t *testing.T) {
 		t.Errorf("During = %q, want probe", probePhase[0].During)
 	}
 
-	r.close()
+	r.Close()
 }
 
 // The event count is target-controlled, so it is a budget. A loop calling
@@ -141,21 +140,21 @@ func TestTakeAttributesToThePhaseAndClears(t *testing.T) {
 // finding about the target.
 func TestHostileEventVolumeIsCappedAndDisclosed(t *testing.T) {
 	f := newFakeMonitor(1)
-	r := startFake(f)
+	r := startFakeCollector(f)
 
 	// Each event is a distinct destination, so dedup cannot collapse them and
 	// the cap is what has to hold.
-	total := maxRuntimeEvents + 500
+	total := maxCollectedEvents + 500
 	for i := 0; i < total; i++ {
-		f.events <- ebpf.Event{
-			Kind: ebpf.KindConnect,
+		f.events <- Event{
+			Kind: KindConnect,
 			Dest: netAddr(i),
 		}
 	}
 	// Everything accepted has been queued; the cap is already reached.
-	waitForPending(t, r, maxRuntimeEvents)
+	waitForPending(t, r, maxCollectedEvents)
 
-	got := r.take("probe", runtimeAt)
+	got := r.Take("probe", collectAt)
 
 	var findings, observations int
 	var truncation string
@@ -170,8 +169,8 @@ func TestHostileEventVolumeIsCappedAndDisclosed(t *testing.T) {
 		findings++
 	}
 
-	if findings > maxRuntimeEvents {
-		t.Errorf("held %d findings, over the %d cap", findings, maxRuntimeEvents)
+	if findings > maxCollectedEvents {
+		t.Errorf("held %d findings, over the %d cap", findings, maxCollectedEvents)
 	}
 	// Truncation must be disclosed, and as an observation: hitting the cap
 	// says something about the volume of activity, not about whether any of it
@@ -183,7 +182,7 @@ func TestHostileEventVolumeIsCappedAndDisclosed(t *testing.T) {
 		t.Error("truncation was recorded at a severity that would drive the verdict")
 	}
 
-	r.close()
+	r.Close()
 }
 
 // After the cap, the collector must keep reading. The monitor's own reader
@@ -192,15 +191,15 @@ func TestHostileEventVolumeIsCappedAndDisclosed(t *testing.T) {
 // push back into the kernel.
 func TestCollectorKeepsDrainingAfterTheCap(t *testing.T) {
 	f := newFakeMonitor(1)
-	r := startFake(f)
+	r := startFakeCollector(f)
 
 	// Far more than the cap, through a buffer of one. If the collector stopped
 	// reading at the cap, these sends would block forever and the test would
 	// time out rather than fail.
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < maxRuntimeEvents*2; i++ {
-			f.events <- ebpf.Event{Kind: ebpf.KindConnect, Dest: netAddr(i)}
+		for i := 0; i < maxCollectedEvents*2; i++ {
+			f.events <- Event{Kind: KindConnect, Dest: netAddr(i)}
 		}
 		close(done)
 	}()
@@ -211,21 +210,21 @@ func TestCollectorKeepsDrainingAfterTheCap(t *testing.T) {
 		t.Fatal("the collector stopped draining after the cap; the kernel ring buffer would back up")
 	}
 
-	r.close()
+	r.Close()
 }
 
 // close must wait for the collector, or a take after close could race a drain
 // still in flight and silently drop the last observations of a scan.
 func TestCloseWaitsForTheCollector(t *testing.T) {
 	f := newFakeMonitor(4)
-	r := startFake(f)
+	r := startFakeCollector(f)
 
-	f.events <- ebpf.Event{Kind: ebpf.KindOpenWrite, Path: "/home/app/.bashrc"}
-	r.close()
+	f.events <- Event{Kind: KindOpenWrite, Path: "/home/app/.bashrc"}
+	r.Close()
 
 	// After close the drain has finished, so whatever was observed is readable
 	// without a race.
-	got := r.take("probe", runtimeAt)
+	got := r.Take("probe", collectAt)
 	if len(got) != 1 {
 		t.Fatalf("got %d events after close, want the 1 that was observed", len(got))
 	}
@@ -239,10 +238,10 @@ func TestCloseWaitsForTheCollector(t *testing.T) {
 // risk verdict for every scan that merely managed to attach.
 func TestAttachedEventIsAnObservationNotAFinding(t *testing.T) {
 	f := newFakeMonitor(1)
-	r := startFake(f)
-	defer r.close()
+	r := startFakeCollector(f)
+	defer r.Close()
 
-	got := r.attachedEvent("enumeration", runtimeAt)
+	got := r.AttachedEvent("enumeration", collectAt)
 	if len(got) != 1 {
 		t.Fatalf("got %d events, want 1", len(got))
 	}
@@ -250,14 +249,14 @@ func TestAttachedEventIsAnObservationNotAFinding(t *testing.T) {
 		t.Errorf("severity = %q, want info; an attached monitor is not evidence "+
 			"about the target", got[0].Severity)
 	}
-	if got[0].Source != ebpf.Source {
-		t.Errorf("source = %q, want %q", got[0].Source, ebpf.Source)
+	if got[0].Source != Source {
+		t.Errorf("source = %q, want %q", got[0].Source, Source)
 	}
 }
 
 // waitForPending blocks until the collector has buffered at least n events, so
 // tests do not race the drain goroutine.
-func waitForPending(t *testing.T, r *runtimeMonitor, n int) {
+func waitForPending(t *testing.T, r *Collector, n int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -287,4 +286,56 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b)
+}
+
+// The skill path closes the collector explicitly once the container is gone,
+// and also defers a Close for its early returns — so Close runs twice on every
+// successful script. It has to be safe, and the second call must not block on
+// a drain channel that is already closed.
+//
+// Pinned rather than assumed, because this is the same shape that crashed the
+// monitor itself: Close there closed an already-closed channel and panicked,
+// and the privileged CI lane is what found it.
+func TestCollectorCloseIsIdempotent(t *testing.T) {
+	f := newFakeMonitor(2)
+	r := startFakeCollector(f)
+
+	f.events <- Event{Kind: KindOpenWrite, Path: "/home/app/.bashrc"}
+
+	done := make(chan struct{})
+	go func() {
+		r.Close()
+		r.Close()
+		r.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a repeated Close blocked; the skill path calls it twice on every script")
+	}
+
+	// What was observed survives repeated closes.
+	if got := r.Take("probe", collectAt); len(got) != 1 {
+		t.Fatalf("got %d events after three closes, want the 1 observed", len(got))
+	}
+}
+
+// A nil collector must be safe on every method. Nothing constructs one today,
+// but the methods are exported and the layer's whole promise is that its
+// absence costs nothing.
+func TestNilCollectorIsSafe(t *testing.T) {
+	var r *Collector
+
+	if r.Available() {
+		t.Error("a nil collector reports available")
+	}
+	if got := r.Take("probe", collectAt); got != nil {
+		t.Errorf("Take on a nil collector returned %+v", got)
+	}
+	if got := r.AttachedEvent("probe", collectAt); got != nil {
+		t.Errorf("AttachedEvent on a nil collector returned %+v", got)
+	}
+	r.Close() // must not panic
 }

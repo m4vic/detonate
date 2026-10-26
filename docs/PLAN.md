@@ -474,12 +474,39 @@ the gap the work below closes.
   race. The corpus gate asserts **exact detection sets**, so it passing with the
   monitor wired into every MCP scan is the measurement that nothing moved.
 
-- **E3b3 — the skill scan path.** Not wired yet. A skill's scripts run in
-  containers owned by `internal/skill`, one per script, so the monitor has to
-  attach there rather than in `internal/scan`. Left separate so E3b2 could be
-  measured against an unprivileged CI run on its own.
-  **`covert.persistence-no-token` cannot close until this lands** — it is a
-  skill fixture, and only the MCP path observes syscalls today.
+- [x] **E3b3 — the skill scan path. Done 2026-10-26.** The half the persistence
+  gap actually needs: `covert.persistence-no-token` is a skill fixture, so no
+  amount of MCP-side wiring could ever have closed it.
+  — *the collector moved to `internal/ebpf`.* It was in `internal/scan`, which
+  cannot work — `internal/scan` imports `internal/skill`, so a collector there
+  is unreachable from the skill path. `internal/ebpf` is also its natural home,
+  since nothing in it knows what a scan or a skill is.
+  — *per script, not per skill.* Each script runs in its own container with its
+  own cgroup, so one collector per skill would be scoped to whichever container
+  came first and would see nothing from the rest.
+  — *why this tier is the only one that can see it:* the decoy design keys
+  entirely on planted nonces, and a script appending a `curl | sh` implant to
+  `~/.bashrc` writes attacker-controlled **code** to a file holding no decoy.
+  There is nothing for a token match to find, however carefully it looks.
+  — *`assembleScriptEvents` extracted,* because the ordering encodes a rule
+  that is easy to break and impossible to test through the runner, which needs
+  Docker and a container. Every tier that says something about the script is
+  folded in BEFORE the "ran with no observable misbehaviour" note is decided —
+  a `~/.bashrc` write reported next to that note is a report arguing with
+  itself. The attached note is appended AFTER that decision, because whether
+  the monitor attached is a fact about the scan rather than the script: it must
+  not be why a reader stops being told the script ran, and it must not stand in
+  for that line, since "observation was active" tells nobody the script
+  executed. **That regression would be invisible on an unprivileged run**,
+  where there is no attach note at all.
+  — *a teardown failure no longer discards what was already observed.* The
+  collector is closed before `Take` on that path too, so a persistence write
+  that was seen is still reported; the outcome still collapses completeness.
+  — *verified on Linux CI 2026-10-26:* `go test -race` with
+  `DETONATE_REQUIRE_DOCKER=1` passes — `internal/scan` 14.3s, `internal/skill`
+  1.4s, `internal/ebpf` 1.1s, no data race. The corpus gate asserts exact
+  detection sets, so it passing with the monitor wired into both target kinds
+  is the measurement that nothing moved for anyone without privilege.
 
   *Superseded by E3b1–E3b3 above, which is where this item was split once it was
   built. The design it recorded held up: the finding rules are as written, the
@@ -528,9 +555,22 @@ the gap the work below closes.
   the path item 8 exists to protect. Fixed under a `sync.Once`, with the
   contract asserted through the `Monitor` interface on every platform.
 
-- **E5b — corpus fixtures marked `requires_ebpf`** where detection depends on
-  it. Deferred until E3b, because nothing in a scan consumes eBPF events yet, so
-  there is no fixture whose outcome the marker would change.
+- **E5b — the privileged corpus run.** Now the only thing standing between the
+  built work and the two gaps it was defined to close. Both target kinds observe
+  syscalls as of E3b3, and both fixtures' manifests match on `source: ebpf`, so
+  a corpus run WITH privilege is what flips
+  `evil-mcp-postmark:postmark.covert-bcc` and
+  `evil-skill-covert:covert.persistence-no-token` from gap to caught.
+  — *and the gate will fail when it works*, which is the mechanism rather than
+  a problem: set equality means a `known_gap` that starts passing is an error
+  until the manifest stops calling it open. Removing those two flags is the last
+  step, not an oversight to fix afterwards.
+  — *needs deciding:* whether the privileged lane runs the whole corpus (slow,
+  needs Docker AND root together) or only the two fixtures that depend on eBPF,
+  and whether `requires_ebpf` becomes a real field in `ground-truth.yaml` or
+  stays an implicit property of matching on `source: ebpf`. Marking it in the
+  manifest is probably right, so an unprivileged run can say "this fixture was
+  not fully exercised" rather than silently scoring it as a recorded gap.
 
 ### The other real-target gaps (recorded, ranked; eBPF leads by decision)
 
