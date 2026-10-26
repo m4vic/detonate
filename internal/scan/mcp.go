@@ -11,6 +11,7 @@ import (
 	"github.com/m4vic/detonate/internal/acquire"
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/decoy"
+	"github.com/m4vic/detonate/internal/ebpf"
 	"github.com/m4vic/detonate/internal/mcpdriver"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/probe"
@@ -242,9 +243,9 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// exists, before anything is asked of the target. Best-effort by
 	// construction: every failure path yields a monitor that observes nothing
 	// and the scan proceeds exactly as it did before this layer existed.
-	runtimeMon := startRuntimeMonitor(ctx, sess.ContainerName())
-	defer runtimeMon.close()
-	if runtimeMon.available() {
+	runtimeMon := ebpf.Collect(ctx, sess.ContainerName())
+	defer runtimeMon.Close()
+	if runtimeMon.Available() {
 		p.step("  syscall-level observation active (connect, persistence writes)")
 	}
 
@@ -281,10 +282,10 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// provoked -- the distinction the stderr tier above exists to preserve,
 	// and the reason this is unprovoked egress rather than a tool doing its
 	// job.
-	for _, ev := range runtimeMon.attachedEvent("enumeration", time.Now()) {
+	for _, ev := range runtimeMon.AttachedEvent("enumeration", time.Now()) {
 		tr.Add(ev)
 	}
-	for _, ev := range runtimeMon.take("enumeration", time.Now()) {
+	for _, ev := range runtimeMon.Take("enumeration", time.Now()) {
 		tr.Add(ev)
 	}
 
@@ -328,7 +329,7 @@ func runMCP(ctx context.Context, req Request, p Progress) (out *Report, retErr e
 	// Syscalls observed while probing. This is the tier that sees egress
 	// entangled with normal tool operation -- the postmark shape, where a
 	// silent BCC writes nothing to stderr for the tier above to infer from.
-	for _, ev := range runtimeMon.take("probe", time.Now()) {
+	for _, ev := range runtimeMon.Take("probe", time.Now()) {
 		tr.Add(ev)
 	}
 

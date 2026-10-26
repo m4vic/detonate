@@ -12,6 +12,7 @@ import (
 
 	"github.com/m4vic/detonate/internal/assessment"
 	"github.com/m4vic/detonate/internal/decoy"
+	"github.com/m4vic/detonate/internal/ebpf"
 	"github.com/m4vic/detonate/internal/monitor"
 	"github.com/m4vic/detonate/internal/sandbox"
 	scenariodef "github.com/m4vic/detonate/internal/scenario"
@@ -196,6 +197,21 @@ func runScriptWithOutcome(
 			Detail: map[string]any{"evidence": err.Error()},
 		}}, assessment.OutcomeTargetError, err.Error()
 	}
+	// Attach the host-side syscall monitor to this script's container.
+	//
+	// Per script, not per skill: each script runs in its own container with its
+	// own cgroup, so one collector per skill would be scoped to whichever
+	// container happened to be first and would see nothing from the rest.
+	//
+	// This is the tier that catches a persistence write. The decoy tier keys
+	// entirely on planted nonces, and a script appending a `curl | sh` implant
+	// to ~/.bashrc writes attacker-controlled CODE to a file holding no decoy
+	// -- so there is nothing for the token match to find, however carefully it
+	// looks. Best-effort as everywhere: unavailable costs nothing and reports
+	// nothing.
+	syscalls := ebpf.Collect(runCtx, name)
+	defer syscalls.Close()
+
 	// Drain stdout into a buffer instead of discarding it: a script that
 	// returns a planted secret on stdout (its normal "result" channel, unlike
 	// an MCP tool's structured response) has to be caught the same way a tool
@@ -217,7 +233,13 @@ func runScriptWithOutcome(
 	during := "skill-detonation:" + script
 	stderr := c.Stderr()
 	if err := c.Close(); err != nil {
-		return monitor.Analyze(stderr, during), assessment.OutcomeTeardownError, err.Error()
+		// Closed before Take so the drain has finished: a teardown failure is
+		// no reason to throw away a persistence write that was already
+		// observed. The outcome still collapses completeness, as it must.
+		syscalls.Close()
+		events := monitor.Analyze(stderr, during)
+		events = append(events, syscalls.Take(during, time.Now())...)
+		return events, assessment.OutcomeTeardownError, err.Error()
 	}
 	// Close tears the container down, which closes the stdout pipe and lets
 	// the drain goroutine above finish even when it timed out. Waiting here,
@@ -225,19 +247,20 @@ func runScriptWithOutcome(
 	// race-free.
 	<-done
 
-	events := monitor.Analyze(stderr, during)
-	events = append(events, decoyLeakEvents(den, leaked, script, stdout.String()+stderr)...)
+	// The container is gone, so no further syscalls can arrive. Closing the
+	// collector here rather than leaving it to the deferred Close is what
+	// guarantees the drain has finished before Take reads it; Close is
+	// idempotent, so the defer above stays correct for the early returns.
+	syscalls.Close()
 
-	// A script that merely EXISTS and runs is worth noting even when it
-	// misbehaves in no detectable way, because a reader deciding whether to
-	// trust a skill wants to know code executed at all.
-	if len(events) == 0 {
-		events = append(events, trace.Event{
-			Kind: trace.KindProcess, Severity: trace.SeverityInfo, At: time.Now(),
-			Summary: fmt.Sprintf("bundled script %q ran with no observable misbehaviour", script),
-			During:  during, Source: "skill-runner",
-		})
-	}
+	now := time.Now()
+	events := assembleScriptEvents(
+		script, during, now,
+		monitor.Analyze(stderr, during),
+		decoyLeakEvents(den, leaked, script, stdout.String()+stderr),
+		syscalls.Take(during, now),
+		syscalls.AttachedEvent(during, now),
+	)
 	if timedOut {
 		return events, assessment.OutcomeTimeout, "script exceeded its execution budget"
 	}
@@ -257,6 +280,49 @@ func runScriptWithOutcome(
 // stdout and stderr, in the same shape probe's decoy check uses for MCP tool
 // responses — critical severity, one event per token, keyed so the same
 // secret is not reported twice for the same script.
+// assembleScriptEvents puts together what one script run observed.
+//
+// Extracted from runScript because the ordering below encodes a rule that is
+// easy to break and impossible to test through the runner, which needs Docker
+// and a container: the "no observable misbehaviour" note must be decided
+// AFTER every tier that can contradict it has been folded in, and must not be
+// suppressed by the one tier that cannot.
+//
+//   - stderr, decoy and syscall observations are all evidence about the
+//     script, so any of them means there was something to say.
+//   - the no-misbehaviour note then fills the silence. A reader deciding
+//     whether to trust a skill wants to know code executed at all, so the
+//     absence of findings is itself worth a line.
+//   - the monitor-attached note is appended last, after that decision. It is a
+//     fact about the scan rather than about the script, so it must never be
+//     the reason the reader stops being told the script ran -- and it must
+//     never stand in for the note, because "observation was active" does not
+//     tell anyone the script executed.
+//
+// Reporting a ~/.bashrc write next to "ran with no observable misbehaviour"
+// would be a report arguing with itself, which is the specific outcome this
+// ordering prevents.
+func assembleScriptEvents(
+	script, during string,
+	now time.Time,
+	stderrEvents, decoyEvents, syscallEvents, attachedEvents []trace.Event,
+) []trace.Event {
+	var events []trace.Event
+	events = append(events, stderrEvents...)
+	events = append(events, decoyEvents...)
+	events = append(events, syscallEvents...)
+
+	if len(events) == 0 {
+		events = append(events, trace.Event{
+			Kind: trace.KindProcess, Severity: trace.SeverityInfo, At: now,
+			Summary: fmt.Sprintf("bundled script %q ran with no observable misbehaviour", script),
+			During:  during, Source: "skill-runner",
+		})
+	}
+
+	return append(events, attachedEvents...)
+}
+
 func decoyLeakEvents(den *decoy.Environment, seen map[string]bool, script, output string) []trace.Event {
 	if den == nil || output == "" {
 		return nil
